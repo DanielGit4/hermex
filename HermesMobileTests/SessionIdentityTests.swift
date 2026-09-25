@@ -441,6 +441,7 @@ final class SidebarSectionVisibilityTests: XCTestCase {
         XCTAssertTrue(visibility.tasks)
         XCTAssertTrue(visibility.kanban)
         XCTAssertTrue(visibility.skills)
+        XCTAssertTrue(visibility.dashboard)
         XCTAssertTrue(visibility.memory)
         XCTAssertTrue(visibility.insights)
         XCTAssertTrue(visibility.activeProfile)
@@ -465,9 +466,24 @@ final class SidebarSectionVisibilityTests: XCTestCase {
         visibility.skills = false
         visibility.memory = false
         visibility.insights = false
+        visibility.dashboard = false
 
         XCTAssertTrue(visibility.showsAnyUtilityLink, "the Bots row keeps the row alive while Bot Mode is on")
         visibility.bots = false
+        XCTAssertFalse(visibility.showsAnyUtilityLink)
+    }
+
+    func testDashboardRowAloneKeepsTheUtilityLinkRow() {
+        var visibility = SidebarSectionVisibility.showAll
+        visibility.bots = false
+        visibility.tasks = false
+        visibility.kanban = false
+        visibility.skills = false
+        visibility.memory = false
+        visibility.insights = false
+
+        XCTAssertTrue(visibility.showsAnyUtilityLink, "a saved Bot connection shows the Dashboard row")
+        visibility.dashboard = false
         XCTAssertFalse(visibility.showsAnyUtilityLink)
     }
 

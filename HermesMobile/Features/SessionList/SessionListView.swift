@@ -85,6 +85,9 @@ struct SessionListView: View {
     @AppStorage(SessionIdentitySettings.initialsKey) private var identityInitials = ""
     @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
     @AppStorage(BotModeGate.isEnabledKey) private var isBotModeEnabled = false
+    /// Whether this server has a saved Bot connection, which the Dashboard row needs. Re-read
+    /// on appear and on every navigation change, since the connection is edited in Bots.
+    @State private var hasBotConnection = false
 
     init(
         authManager: AuthManager,
@@ -158,6 +161,12 @@ struct SessionListView: View {
             // Turning the gate off while the Bots inbox is open pops back to the list.
             .onChange(of: isBotModeEnabled) {
                 if !isBotModeEnabled, navigationState.destination == .utility(.bots) {
+                    navigationState.clearDestination()
+                }
+            }
+            // Removing the Bot connection closes the Dashboard it signed in to.
+            .onChange(of: hasBotConnection) {
+                if !hasBotConnection, navigationState.destination == .utility(.dashboard) {
                     navigationState.clearDestination()
                 }
             }
@@ -319,6 +328,7 @@ struct SessionListView: View {
                 openPendingSharedImportIfNeeded()
                 openRequestedNewChatIfNeeded()
                 refreshAfterReturningIfNeeded()
+                refreshBotConnection()
             }
             .onDisappear {
                 ratingRequestID = nil
@@ -360,6 +370,7 @@ struct SessionListView: View {
                     suppressEmptyPlaceholders: viewModel.removeEmptySidebarPlaceholders,
                     refreshSessions: refreshAfterReturningIfNeeded
                 )
+                refreshBotConnection()
             }
             .modifier(
                 SessionActionConfirmations(
@@ -543,6 +554,8 @@ struct SessionListView: View {
                 KanbanView(server: server, onAPIError: authManager.handleAPIError)
             case .skills:
                 SkillsView(server: server, onAPIError: authManager.handleAPIError)
+            case .dashboard:
+                DashboardView(server: server)
             case .memory:
                 MemoryView(server: server, onAPIError: authManager.handleAPIError)
             case .insights:
@@ -888,6 +901,7 @@ struct SessionListView: View {
             tasks: showsTasksSection,
             kanban: showsKanbanSection,
             skills: showsSkillsSection,
+            dashboard: hasBotConnection,
             memory: showsMemorySection,
             insights: showsInsightsSection,
             activeProfile: showsActiveProfileSection,
@@ -1471,6 +1485,10 @@ struct SessionListView: View {
         navigationState.select(utility)
     }
 
+    private func refreshBotConnection() {
+        hasBotConnection = (try? BotConnectionStore().load(server: server)) != nil
+    }
+
     private func startOpeningSession(_ session: SessionSummary) {
         sessionOpenTask?.cancel()
         sessionOpenTask = Task { await openSession(session) }
@@ -1698,6 +1716,8 @@ enum SessionListUtilityDestination: Hashable, Identifiable {
     case tasks
     case kanban
     case skills
+    /// The Hermes host's dashboard over the saved Bot connection, shown while one exists.
+    case dashboard
     case memory
     case insights
     /// Archived sessions screen (issue #17), also reachable from Settings.

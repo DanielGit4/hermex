@@ -477,6 +477,16 @@
 		7EF4120B486B4243AF54FCAF /* BotsInboxView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9FE221A56F264309AF71E18B /* BotsInboxView.swift */; };
 		A27FAACA0A9243C5AD4860BB /* BotClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF2EA5336E9B431489F91A63 /* BotClient.swift */; };
 		490BBC30DF0FD97DB0850771 /* BotDashboardClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02620AA1CBC865AE71DB7C5C /* BotDashboardClient.swift */; };
+		DA5B000000000000000000B1 /* DashboardClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F1 /* DashboardClient.swift */; };
+		DA5B000000000000000000B2 /* DashboardSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F2 /* DashboardSupport.swift */; };
+		DA5B000000000000000000B3 /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F3 /* DashboardView.swift */; };
+		DA5B000000000000000000B4 /* SkillsHubModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F4 /* SkillsHubModels.swift */; };
+		DA5B000000000000000000B5 /* SkillsHubViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F5 /* SkillsHubViewModel.swift */; };
+		DA5B000000000000000000B6 /* SkillsHubView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F6 /* SkillsHubView.swift */; };
+		DA5B000000000000000000B7 /* SkillsHubDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F7 /* SkillsHubDetailView.swift */; };
+		DA5B000000000000000000B8 /* DashboardClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F8 /* DashboardClientTests.swift */; };
+		DA5B000000000000000000B9 /* SkillsHubDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F9 /* SkillsHubDecodingTests.swift */; };
+		DA5B000000000000000000BA /* SkillsHubViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000FA /* SkillsHubViewModelTests.swift */; };
 		A990ABE1D2654992AD262B77 /* BotProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5619C4EB852849D396C45F95 /* BotProtocol.swift */; };
 		9510188AE84E41D9BAE025F1 /* BotConversationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B077A87C9D846D7A9D27D76 /* BotConversationTests.swift */; };
 		9510188AE84E41D9BAE025FA /* BotPendingRequestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B077A87C9D846D7A9D27D7A /* BotPendingRequestTests.swift */; };
@@ -1051,6 +1061,16 @@
 		9FE221A56F264309AF71E18B /* BotsInboxView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bots/BotsInboxView.swift"; sourceTree = "<group>"; };
 		BF2EA5336E9B431489F91A63 /* BotClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bots/BotClient.swift"; sourceTree = "<group>"; };
 		02620AA1CBC865AE71DB7C5C /* BotDashboardClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bots/BotDashboardClient.swift"; sourceTree = "<group>"; };
+		DA5B000000000000000000F1 /* DashboardClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bots/DashboardClient.swift"; sourceTree = "<group>"; };
+		DA5B000000000000000000F2 /* DashboardSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardSupport.swift; sourceTree = "<group>"; };
+		DA5B000000000000000000F3 /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		DA5B000000000000000000F4 /* SkillsHubModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsHubModels.swift; sourceTree = "<group>"; };
+		DA5B000000000000000000F5 /* SkillsHubViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsHubViewModel.swift; sourceTree = "<group>"; };
+		DA5B000000000000000000F6 /* SkillsHubView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsHubView.swift; sourceTree = "<group>"; };
+		DA5B000000000000000000F7 /* SkillsHubDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsHubDetailView.swift; sourceTree = "<group>"; };
+		DA5B000000000000000000F8 /* DashboardClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardClientTests.swift; sourceTree = "<group>"; };
+		DA5B000000000000000000F9 /* SkillsHubDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsHubDecodingTests.swift; sourceTree = "<group>"; };
+		DA5B000000000000000000FA /* SkillsHubViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsHubViewModelTests.swift; sourceTree = "<group>"; };
 		5619C4EB852849D396C45F95 /* BotProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bots/BotProtocol.swift"; sourceTree = "<group>"; };
 		0B077A87C9D846D7A9D27D76 /* BotConversationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BotConversationTests.swift"; sourceTree = "<group>"; };
 		0B077A87C9D846D7A9D27D7A /* BotPendingRequestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BotPendingRequestTests.swift"; sourceTree = "<group>"; };
@@ -1236,6 +1256,9 @@
 				A496B07E0000000000000002 /* BotModeGateTests.swift */,
 				A496B07E0000000000000004 /* BotConnectionVersionTests.swift */,
 				2F45F15CC7743DD0EF843B5E /* HermexPushProvisioningTests.swift */,
+				DA5B000000000000000000F8 /* DashboardClientTests.swift */,
+				DA5B000000000000000000F9 /* SkillsHubDecodingTests.swift */,
+				DA5B000000000000000000FA /* SkillsHubViewModelTests.swift */,
 				A4730000000000000000A004 /* BotAvatarTests.swift */,
 				A4750000000000000000B006 /* BotActivityTests.swift */,
 				A4770000000000000000D006 /* BotDelegatedWorkTests.swift */,
@@ -1418,6 +1441,7 @@
 				5619C4EB852849D396C45F95 /* BotProtocol.swift */,
 				BF2EA5336E9B431489F91A63 /* BotClient.swift */,
 				02620AA1CBC865AE71DB7C5C /* BotDashboardClient.swift */,
+				DA5B000000000000000000F1 /* DashboardClient.swift */,
 				D2FB3FA2B0654D06B7B2B032 /* BotArtifactDownload.swift */,
 				B6923C3D8C6C4822BEF3C41C /* BotAttachmentUpload.swift */,
 				1A2B3C4D5E6F7000000000B2 /* APIClient.swift */,
@@ -1545,6 +1569,7 @@
 				B5A100000000000000000050 /* Share */,
 				3F91D2A54B9A4F66A2C01020 /* Tasks */,
 				1A2B3C4D5E6F70000000216 /* Skills */,
+				DA5B000000000000000000C1 /* Dashboard */,
 				1A2B3C4D5E6F70000000206 /* Memory */,
 				B50E1CE3A8912B92B1924714 /* Insights */,
 				C1490000000000000000000D /* Kanban */,
@@ -1910,6 +1935,19 @@
 				1A2B3C4D5E6F70000000215 /* SkillsViewModel.swift */,
 			);
 			path = Skills;
+			sourceTree = "<group>";
+		};
+		DA5B000000000000000000C1 /* Dashboard */ = {
+			isa = PBXGroup;
+			children = (
+				DA5B000000000000000000F2 /* DashboardSupport.swift */,
+				DA5B000000000000000000F3 /* DashboardView.swift */,
+				DA5B000000000000000000F4 /* SkillsHubModels.swift */,
+				DA5B000000000000000000F5 /* SkillsHubViewModel.swift */,
+				DA5B000000000000000000F6 /* SkillsHubView.swift */,
+				DA5B000000000000000000F7 /* SkillsHubDetailView.swift */,
+			);
+			path = Dashboard;
 			sourceTree = "<group>";
 		};
 		3F91D2A54B9A4F66A2C01020 /* Tasks */ = {
@@ -2485,6 +2523,13 @@
 				1A2B3C4D5E6F70000000204 /* MemoryViewModel.swift in Sources */,
 				1A2B3C4D5E6F70000000210 /* Skills.swift in Sources */,
 				1A2B3C4D5E6F70000000212 /* SkillsView.swift in Sources */,
+				DA5B000000000000000000B1 /* DashboardClient.swift in Sources */,
+				DA5B000000000000000000B2 /* DashboardSupport.swift in Sources */,
+				DA5B000000000000000000B3 /* DashboardView.swift in Sources */,
+				DA5B000000000000000000B4 /* SkillsHubModels.swift in Sources */,
+				DA5B000000000000000000B5 /* SkillsHubViewModel.swift in Sources */,
+				DA5B000000000000000000B6 /* SkillsHubView.swift in Sources */,
+				DA5B000000000000000000B7 /* SkillsHubDetailView.swift in Sources */,
 				1A2B3C4D5E6F70000000214 /* SkillsViewModel.swift in Sources */,
 				36CD9EF0B0734E5F8C28BB92 /* SlashCommand.swift in Sources */,
 				941A67322EB54169A55D7A64 /* SlashCommandCatalog.swift in Sources */,
@@ -2532,6 +2577,9 @@
 				A496B07E0000000000000001 /* BotModeGateTests.swift in Sources */,
 				A496B07E0000000000000003 /* BotConnectionVersionTests.swift in Sources */,
 				1331AA23B3B0713A5896D0A3 /* HermexPushProvisioningTests.swift in Sources */,
+				DA5B000000000000000000B8 /* DashboardClientTests.swift in Sources */,
+				DA5B000000000000000000B9 /* SkillsHubDecodingTests.swift in Sources */,
+				DA5B000000000000000000BA /* SkillsHubViewModelTests.swift in Sources */,
 				A4730000000000000000A003 /* BotAvatarTests.swift in Sources */,
 				A4750000000000000000B005 /* BotActivityTests.swift in Sources */,
 				A4770000000000000000D005 /* BotDelegatedWorkTests.swift in Sources */,

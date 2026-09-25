@@ -103,6 +103,8 @@
 	<string>Hermex needs microphone access to dictate text into the message composer.</string>
 	<key>NSCameraUsageDescription</key>
 	<string>Hermex needs camera access to capture and attach photos directly in chat.</string>
+	<key>NSFaceIDUsageDescription</key>
+	<string>Hermex uses Face ID to confirm removing a skill from your Hermes host.</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Hermex needs photo library access to attach images to chat messages.</string>
 	<key>NSPhotoLibraryAddUsageDescription</key>
