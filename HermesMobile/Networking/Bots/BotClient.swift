@@ -4,16 +4,18 @@ import Foundation
 /// RPC replies and events, so a quiet tool never blocks a Stop request.
 @MainActor final class BotClient: BotTransport {
     private static let cancellationSafeMethods: Set<String> = [
-        "file.attach", "complete.path", "subagent.list", "subagent.tail"
+        "file.attach", "complete.path", "subagent.list", "subagent.tail", "session.active_list"
     ]
-    private static let nonDisconnectingTimeoutMethods: Set<String> = ["subagent.list", "subagent.tail"]
+    private static let nonDisconnectingTimeoutMethods: Set<String> = ["subagent.list", "subagent.tail", "session.active_list"]
 
     private let connection: BotConnection
     private let session: URLSession
     private let rpcDeadline: Duration
+    private let heartbeatInterval: Duration
     private var socket: (any BotSocket)?
     private let socketFactory: ((URL, [String]) -> any BotSocket)?
     private var reader: Task<Void, Never>?
+    private var heartbeat: Task<Void, Never>?
     private var generation = 0
     private var imageUploads: [UUID: Task<String, Error>] = [:]
     private var artifactTasks: [UUID: Task<Data, Error>] = [:]
@@ -25,15 +27,19 @@ import Foundation
     private(set) var replayEpoch: String?
     /// `version` from `/api/status`, captured before the auth gate; nil when omitted.
     private(set) var serverVersion: String?
+    /// `install_id` from the same `/api/status` read; nil when omitted.
+    private(set) var serverInstallID: String?
     var onEvent: ((BotJSON) -> Void)?
     var onDisconnect: ((Error) -> Void)?
 
+    /// `heartbeatInterval` is the `gateway.ping` cadence; tests shorten it.
     init(connection: BotConnection, configuration: URLSessionConfiguration = .ephemeral,
-         rpcDeadline: Duration = .seconds(30),
+         rpcDeadline: Duration = .seconds(30), heartbeatInterval: Duration = .seconds(15),
          socketFactory: ((URL, [String]) -> any BotSocket)? = nil) {
         self.socketFactory = socketFactory
         self.connection = connection
         self.rpcDeadline = rpcDeadline
+        self.heartbeatInterval = heartbeatInterval
         configuration.timeoutIntervalForRequest = 15
         configuration.timeoutIntervalForResource = 30
         session = URLSession(configuration: configuration)
@@ -52,6 +58,9 @@ import Foundation
         return try JSONDecoder().decode(BotJSON.self, from: data)
     }
 
+    /// Signs in, opens the socket and completes the handshake: `gateway.ready`,
+    /// then `client.capabilities` as the first outbound frame, then the keepalive.
+    /// Callers send nothing until this returns, so no RPC can precede the handshake.
     func connect() async throws {
         close()
         let owner = generation
@@ -59,9 +68,16 @@ import Foundation
             guard owner == generation, !Task.isCancelled else { throw BotFailure.stale }
         }
         do {
-            let status = try await http(.status)
+            let status: BotJSON
+            do { status = try await http(.status) }
+            // `/api/status` is public on every dashboard, so a 401, a 404 or a non-JSON
+            // body there means the address is something else, such as the webui.
+            catch BotFailure.rejected(let code) where code == 401 || code == 404 { throw BotFailure.notDashboard }
+            catch is DecodingError { throw BotFailure.notDashboard }
             try check()
             serverVersion = status["version"].text
+            serverInstallID = BotConnection.installID(in: status)
+            try connection.requireSameInstall(serverInstallID)
             guard status["auth_required"].flag == true,
                   status["auth_providers"].list?.contains(.string("basic")) == true else { throw BotFailure.unsupported }
             _ = try await http(.login, body: .object([
@@ -108,9 +124,43 @@ import Foundation
                     self.onDisconnect?(error)
                 }
             }
+            // Without this the host treats the socket as a build that predates
+            // server→client requests: approvals are withdrawn unsent, clarify is
+            // answered empty, and sudo/secret are skipped. A host older than the
+            // capability answers -32601 and connects as before; the shared web
+            // client ignores any rejection here too, so only a lost socket fails.
+            do { _ = try await call("client.capabilities", ["server_requests": .bool(true)]) }
+            catch BotFailure.rejected {}
+            try check()
+            startHeartbeat(socket, owner: owner)
         } catch {
             if owner == generation { close() }
             throw error
+        }
+    }
+
+    /// Sends `gateway.ping` on a fixed cadence, because the host sends no JSON
+    /// heartbeat of its own and an idle socket would otherwise hit the 45 s
+    /// silence deadline in `receive`. The pong is just more inbound traffic: its
+    /// string id matches no pending call, so `consume` drops it. A failed send is
+    /// a lost socket.
+    private func startHeartbeat(_ socket: any BotSocket, owner: Int) {
+        let interval = heartbeatInterval
+        heartbeat = Task { [weak self] in
+            var beat = 0
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: interval) } catch { return }
+                guard let self, self.generation == owner else { return }
+                beat += 1
+                let frame = #"{"jsonrpc":"2.0","id":"heartbeat-\#(beat)","method":"gateway.ping","params":{}}"#
+                do { try await socket.send(.string(frame)) }
+                catch {
+                    guard self.generation == owner else { return }
+                    self.close()
+                    self.onDisconnect?(error)
+                    return
+                }
+            }
         }
     }
 
@@ -142,12 +192,13 @@ import Foundation
     func call(_ method: String, _ params: [String: BotJSON], validateDispatch: (() throws -> Void)? = nil) async throws -> BotJSON {
         guard ["profiles.list", "profiles.get_asset", "profiles.describe", "profiles.configure", "profiles.set_asset",
                "profiles.create", "session.create", "session.title",
-               "session.list", "session.resume", "session.events.since",
-               "file.attach", "prompt.submit", "session.steer", "session.redirect", "session.interrupt", "approval.respond", "clarify.respond",
-               "sudo.respond", "secret.respond", "mcp.setup.respond", "request.answer", "clarify.lock",
+               "session.list", "session.resume", "session.events.since", "session.active_list",
+               "file.attach", "prompt.submit", "session.steer", "session.redirect", "session.interrupt", "approval.respond",
+               "request.answer", "clarify.lock", "connection.respond", "client.capabilities",
                "model.options", "config.set", "session.cwd.set", "session.control.read", "session.control",
                "commands.catalog", "command.dispatch", "complete.path",
-               "subagent.list", "subagent.tail", "subagent.interrupt"].contains(method) || BotRoomRPC.methods.contains(method)
+               "subagent.list", "subagent.tail", "subagent.interrupt",
+               "message.react"].contains(method) || BotRoomRPC.methods.contains(method)
         else { throw BotFailure.unsupported }
         try BotRoomRPC.validate(method, params)
         try Self.validateProfileEditorCall(method, params)
@@ -155,6 +206,14 @@ import Foundation
         try Self.validateSlashCall(method, params)
         try Self.validateCompletionCall(method, params)
         try Self.validateSubagentCall(method, params)
+        try Self.validateConnectionCall(method, params)
+        try Self.validateReactCall(method, params)
+        if method == "client.capabilities" {
+            guard params == ["server_requests": .bool(true)] else { throw BotFailure.unsupported }
+        }
+        // The inbox's live-status read sends no parameters; `current_session_id`
+        // only marks a TUI's focused row, which Hermex never has.
+        if method == "session.active_list", !params.isEmpty { throw BotFailure.unsupported }
         guard let socket, !Task.isCancelled else { throw BotFailure.stale }
         nextID += 1
         let id = nextID
@@ -315,7 +374,8 @@ import Foundation
     }
 
     /// The composer's slash panel is the third typed exception. `commands.catalog`
-    /// takes no parameters, and `command.dispatch` carries exactly one bare name —
+    /// takes only the live session it discovers skills for, and `command.dispatch`
+    /// carries exactly one bare name —
     /// no leading slash, no whitespace, no extra key — so this can never widen into
     /// the general slash runner Bot Mode deliberately does not expose. *Which* names
     /// are legal is the caller's job: `BotConversation` only dispatches a name the
@@ -323,7 +383,8 @@ import Foundation
     private static func validateSlashCall(_ method: String, _ params: [String: BotJSON]) throws {
         switch method {
         case "commands.catalog":
-            guard params.isEmpty else { throw BotFailure.unsupported }
+            guard Set(params.keys) == ["session_id"], params["session_id"]?.text?.isEmpty == false
+            else { throw BotFailure.unsupported }
         case "command.dispatch":
             guard Set(params.keys) == ["name", "arg", "session_id"],
                   let name = params["name"]?.text, !name.isEmpty, !name.hasPrefix("/"),
@@ -363,6 +424,46 @@ import Foundation
                   params["subagent_id"]?.text?.isEmpty == false else { throw BotFailure.unsupported }
         default:
             return
+        }
+    }
+
+    /// The connection card is another typed exception. `connection.respond`
+    /// carries one live session, one `op_id`, and a `result` that is either one
+    /// row's `approved` (with its setup values) or `skipped`, or Continue alone.
+    /// No other outcome, settle reason or connector RPC reaches the host from here.
+    private static func validateConnectionCall(_ method: String, _ params: [String: BotJSON]) throws {
+        guard method == "connection.respond" else { return }
+        guard Set(params.keys) == ["session_id", "op_id", "result"],
+              params["session_id"]?.text?.isEmpty == false, params["op_id"]?.text?.isEmpty == false,
+              let result = params["result"]?.fields, result.count == 1 else { throw BotFailure.unsupported }
+        if let reason = result["settled_by"] {
+            guard reason == .string("continue") else { throw BotFailure.unsupported }
+            return
+        }
+        guard let rows = result["targets"]?.list, rows.count == 1, let row = rows[0].fields,
+              Set(row.keys).isSubset(of: ["name", "status", "env"]), row["name"]?.text?.isEmpty == false,
+              let status = row["status"]?.text, ["approved", "skipped"].contains(status) else { throw BotFailure.unsupported }
+        if let env = row["env"] {
+            guard status == "approved", let values = env.fields, !values.isEmpty,
+                  values.allSatisfy({ !$0.key.isEmpty && $0.value.text?.isEmpty == false }) else { throw BotFailure.unsupported }
+        }
+    }
+
+    /// Tapbacks are one more typed exception: your own reaction on one
+    /// persisted row of the live session. `emoji` is a non-empty string or
+    /// null (clear); `author` and `newest_role` are refused, so the phone can
+    /// never react as the agent or address a row it has not seen.
+    private static func validateReactCall(_ method: String, _ params: [String: BotJSON]) throws {
+        guard method == "message.react" else { return }
+        guard Set(params.keys) == ["session_id", "row_id", "emoji"],
+              params["session_id"]?.text?.isEmpty == false,
+              params["row_id"]?.integer != nil
+        else { throw BotFailure.unsupported }
+        switch params["emoji"] {
+        case .null?: return
+        case .string(let emoji)?:
+            guard !emoji.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw BotFailure.unsupported }
+        default: throw BotFailure.unsupported
         }
     }
 
@@ -435,6 +536,7 @@ import Foundation
         for task in artifactTasks.values { task.cancel() }
         artifactTasks.removeAll()
         reader?.cancel(); reader = nil
+        heartbeat?.cancel(); heartbeat = nil
         socket?.cancel(); socket = nil
         for deadline in deadlines.values { deadline.cancel() }
         deadlines.removeAll()

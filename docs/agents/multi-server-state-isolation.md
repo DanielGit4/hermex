@@ -40,6 +40,7 @@ to `CacheStore`. Two consequences:
 | Active project / session selection | View-local `@State` only | Not persisted. Destroyed and rebuilt on switch via `.id(server)`. |
 | Browsed Kanban Board | UserDefaults, per-server key (`KanbanBoardPreference.key(for:)` = `kanban.selectedBoard|<server absoluteString>`) | Per-server since #259: `KanbanFeatureState` restores the last locally browsed Board on load after validating it against the server's fresh Board list, and drops a stale slug silently. Local browsing never calls the server's switch endpoint. Tested in `KanbanFeatureStateTests` (`testBrowsedBoardIsRestoredForTheSameServerAndIsolatedFromOthers`). |
 | "Show CLI sessions" toggle | UserDefaults, per-server key (`SessionRowDisplaySettings.showCliSessionsKey(for:)` = `sessionRow.showCliSessions|<server absoluteString>`) | Per-server since #19: the toggle mirrors the server's own `show_cli_sessions` setting (adopted on Settings load, written back via `POST /api/settings`), so an adopted value on one server cannot leak to another. Reads fall back to the pre-#19 global key as a migration seed, then to shown-by-default. Tested in `CliSessionsSyncModelTests`. |
+| Bots inbox section order | UserDefaults (`BotSectionOrderStore`) | Per-server and per-Bot-connection key `bot-inbox-section-order.<connection UUID>|<server absoluteString>`, holding the Desktop section ids the user placed from "Reorder Sections…". Never sent to Desktop; removing the Bot connection deletes it. Tested in `BotInboxTests.testPlacedSectionsKeepTheirOrderPerConnectionAndResetReturnsToAToZ`. |
 | Chat attachment thumbnails | In-memory `AttachmentImageCache` (process-wide) | Keyed by `AttachmentImageCacheKey(namespace, path)` where `namespace` is `server.absoluteString|session`, matching `TranscriptMediaImageCache`. The cache survives `.id(server)` teardown, so the key—not view identity—is the isolation. Callers cannot default to an empty namespace. Tested in `TranscriptMediaParserTests.testAttachmentImageCacheKeySeparatesSamePathAcrossServersAndSessions`. |
 
 ### Offline cache keying (`Persistence/CacheStore.swift`)
@@ -74,6 +75,7 @@ per-server:
 - Chat transcript display toggles (`ChatTranscriptDisplaySettings`: thinking/tool cards, attachment paths, timestamps, code-block wrap)
 - Streamed-text animation (`StreamedTextAnimationSettings`)
 - Streaming send behavior (`StreamingSendBehavior`)
+- Bot quick replies (`BotQuickReplyStore`): the user's own text, the same chips for every server, connection and Profile
 - Adaptive Glass preference (`adaptiveGlass.isEnabled`)
 - **Primary-action tint *toggle*** (`PrimaryActionTintSettings.isEnabledKey`) — the
   on/off behavior is global; only the *color* it applies (Header Logo Color) is
@@ -127,6 +129,8 @@ server's content even if the purge fails.
 ## Bot connection and drafts
 
 Bot Mode has a separate per-server Keychain connection and ephemeral cookie jar.
+Its stored `install_id` is only compared with the same record's host, never matched
+across configured servers.
 Bot drafts use configured server + connection UUID + Profile, independently of
 webui session IDs. Recent Bot/room transcript value snapshots stay in a bounded memory cache keyed by
 configured server hash + connection UUID + bot/room. New screens can display them

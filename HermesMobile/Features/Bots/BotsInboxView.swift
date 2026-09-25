@@ -19,6 +19,10 @@ import SwiftUI
     @State private var renamingRoom: BotGroupRoom?
     @State private var roomName = ""
     @State private var disbanding: BotGroupRoom?
+    /// The bot the "New Section" alert files, and the name being typed for it.
+    @State private var filing: BotProfile?
+    @State private var newSectionName = ""
+    @State private var showingSectionOrder = false
     @State private var selection = BotInboxSelection()
     @State private var searchedRoom: BotRoomKey?
     @State private var searchedSequence: Int?
@@ -61,8 +65,8 @@ import SwiftUI
     private var list: some View {
         List {
             if inbox.connection != nil {
-                if let errorMessage = inbox.errorMessage {
-                    Text(errorMessage).font(.callout)
+                if let message = inbox.errorMessage ?? inbox.routeAdvice {
+                    Text(message).font(.callout)
                     Button("Reconnect") { revision = UUID() }
                 } else if inbox.isLoadingRoster {
                     // The first row speaks for the set, so VoiceOver hears one
@@ -84,7 +88,9 @@ import SwiftUI
                     // Pinned chats sit above the list as large tiles: as many columns as
                     // there are pinned chats, up to three, so one or two sit centered and
                     // four or more wrap instead of being clipped away.
-                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: min(pinned.count, 3)), spacing: 24) {
+                    // Top-aligned, so a tile with a status line under its name keeps its avatar
+                    // level with its neighbours'.
+                    LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8, alignment: .top), count: min(pinned.count, 3)), spacing: 24) {
                         ForEach(pinned) { chat in
                             // The grid is one list row, and a row merges every
                             // `.contextMenu` inside it into one, so holding any tile
@@ -94,7 +100,8 @@ import SwiftUI
                             switch chat {
                             case .bot(let profile):
                                 Menu { organizeMenu(profile) } label: {
-                                    BotHeroTile(profile: profile, avatar: inbox.avatars[profile.id], unread: inbox.isUnread(profile))
+                                    BotHeroTile(profile: profile, avatar: inbox.avatars[profile.id], unread: inbox.isUnread(profile),
+                                                status: inbox.liveStatuses[profile.id])
                                 } primaryAction: { selection.profile = profile }
                                 .buttonStyle(.plain)
                             case .room(let room):
@@ -108,14 +115,7 @@ import SwiftUI
                     .padding(.vertical, 20)
                     .listRowSeparator(.hidden)
                 }
-                ForEach(inbox.chats) { chat in
-                    switch chat {
-                    case .bot(let profile):
-                        row(profile, dimmed: profile.hidden)
-                    case .room(let room):
-                        if let key = inbox.roomKey(room) { roomRow(room, key: key) }
-                    }
-                }
+                chatSections(inbox.sections)
                 if inbox.hiddenCount > 0 {
                     Button(inbox.showsHidden ? "Hide hidden" : "Show hidden (\(inbox.hiddenCount))") {
                         inbox.showsHidden.toggle()
@@ -160,6 +160,10 @@ import SwiftUI
                             onReconciled: { inbox.reconcileRooms($0, connectionID: connection.id) })
                     }
                     .disabled(!inbox.roomCapabilities.enabled || !inbox.roomCapabilities.methods.contains("groups.create"))
+                    if inbox.reorderableSectionNames.count >= 2 {
+                        Divider()
+                        Button("Reorder Sections…", systemImage: "arrow.up.arrow.down") { showingSectionOrder = true }
+                    }
                 } label: { Label("New chat", systemImage: "plus") }
                 .disabled(inbox.link != .live)
             }
@@ -198,9 +202,44 @@ import SwiftUI
         selection.profile = inbox.profiles.first { $0.id == searched.profileID }
     }
 
+    /// The list under the tiles. Headers appear only when a named section is on
+    /// screen; without one the unfiled block reads as the flat list it always was.
+    @ViewBuilder private func chatSections(_ sections: [BotInbox.ChatSection]) -> some View {
+        let headed = sections.contains { $0.name != nil }
+        ForEach(sections) { section in
+            if headed {
+                Section {
+                    chatRows(section.chats)
+                } header: {
+                    // A Desktop name is the user's own text, never a catalog key.
+                    Group {
+                        if let name = section.name { Text(verbatim: name) } else { Text("Other chats") }
+                    }
+                    .font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                    .lineLimit(1).truncationMode(.tail).textCase(nil)
+                    .accessibilityAddTraits(.isHeader)
+                }
+            } else {
+                chatRows(section.chats)
+            }
+        }
+    }
+
+    private func chatRows(_ chats: [BotInbox.ChatRow]) -> some View {
+        ForEach(chats) { chat in
+            switch chat {
+            case .bot(let profile):
+                row(profile, dimmed: profile.hidden)
+            case .room(let room):
+                if let key = inbox.roomKey(room) { roomRow(room, key: key) }
+            }
+        }
+    }
+
     private func row(_ profile: BotProfile, dimmed: Bool) -> some View {
         Button { selection.profile = profile } label: {
-            BotInboxRow(profile: profile, avatar: inbox.avatars[profile.id], unread: inbox.isUnread(profile))
+            BotInboxRow(profile: profile, avatar: inbox.avatars[profile.id], unread: inbox.isUnread(profile),
+                        status: inbox.liveStatuses[profile.id])
         }
         .buttonStyle(.plain)
         .opacity(dimmed ? 0.5 : 1)
@@ -324,8 +363,8 @@ import SwiftUI
         .disabled(!inbox.mayDisbandRoom(room))
     }
 
-    /// Pin and hide write Desktop's own roster fields; both stay inert until the
-    /// inbox is live and no write for this bot is in flight.
+    /// Pin, hide and the section write Desktop's own roster fields; all stay inert
+    /// until the inbox is live and no write for this bot is in flight.
     private func organizeMenu(_ profile: BotProfile) -> some View {
         Group {
             Button {
@@ -344,6 +383,7 @@ import SwiftUI
             } label: {
                 Label(profile.hidden ? "Unhide" : "Hide bot", systemImage: profile.hidden ? "eye" : "eye.slash")
             }
+            sectionMenu(profile)
             Button { creation = .duplicate(profile) } label: {
                 Label("Duplicate", systemImage: "plus.square.on.square")
             }
@@ -354,6 +394,27 @@ import SwiftUI
             }
         }
         .disabled(!inbox.mayEdit(profile))
+    }
+
+    /// Desktop's "Move to section": every named section on the roster (the bot's own
+    /// one inert), a new one through an alert, and Remove only while the bot is filed.
+    private func sectionMenu(_ profile: BotProfile) -> some View {
+        Menu {
+            ForEach(inbox.sectionNames) { section in
+                // A Desktop name is the user's own text, never a catalog key.
+                Button { Task { await inbox.moveToSection(profile, section) } } label: { Text(verbatim: section.name) }
+                    .disabled(section.id == profile.sectionID && profile.sectionName != nil)
+            }
+            Divider()
+            Button("New Section…", systemImage: "folder.badge.plus") { newSectionName = ""; filing = profile }
+            if profile.sectionID != nil {
+                Button("Remove from Section", systemImage: "folder.badge.minus") {
+                    Task { await inbox.removeFromSection(profile) }
+                }
+            }
+        } label: {
+            Label("Move to Section", systemImage: "folder")
+        }
     }
 }
 
@@ -403,6 +464,19 @@ extension BotsInboxView {
             } message: { _ in
                 Text("Enter a name of up to 200 characters.")
             }
+            .alert("New Section", isPresented: Binding(
+                get: { filing != nil }, set: { if !$0 { filing = nil } }
+            ), presenting: filing) { profile in
+                TextField("Section name", text: $newSectionName)
+                Button("Move") {
+                    let name = newSectionName
+                    Task { await inbox.moveToNewSection(profile, name: name) }
+                }
+                .disabled(newSectionName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                Button("Cancel", role: .cancel) {}
+            } message: { profile in
+                Text("Move “\(profile.name)” into a new section.")
+            }
             .confirmationDialog("Disband this group?", isPresented: Binding(
                 get: { disbanding != nil }, set: { if !$0 { disbanding = nil } }
             ), titleVisibility: .visible, presenting: disbanding) { room in
@@ -428,7 +502,11 @@ extension BotsInboxView {
                 creation = nil
                 roomCreator?.suspend(); roomCreator = nil; createdRoom = nil
                 deleting = nil
-                renamingRoom = nil; disbanding = nil
+                renamingRoom = nil; disbanding = nil; filing = nil
+                showingSectionOrder = false
+            }
+            .sheet(isPresented: $showingSectionOrder) {
+                BotSectionOrderView(inbox: inbox)
             }
             .sheet(isPresented: $showingSetup, onDismiss: { revision = UUID() }) {
                 NavigationStack { BotConnectionView(server: server) }
@@ -466,6 +544,42 @@ extension BotsInboxView {
     }
 }
 
+/// Places Desktop's named sections for this phone's inbox. Every drag saves the
+/// whole list at once; Reset to A–Z forgets the placement. The unfiled block is
+/// not listed because it always stays last, nor is a section the list never heads.
+private struct BotSectionOrderView: View {
+    @Environment(\.dismiss) private var dismiss
+    let inbox: BotInbox
+
+    var body: some View {
+        let sections = inbox.reorderableSectionNames
+        NavigationStack {
+            List {
+                Section {
+                    ForEach(sections) { section in
+                        Text(verbatim: section.name).lineLimit(1)
+                    }
+                    .onMove { from, to in
+                        var ids = sections.map(\.id)
+                        ids.move(fromOffsets: from, toOffset: to)
+                        inbox.placeReorderableSections(ids)
+                    }
+                }
+                Section {
+                    Button("Reset to A–Z") { inbox.resetSectionOrder() }
+                        .disabled(inbox.sectionOrder.isEmpty)
+                }
+            }
+            .environment(\.editMode, .constant(.active))
+            .navigationTitle("Reorder Sections")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } }
+            }
+        }
+    }
+}
+
 /// What the create sheet is for: a fresh bot or a copy of one on this connection.
 private enum BotCreationIntent: Identifiable {
     case new, duplicate(BotProfile)
@@ -479,17 +593,26 @@ private struct BotProfileEditSelection: Identifiable, Hashable {
     var id: String { connectionID.uuidString + "|" + profileID }
 }
 
-/// A pinned bot: the avatar large and centered with the name beneath it.
+/// A pinned bot: the avatar large and centered with the name beneath it, and the
+/// live status word under the name while it has one.
 private struct BotHeroTile: View {
     let profile: BotProfile
     let avatar: UIImage?
     let unread: Bool
+    let status: BotLiveStatus?
     var body: some View {
         VStack(spacing: 14) {
             BotAvatarView(profile: profile, avatar: avatar, size: 84)
-            HStack(spacing: 6) {
-                Text(profile.name).font(.body).foregroundStyle(.secondary).lineLimit(1)
-                if unread { BotUnreadDot() }
+            VStack(spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(profile.name).font(.body).foregroundStyle(.secondary).lineLimit(1)
+                    if unread { BotUnreadDot() }
+                }
+                if let status {
+                    // Two lines, so a long translation at a large size still reads whole.
+                    BotLiveStatusLabel(status: status, font: .footnote.weight(.semibold))
+                        .lineLimit(2).multilineTextAlignment(.center)
+                }
             }
         }
         .frame(maxWidth: 132)
@@ -514,12 +637,15 @@ private struct BotRoomHeroTile: View {
 }
 
 /// One roster row: avatar, name with an optional short Desktop description chip,
-/// the last activity, then the canonical preview with a trailing unread mark.
-/// The avatar is decorative; VoiceOver reads the text as one element.
+/// the live status or else the last activity, then the canonical preview with a
+/// trailing unread mark. The avatar is decorative; VoiceOver reads the text as one
+/// element, status included.
 private struct BotInboxRow: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let profile: BotProfile
     let avatar: UIImage?
     let unread: Bool
+    let status: BotLiveStatus?
     /// A description short enough to read as a role sits beside the name; a
     /// longer one only stands in for the preview when the chat has none.
     private var chip: String? {
@@ -535,17 +661,15 @@ private struct BotInboxRow: View {
         HStack(spacing: 14) {
             BotAvatarView(profile: profile, avatar: avatar, size: 44)
             VStack(alignment: .leading, spacing: 4) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(profile.name).font(.headline).lineLimit(1)
-                    if let chip {
-                        Text(chip).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
-                            .padding(.horizontal, 8).padding(.vertical, 3)
-                            .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 6))
-                            .layoutPriority(-1)
-                    }
-                    Spacer(minLength: 8)
-                    if let date = profile.lastActive {
-                        Text(BotInboxDateLabel.text(for: date)).font(.subheadline).foregroundStyle(.secondary)
+                // At accessibility sizes the slot moves under the name, as in Sessions.
+                if dynamicTypeSize.isAccessibilitySize {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) { nameAndChip }
+                    trailingSlot
+                } else {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        nameAndChip
+                        Spacer(minLength: 8)
+                        trailingSlot
                     }
                 }
                 HStack(spacing: 8) {
@@ -556,6 +680,41 @@ private struct BotInboxRow: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+
+    @ViewBuilder private var nameAndChip: some View {
+        Text(profile.name).font(.headline).lineLimit(1)
+        if let chip {
+            Text(chip).font(.footnote).foregroundStyle(.secondary).lineLimit(1)
+                .padding(.horizontal, 8).padding(.vertical, 3)
+                .background(.fill.tertiary, in: RoundedRectangle(cornerRadius: 6))
+                .layoutPriority(-1)
+        }
+    }
+
+    /// One line, one meaning, as in Sessions: the live status while the bot has one,
+    /// otherwise the last activity.
+    @ViewBuilder private var trailingSlot: some View {
+        if let status {
+            BotLiveStatusLabel(status: status, font: .subheadline.weight(.semibold))
+                .fixedSize(horizontal: !dynamicTypeSize.isAccessibilitySize, vertical: false)
+        } else if let date = profile.lastActive {
+            Text(BotInboxDateLabel.text(for: date)).font(.subheadline).foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// A bot's live status as a still, tinted word: the Live Activity's translated
+/// "Working" and "Waiting for you" in the Sessions list's attention tints. It never
+/// animates; the word carries the meaning without the color.
+private struct BotLiveStatusLabel: View {
+    let status: BotLiveStatus
+    let font: Font
+    var body: some View {
+        switch status {
+        case .working: Text("Working").font(font).foregroundStyle(Color("AttentionWorking"))
+        case .waiting: Text("Waiting for you").font(font).foregroundStyle(Color("AttentionApproval"))
+        }
     }
 }
 

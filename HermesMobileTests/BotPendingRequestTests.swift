@@ -108,76 +108,68 @@ import XCTest
         XCTAssertEqual(answer.text, #"["Archive","Unsubscribe"]"#)
     }
 
-    func testCredentialKindsMapFromTheirRequestAndExpireEvents() {
-        for (prefix, kind) in ["sudo": BotCredentialRequest.Kind.sudo, "secret": .secret] {
-            let request = BotStreamRequest.requested(
-                eventType: "\(prefix).request",
-                payload: .object(["request_id": .string("r"), "env_var": .string("OPENAI_API_KEY"),
-                                  "prompt": .string("Paste the key")])
-            )
-            XCTAssertEqual(request, .credential(BotCredentialRequest(
-                kind: kind, requestID: "r", envVar: "OPENAI_API_KEY", prompt: "Paste the key"
+    private func frame(_ method: String, id: String = "srq-1", params: [String: BotJSON] = [:]) -> BotJSON {
+        .object(["jsonrpc": .string("2.0"), "id": .string(id), "method": .string(method),
+                 "params": .object(params.merging(["session_id": .string("runtime")]) { _, new in new })])
+    }
+
+    func testCredentialKindsMapFromTheirServerRequests() {
+        for kind in BotCredentialRequest.Kind.allCases {
+            let request = BotServerRequest(frame(kind.rawValue, params: [
+                "env_var": .string("OPENAI_API_KEY"), "prompt": .string("Paste the key")
+            ]))
+            XCTAssertEqual(request?.pending, .credential(BotCredentialRequest(
+                kind: kind, requestID: "srq-1", envVar: "OPENAI_API_KEY", prompt: "Paste the key"
             )))
-            XCTAssertEqual(request?.eventPrefix, prefix)
-            XCTAssertEqual(BotStreamRequest.expiredPrefix(eventType: "\(prefix).expire"), prefix)
-            XCTAssertEqual(kind.respondMethod, "\(prefix).respond")
         }
-        // Each kind's value rides the one param name its handler reads.
-        XCTAssertEqual(BotCredentialRequest.Kind.sudo.valueKey, "password")
-        XCTAssertEqual(BotCredentialRequest.Kind.secret.valueKey, "value")
     }
 
-    /// `*.respond` is addressed by request id alone, so a prompt without one
-    /// cannot be answered and must not become an answerable card.
-    func testACredentialRequestWithoutARequestIdIsDropped() {
-        XCTAssertNil(BotStreamRequest.requested(eventType: "sudo.request", payload: .object([:])))
-        XCTAssertNil(BotStreamRequest.requested(eventType: "secret.request",
-                                                payload: .object(["request_id": .string("")])))
+    /// `request.answer` is addressed by the envelope id, and a request belongs to
+    /// one session, so a frame missing either is nobody's request.
+    func testARequestWithoutAnIDOrSessionIsDropped() {
+        let params = BotJSON.object(["session_id": .string("runtime")])
+        XCTAssertNil(BotServerRequest(.object(["method": .string("sudo"), "params": params])))
+        XCTAssertNil(BotServerRequest(.object(["id": .string(""), "method": .string("sudo"), "params": params])))
+        XCTAssertNil(BotServerRequest(.object(["id": .string("srq-1"), "method": .string("sudo"), "params": .object([:])])))
     }
 
-    /// A sudo prompt carries no payload at all; a secret's fields are optional.
+    /// A sudo request carries only the redacted command; a secret's fields are read tolerantly.
     func testACredentialRequestReadsWithoutOptionalFields() {
-        guard case .credential(let request)? = BotStreamRequest.requested(
-            eventType: "sudo.request", payload: .object(["request_id": .string("s-1")])
-        ) else { return XCTFail("Expected a credential request") }
+        guard case .credential(let request)? = BotServerRequest(frame("sudo", params: ["command": .string("sudo ls")]))?.pending
+        else { return XCTFail("Expected a credential request") }
         XCTAssertNil(request.envVar)
         XCTAssertNil(request.prompt)
         XCTAssertFalse(request.detail.isEmpty)
         XCTAssertFalse(request.handling.isEmpty)
     }
 
-    func testDesktopTaskKindsMapFromTheirRequestAndExpireEvents() {
+    func testDesktopTaskKindsMapFromTheirServerRequests() {
         let expected: [String: BotDesktopTaskRequest.Kind] = [
-            "terminal.read": .terminalRead, "window.read": .windowRead, "mcp.setup": .mcpSetup,
-            "preview.read": .previewRead, "preview.act": .previewAct, "tour": .tour
+            "terminal.read": .terminalRead, "window.read": .windowRead, "preview.read": .previewRead,
+            "preview.act": .previewAct, "tour": .tour, "vault.unlock_prompt": .vaultUnlock,
+            "vault.save_login": .vaultSaveLogin, "vault.code": .vaultCode
         ]
-        for (prefix, kind) in expected {
-            XCTAssertEqual(
-                BotStreamRequest.requested(eventType: "\(prefix).request",
-                                           payload: .object(["request_id": .string("r")])),
-                .desktopTask(BotDesktopTaskRequest(kind: kind, requestID: "r"))
-            )
-            XCTAssertEqual(BotStreamRequest.expiredPrefix(eventType: "\(prefix).expire"), prefix)
+        XCTAssertEqual(Set(expected.values), Set(BotDesktopTaskRequest.Kind.allCases))
+        for (method, kind) in expected {
+            XCTAssertEqual(BotServerRequest(frame(method))?.pending,
+                           .desktopTask(BotDesktopTaskRequest(kind: kind, requestID: "srq-1")))
             XCTAssertFalse(kind.title.isEmpty)
             XCTAssertFalse(kind.detail.isEmpty)
         }
-        // Only the MCP setup card has a person at the Mac to wait for, and it is
-        // the only one there is anything to decline.
-        XCTAssertEqual(BotDesktopTaskRequest.Kind.allCases.filter(\.needsSomeoneAtTheMac), [.mcpSetup])
-        XCTAssertEqual(BotDesktopTaskRequest.Kind.allCases.filter(\.isDeclinable), [.mcpSetup])
-        XCTAssertEqual(BotDesktopTaskRequest.Kind.mcpSetup.respondMethod, "mcp.setup.respond")
-        // A Desktop task has no id to answer with, and still reads.
-        XCTAssertEqual(BotStreamRequest.requested(eventType: "tour.request", payload: .object([:])),
-                       .desktopTask(BotDesktopTaskRequest(kind: .tour, requestID: nil)))
+        // Only the password-manager prompts wait for someone at the Mac, and
+        // they are the only ones there is anything to skip.
+        XCTAssertEqual(Set(BotDesktopTaskRequest.Kind.allCases.filter(\.needsSomeoneAtTheMac)),
+                       [.vaultUnlock, .vaultSaveLogin, .vaultCode])
     }
 
-    func testNonBlockingEventsAreNotStreamRequests() {
-        XCTAssertNil(BotStreamRequest.requested(eventType: "clarify.request", payload: .null))
-        XCTAssertNil(BotStreamRequest.requested(eventType: "tool.start", payload: .null))
-        XCTAssertNil(BotStreamRequest.expiredPrefix(eventType: "clarify.expired"))
-        // A prefix that is not a kind is nobody's request, expire or not.
-        XCTAssertNil(BotStreamRequest.requested(eventType: "approval.request",
-                                                payload: .object(["request_id": .string("r")])))
+    /// `mcp.setup` no longer exists at the pin; it and any future method still
+    /// block the bot, but have no card the phone could answer.
+    func testUnknownMethodsBlockWithoutACard() {
+        for method in ["mcp.setup", "future.prompt"] {
+            let request = BotServerRequest(frame(method))
+            XCTAssertEqual(request?.method, method)
+            XCTAssertNil(request?.pending)
+        }
     }
 }
 
@@ -359,24 +351,27 @@ import XCTest
     // MARK: questions
 
     func testSingleQuestionAnswersWithoutAQuestionID() async {
-        let wire = BotFixtureWire(); wire.pendingClarify = BotFixtureWire.clarify()
+        let wire = BotFixtureWire(); wire.openClarify = BotFixtureWire.clarify()
         let model = await blocked(on: wire)
         guard case .question(let request)? = model.pendingRequest else { return XCTFail("Expected a question") }
         XCTAssertEqual(request.questions.count, 1)
         await model.answerQuestion(action(model),
                                    [BotQuestionAnswer(questionID: nil, text: "Primary (Recommended)")])
-        let sent = wire.calls.filter { $0.0 == "clarify.respond" }
-        XCTAssertEqual(sent.count, 1)
-        XCTAssertEqual(sent.first?.1["request_id"], .string("clr-1"))
-        XCTAssertEqual(sent.first?.1["answer"], .string("Primary (Recommended)"))
-        XCTAssertNil(sent.first?.1["question_id"])
+        let sent = wire.calls.filter { $0.0 == "request.answer" }
+        XCTAssertEqual(sent.map(\.1), [["id": .string("clr-1"), "result": .object(["answer": .string("Primary (Recommended)")])]])
+        XCTAssertFalse(wire.calls.contains { $0.0 == "clarify.lock" })
         XCTAssertEqual(model.requestResolution?.outcome, .answered)
         model.suspend()
     }
 
-    func testBatchSendsOneRespondPerQuestionIDInOrder() async {
+    func testBatchSendsOneLockPerQuestionIDInOrder() async {
         let wire = BotFixtureWire()
-        wire.pendingClarify = .object([
+        var remaining = ["q0", "q1"]
+        wire.answerRequest = { _, params in
+            remaining.removeAll { .string($0) == params["question_id"] }
+            return .object(["status": .string("ok"), "remaining": .array(remaining.map(BotJSON.string))])
+        }
+        wire.openClarify = .object([
             "request_id": .string("clr-3"),
             "questions": .array([
                 .object(["qid": .string("q0"), "question": .string("Which mailbox?"), "choices": .array([.string("Primary")])]),
@@ -389,8 +384,9 @@ import XCTest
             BotQuestionAnswer(questionID: "q0", text: "Primary"),
             BotQuestionAnswer(questionID: "q1", selections: ["Archive"])
         ])
-        let sent = wire.calls.filter { $0.0 == "clarify.respond" }
+        let sent = wire.calls.filter { $0.0 == "clarify.lock" }
         XCTAssertEqual(sent.map { $0.1["question_id"] }, [.string("q0"), .string("q1")])
+        XCTAssertEqual(sent.first?.1["request_id"], .string("clr-3"))
         XCTAssertEqual(sent.last?.1["answer"], .string(#"["Archive"]"#))
         XCTAssertEqual(model.requestResolution?.outcome, .answered)
         model.suspend()
@@ -398,13 +394,13 @@ import XCTest
 
     func testAnswersForQuestionsTheHostNeverAskedAreNeverSent() async {
         let wire = BotFixtureWire()
-        wire.pendingClarify = .object([
+        wire.openClarify = .object([
             "request_id": .string("clr-3"),
             "questions": .array([.object(["qid": .string("q0"), "question": .string("Which mailbox?")])])
         ])
         let model = await blocked(on: wire)
         await model.answerQuestion(action(model), [BotQuestionAnswer(questionID: "q9", text: "nope")])
-        XCTAssertTrue(wire.calls.filter { $0.0 == "clarify.respond" }.isEmpty)
+        XCTAssertFalse(wire.calls.contains { ["clarify.lock", "request.answer"].contains($0.0) })
         model.suspend()
     }
 
@@ -414,7 +410,7 @@ import XCTest
     /// a partial batch would silently skip whatever the user never touched.
     func testAPartialBatchAnswerIsNeverSent() async {
         let wire = BotFixtureWire()
-        wire.pendingClarify = .object([
+        wire.openClarify = .object([
             "request_id": .string("clr-5"),
             "questions": .array([
                 .object(["qid": .string("q0"), "question": .string("First?")]),
@@ -423,11 +419,12 @@ import XCTest
         ])
         let model = await blocked(on: wire)
         await model.answerQuestion(action(model), [BotQuestionAnswer(questionID: "q0", text: "a")])
-        XCTAssertTrue(wire.calls.filter { $0.0 == "clarify.respond" }.isEmpty)
+        XCTAssertFalse(wire.calls.contains { ["clarify.lock", "request.answer"].contains($0.0) })
         XCTAssertNil(model.requestResolution)
         // Declining the whole request is still one deliberate unkeyed answer.
         await model.skipQuestion(action(model))
-        XCTAssertEqual(wire.calls.filter { $0.0 == "clarify.respond" }.count, 1)
+        XCTAssertEqual(wire.calls.filter { $0.0 == "request.answer" }.count, 1)
+        XCTAssertFalse(wire.calls.contains { $0.0 == "clarify.lock" })
         model.suspend()
     }
 
@@ -435,7 +432,7 @@ import XCTest
     /// batch completes without re-answering it.
     func testABatchIgnoresQuestionsTheHostHasAlreadyLocked() async {
         let wire = BotFixtureWire()
-        wire.pendingClarify = .object([
+        wire.openClarify = .object([
             "request_id": .string("clr-6"),
             "questions": .array([
                 .object(["qid": .string("q0"), "question": .string("First?")]),
@@ -445,56 +442,14 @@ import XCTest
         ])
         let model = await blocked(on: wire)
         await model.answerQuestion(action(model), [BotQuestionAnswer(questionID: "q1", text: "b")])
-        XCTAssertEqual(wire.calls.filter { $0.0 == "clarify.respond" }.map { $0.1["question_id"] },
+        XCTAssertEqual(wire.calls.filter { $0.0 == "clarify.lock" }.map { $0.1["question_id"] },
                        [.string("q1")])
         model.suspend()
     }
 
-    /// Credential prompts reach no snapshot, so while the ring still holds one,
-    /// replay is the only way back to it. Dropping it left a blocked bot looking
-    /// idle with nothing on screen to answer.
-    func testAReplayedCredentialPromptSurvivesAReconnect() async {
-        let wire = BotFixtureWire()
-        let model = await blocked(on: wire)
-        wire.onDisconnect?(BotFailure.transport)
-        XCTAssertNil(model.streamRequest)
-
-        wire.replay = BotFixtureWire.replay(latest: 2, events: [
-            .object(["session_id": .string("runtime"), "seq": .number(1),
-                     "type": .string("tool.start"),
-                     "payload": .object(["tool_id": .string("t1"), "name": .string("terminal")])]),
-            .object(["session_id": .string("runtime"), "seq": .number(2),
-                     "type": .string("sudo.request"),
-                     "payload": .object(["request_id": .string("sudo-r")])])
-        ])
-        await model.recover()
-        XCTAssertFalse(model.replayWasReset)
-        XCTAssertEqual(model.pendingRequest?.requestID, "sudo-r")
-        XCTAssertEqual(model.turn, .needsAttention)
-        XCTAssertTrue(model.mayAnswer)
-        model.suspend()
-    }
-
-    /// A prompt whose expiry is also in the replay window is already over.
-    func testAReplayedPromptThatExpiredInTheSameWindowIsNotShown() async {
-        let wire = BotFixtureWire()
-        let model = await blocked(on: wire)
-        wire.onDisconnect?(BotFailure.transport)
-        wire.replay = BotFixtureWire.replay(latest: 2, events: [
-            .object(["session_id": .string("runtime"), "seq": .number(1),
-                     "type": .string("sudo.request"),
-                     "payload": .object(["request_id": .string("sudo-r")])]),
-            .object(["session_id": .string("runtime"), "seq": .number(2),
-                     "type": .string("sudo.expire"), "payload": .object([:])])
-        ])
-        await model.recover()
-        XCTAssertNil(model.streamRequest)
-        model.suspend()
-    }
-
     func testAnExpiredQuestionStopsTheBatchAndReportsItAsAlreadyResolved() async {
-        let wire = BotFixtureWire(); wire.clarifyStatus = "expired"
-        wire.pendingClarify = .object([
+        let wire = BotFixtureWire(); wire.answerStatus = "expired"
+        wire.openClarify = .object([
             "request_id": .string("clr-3"),
             "questions": .array([
                 .object(["qid": .string("q0"), "question": .string("First?")]),
@@ -505,7 +460,7 @@ import XCTest
         await model.answerQuestion(action(model), [
             BotQuestionAnswer(questionID: "q0", text: "a"), BotQuestionAnswer(questionID: "q1", text: "b")
         ])
-        XCTAssertEqual(wire.calls.filter { $0.0 == "clarify.respond" }.count, 1)
+        XCTAssertEqual(wire.calls.filter { $0.0 == "clarify.lock" }.count, 1)
         XCTAssertEqual(model.requestResolution?.outcome, .alreadyResolved)
         XCTAssertFalse(model.mayAnswer)
         model.suspend()
@@ -513,22 +468,20 @@ import XCTest
 
     func testSkipSendsOneUnkeyedEmptyAnswer() async {
         let wire = BotFixtureWire()
-        wire.pendingClarify = .object([
+        wire.openClarify = .object([
             "request_id": .string("clr-3"),
             "questions": .array([.object(["qid": .string("q0"), "question": .string("First?")])])
         ])
         let model = await blocked(on: wire)
         await model.skipQuestion(action(model))
-        let sent = wire.calls.filter { $0.0 == "clarify.respond" }
-        XCTAssertEqual(sent.count, 1)
-        XCTAssertEqual(sent.first?.1["answer"], .string(""))
-        XCTAssertNil(sent.first?.1["question_id"])
+        let sent = wire.calls.filter { $0.0 == "request.answer" }
+        XCTAssertEqual(sent.map(\.1), [["id": .string("clr-3"), "result": .object(["answer": .string("")])]])
         model.suspend()
     }
 
-    /// Both keys present: the clarify is the outer blocker, so it owns the card.
+    /// Both present: the clarify is the outer blocker, so it owns the card.
     func testAQuestionOutranksAnApproval() async {
-        let wire = BotFixtureWire(); wire.attention = true; wire.pendingClarify = BotFixtureWire.clarify()
+        let wire = BotFixtureWire(); wire.attention = true; wire.openClarify = BotFixtureWire.clarify()
         let model = await blocked(on: wire)
         guard case .question? = model.pendingRequest else { return XCTFail("Expected the question to win") }
         model.suspend()
@@ -536,54 +489,51 @@ import XCTest
 
     // MARK: credential prompts
 
-    /// `sudo.respond` takes a `request_id` from any client, so the phone answers
-    /// it rather than sending someone to a Mac they are not sitting at.
+    /// `request.answer` takes the envelope id from any client, so the phone answers
+    /// a sudo prompt rather than sending someone to a Mac they are not sitting at.
     func testASudoPromptIsAnsweredFromThePhone() async {
         let wire = BotFixtureWire()
         let model = await blocked(on: wire)
         XCTAssertEqual(model.turn, .running)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("sudo.request"),
-            "payload": .object(["request_id": .string("sudo-1")])
-        ]))
+        let prompt = serverRequest("sudo", id: "sudo-1")
+        wire.openRequests = .array([prompt])
+        wire.onEvent?(prompt)
         guard case .credential(let request)? = model.pendingRequest else { return XCTFail("Expected a credential prompt") }
         XCTAssertEqual(request.kind, .sudo)
         XCTAssertTrue(model.pendingRequest?.isAnswerable ?? false)
-        // The snapshot it triggers must stop the app claiming the bot is working.
-        await awaitSnapshot(model)
+        // The request alone stops the app claiming the bot is working, and a
+        // fresh snapshot restores it from `open_requests` rather than undoing that.
         XCTAssertEqual(model.turn, .needsAttention)
+        await model.recover()
+        XCTAssertEqual(model.turn, .needsAttention)
+        XCTAssertEqual(model.pendingRequest?.requestID, "sudo-1")
         XCTAssertTrue(model.mayAnswer)
 
         await model.answerCredential(action(model), value: "hunter2")
-        let sent = wire.calls.last { $0.0 == "sudo.respond" }
-        XCTAssertEqual(sent?.1["request_id"], .string("sudo-1"))
-        XCTAssertEqual(sent?.1["password"], .string("hunter2"))
+        let sent = wire.calls.last { $0.0 == "request.answer" }
+        XCTAssertEqual(sent?.1, ["id": .string("sudo-1"), "result": .object(["value": .string("hunter2")])])
         XCTAssertEqual(model.requestResolution, BotRequestResolution(requestID: "sudo-1", outcome: .answered))
-        // The host emits `.expire` only on timeout, so an answered prompt has to
-        // be retired here or the card would outlive the thing it was blocking.
-        XCTAssertNil(model.streamRequest)
+        // An answered request is retired here, so the card never outlives the
+        // thing it was blocking while the next snapshot is in flight.
         XCTAssertNil(model.pendingRequest)
         model.suspend()
     }
 
     /// The secret prompt carries the host's own wording and the name it will be
-    /// saved under, and answers on a differently named param.
-    func testASecretPromptSendsItsValueUnderTheHostsParamName() async {
+    /// saved under.
+    func testASecretPromptShowsTheHostsWordingAndSendsItsValue() async {
         let wire = BotFixtureWire()
         let model = await blocked(on: wire)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("secret.request"),
-            "payload": .object(["request_id": .string("sec-1"), "env_var": .string("TAVILY_API_KEY"),
-                                "prompt": .string("Paste your Tavily key")])
+        wire.onEvent?(serverRequest("secret", id: "sec-1", params: [
+            "env_var": .string("TAVILY_API_KEY"), "prompt": .string("Paste your Tavily key")
         ]))
         guard case .credential(let request)? = model.pendingRequest else { return XCTFail("Expected a credential prompt") }
         XCTAssertEqual(request.detail, "Paste your Tavily key")
         XCTAssertTrue(request.handling.contains("TAVILY_API_KEY"))
 
         await model.answerCredential(action(model), value: "tvly-123")
-        let sent = wire.calls.last { $0.0 == "secret.respond" }
-        XCTAssertEqual(sent?.1["value"], .string("tvly-123"))
-        XCTAssertNil(sent?.1["password"])
+        let sent = wire.calls.last { $0.0 == "request.answer" }
+        XCTAssertEqual(sent?.1, ["id": .string("sec-1"), "result": .object(["value": .string("tvly-123")])])
         model.suspend()
     }
 
@@ -592,13 +542,10 @@ import XCTest
     func testSkippingACredentialSendsAnEmptyValue() async {
         let wire = BotFixtureWire()
         let model = await blocked(on: wire)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("secret.request"),
-            "payload": .object(["request_id": .string("sec-2")])
-        ]))
+        wire.onEvent?(serverRequest("secret", id: "sec-2"))
         await model.skipCredential(action(model))
-        let sent = wire.calls.last { $0.0 == "secret.respond" }
-        XCTAssertEqual(sent?.1["value"], .string(""))
+        let sent = wire.calls.last { $0.0 == "request.answer" }
+        XCTAssertEqual(sent?.1["result"], .object(["value": .string("")]))
         XCTAssertEqual(model.requestResolution?.outcome, .answered)
         model.suspend()
     }
@@ -606,12 +553,9 @@ import XCTest
     /// A prompt the host already dropped answers `expired`: an action failure over
     /// a live socket, so the card goes inert and the connection stays up.
     func testAnExpiredCredentialPromptReportsAlreadyResolved() async {
-        let wire = BotFixtureWire(); wire.credentialStatus = "expired"
+        let wire = BotFixtureWire(); wire.answerStatus = "expired"
         let model = await blocked(on: wire)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("sudo.request"),
-            "payload": .object(["request_id": .string("sudo-3")])
-        ]))
+        wire.onEvent?(serverRequest("sudo", id: "sudo-3"))
         await model.answerCredential(action(model), value: "hunter2")
         XCTAssertEqual(model.requestResolution?.outcome, .alreadyResolved)
         XCTAssertEqual(model.connectionState, .connected)
@@ -620,53 +564,30 @@ import XCTest
         model.suspend()
     }
 
-    /// The same rule the other kinds follow: a lost socket cannot tell sent from
-    /// not sent, and the phone never resends on its own.
-    func testALostSocketMidCredentialLeavesTheOutcomeUncertain() async {
-        let wire = BotFixtureWire(); wire.respondFailure = .transport
-        let model = await blocked(on: wire)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("sudo.request"),
-            "payload": .object(["request_id": .string("sudo-4")])
-        ]))
-        await model.answerCredential(action(model), value: "hunter2")
-        XCTAssertEqual(model.requestResolution?.outcome, .uncertain)
-        XCTAssertEqual(model.connectionState, .disconnected)
-        XCTAssertEqual(wire.calls.filter { $0.0 == "sudo.respond" }.count, 1)
-        model.suspend()
-    }
-
     /// An answer captured for one prompt must never satisfy the next one.
     func testAnActionForAReplacedCredentialPromptIsNeverDispatched() async {
         let wire = BotFixtureWire()
         let model = await blocked(on: wire)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("sudo.request"),
-            "payload": .object(["request_id": .string("sudo-5")])
-        ]))
+        wire.onEvent?(serverRequest("sudo", id: "sudo-5"))
         let stale = action(model)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(2), "type": .string("sudo.request"),
-            "payload": .object(["request_id": .string("sudo-6")])
-        ]))
+        wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(1), "type": .string("request.cancel"),
+                               "payload": .object(["id": .string("sudo-5"), "method": .string("sudo"), "reason": .string("timeout")])]))
+        wire.onEvent?(serverRequest("sudo", id: "sudo-6"))
         XCTAssertEqual(model.pendingRequest?.requestID, "sudo-6")
         await model.answerCredential(stale, value: "hunter2")
-        XCTAssertTrue(wire.calls.filter { $0.0 == "sudo.respond" }.isEmpty)
+        XCTAssertFalse(wire.calls.contains { $0.0 == "request.answer" })
         XCTAssertNil(model.requestResolution)
         // The live prompt is still answerable; only the stale action was refused.
         XCTAssertTrue(model.mayAnswer)
         model.suspend()
     }
 
-    /// A snapshot-borne clarify or approval is the outer blocker, so it wins the
-    /// card even while a credential prompt sits underneath it.
+    /// A clarify is the outer blocker, so it wins the card even while a
+    /// credential prompt sits underneath it.
     func testAQuestionOutranksACredentialPrompt() async {
-        let wire = BotFixtureWire(); wire.pendingClarify = BotFixtureWire.clarify()
+        let wire = BotFixtureWire(); wire.openClarify = BotFixtureWire.clarify()
         let model = await blocked(on: wire)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("sudo.request"),
-            "payload": .object(["request_id": .string("sudo-7")])
-        ]))
+        wire.onEvent?(serverRequest("sudo", id: "sudo-7"))
         guard case .question? = model.pendingRequest else { return XCTFail("Expected the question to win") }
         model.suspend()
     }
@@ -677,11 +598,10 @@ import XCTest
         let wire = BotFixtureWire()
         let model = await blocked(on: wire)
         XCTAssertEqual(model.turn, .running)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("terminal.read.request"),
-            "payload": .object(["request_id": .string("term-1")])
-        ]))
-        XCTAssertEqual(model.streamRequest,
+        let task = serverRequest("terminal.read", id: "term-1")
+        wire.openRequests = .array([task])
+        wire.onEvent?(task)
+        XCTAssertEqual(model.pendingRequest,
                        .desktopTask(BotDesktopTaskRequest(kind: .terminalRead, requestID: "term-1")))
         guard case .desktopTask(let request)? = model.pendingRequest else { return XCTFail("Expected a Desktop task") }
         XCTAssertFalse(request.kind.title.isEmpty)
@@ -689,36 +609,38 @@ import XCTest
         XCTAssertFalse(model.pendingRequest?.isAnswerable ?? true)
         XCTAssertFalse(model.mayAnswer)
         XCTAssertNil(model.prepareAnswer())
-        // The snapshot it triggers must stop the app claiming the bot is working.
-        await awaitSnapshot(model)
+        // The request alone stops the app claiming the bot is working, and a
+        // fresh snapshot restores it from `open_requests` rather than undoing that.
         XCTAssertEqual(model.turn, .needsAttention)
+        await model.recover()
+        XCTAssertEqual(model.turn, .needsAttention)
+        XCTAssertEqual(model.pendingRequest?.requestID, "term-1")
         // Answering is off the table, but stopping the blocked work is not.
         XCTAssertTrue(model.mayStop)
+        // Nothing reaches the host: a reply from here would pre-empt Desktop.
+        XCTAssertFalse(wire.calls.contains { ["request.answer", "clarify.lock", "approval.respond"].contains($0.0) })
         model.suspend()
     }
 
-    /// The one Desktop task with a person in the loop can be called off from
-    /// the phone: a ten-minute park becomes one tap, and the host's tool is
-    /// told never to re-ask.
-    func testAnMCPSetupIsDeclinedFromThePhone() async {
-        let wire = BotFixtureWire()
-        let model = await blocked(on: wire)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("mcp.setup.request"),
-            "payload": .object(["request_id": .string("mcp-1"), "server": .string("tavily")])
-        ]))
-        // Declining is not answering: the setup itself still only happens in Desktop.
-        XCTAssertFalse(model.pendingRequest?.isAnswerable ?? true)
-        XCTAssertFalse(model.mayAnswer)
-        XCTAssertTrue(model.mayDecline)
+    /// A password-manager prompt waits for someone at the Mac. The phone cannot
+    /// answer it, but Skip releases the bot now with the host's empty value.
+    func testAVaultPromptIsSkippedFromThePhone() async {
+        for method in ["vault.unlock_prompt", "vault.save_login", "vault.code"] {
+            let wire = BotFixtureWire()
+            let model = await blocked(on: wire)
+            wire.onEvent?(serverRequest(method, id: "vault-1", params: ["site": .string("example.com")]))
+            // Skipping is not answering: the password or code only goes in at the Mac.
+            XCTAssertFalse(model.pendingRequest?.isAnswerable ?? true)
+            XCTAssertFalse(model.mayAnswer)
+            XCTAssertTrue(model.mayDecline)
 
-        await model.declineDesktopTask(action(model))
-        let sent = wire.calls.last { $0.0 == "mcp.setup.respond" }
-        XCTAssertEqual(sent?.1["request_id"], .string("mcp-1"))
-        XCTAssertEqual(sent?.1["result"], .string(#"{"status":"declined"}"#))
-        XCTAssertEqual(model.requestResolution?.outcome, .answered)
-        XCTAssertNil(model.streamRequest)
-        model.suspend()
+            await model.declineDesktopTask(action(model))
+            XCTAssertEqual(wire.calls.last { $0.0 == "request.answer" }?.1,
+                           ["id": .string("vault-1"), "result": .object(["value": .string("")])])
+            XCTAssertEqual(model.requestResolution?.outcome, .answered)
+            XCTAssertNil(model.pendingRequest)
+            model.suspend()
+        }
     }
 
     /// Every other Desktop task has nothing to decline, and a decline aimed at
@@ -726,52 +648,32 @@ import XCTest
     func testADesktopTaskThatCannotBeDeclinedNeverDispatches() async {
         let wire = BotFixtureWire()
         let model = await blocked(on: wire)
-        wire.onEvent?(.object([
-            "session_id": .string("runtime"), "seq": .number(1), "type": .string("preview.read.request"),
-            "payload": .object(["request_id": .string("prev-1")])
-        ]))
+        wire.onEvent?(serverRequest("preview.read", id: "prev-1"))
         XCTAssertFalse(model.mayDecline)
         XCTAssertNil(model.prepareAnswer())
         await model.declineDesktopTask(
             BotConversation.AnswerAction(generation: 0, runtime: "runtime", requestID: "prev-1")
         )
-        XCTAssertTrue(wire.calls.filter { $0.0.hasSuffix(".respond") }.isEmpty)
+        XCTAssertFalse(wire.calls.contains { $0.0 == "request.answer" })
         XCTAssertNil(model.requestResolution)
         model.suspend()
     }
 
-    func testTheMatchingExpireEventClearsTheStreamRequest() async {
-        let wire = BotFixtureWire()
-        let model = await blocked(on: wire)
-        wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(1),
-                               "type": .string("window.read.request"), "payload": .object([:])]))
-        XCTAssertEqual(model.streamRequest?.eventPrefix, "window.read")
-        // A different kind's expiry is not this one's.
-        wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(2),
-                               "type": .string("terminal.read.expire"), "payload": .object([:])]))
-        XCTAssertEqual(model.streamRequest?.eventPrefix, "window.read")
-        wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(3),
-                               "type": .string("window.read.expire"), "payload": .object([:])]))
-        XCTAssertNil(model.streamRequest)
-        model.suspend()
-    }
-
-    /// These kinds exist only in the stream, so a gap or a lost socket makes their
-    /// state unknowable. Dropping the card beats showing a stale one.
-    func testASequenceGapAndADisconnectBothDropTheStreamRequest() async {
+    /// A gap or a lost socket may hide a `request.cancel`. Dropping the card
+    /// beats showing a stale one until the next snapshot restores the real list.
+    func testASequenceGapAndADisconnectBothDropTheRequest() async {
         for breakStream in [true, false] {
             let wire = BotFixtureWire()
             let model = await blocked(on: wire)
-            wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(1),
-                                   "type": .string("tour.request"), "payload": .object([:])]))
-            XCTAssertEqual(model.streamRequest?.eventPrefix, "tour")
+            wire.onEvent?(serverRequest("tour", id: "tour-1"))
+            XCTAssertEqual(model.pendingRequest?.requestID, "tour-1")
             if breakStream {
                 wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(9),
                                        "type": .string("tool.start"), "payload": .object([:])]))
             } else {
                 wire.onDisconnect?(BotFailure.transport)
             }
-            XCTAssertNil(model.streamRequest)
+            XCTAssertNil(model.pendingRequest)
             model.suspend()
         }
     }
@@ -813,8 +715,32 @@ import XCTest
     func testAnUnaddressableRequestShowsAttentionWithoutACard() async {
         let wire = BotFixtureWire()
         wire.pendingApproval = .object(["future_field": .string("?"), "choices": .string("not-a-list")])
-        wire.pendingClarify = .object(["questions": .array([])])
+        wire.openClarify = .object(["request_id": .string("clr-9"), "questions": .array([])])
         let model = await blocked(on: wire)
+        XCTAssertNil(model.pendingRequest)
+        XCTAssertFalse(model.mayAnswer)
+        XCTAssertEqual(model.turn, .needsAttention)
+        model.suspend()
+    }
+
+    /// A connection operation with no row the phone can read has no card to
+    /// show, but the bot is parked on it all the same. The snapshot's
+    /// `pending_connection` says so, and the turn must not claim it is working.
+    func testAnUnreadableConnectionOperationShowsAttentionWithoutACard() async {
+        let wire = BotFixtureWire()
+        let model = await blocked(on: wire)
+        XCTAssertEqual(model.turn, .running)
+        wire.transformResume = { snapshot in
+            var fields = snapshot.fields ?? [:]
+            fields["pending_connection"] = .object([
+                "op_id": .string("op-1"), "seq": .number(1), "deadline_at": .number(1_900_000_000),
+                "timeout_seconds": .number(600), "targets": .array([]), "future_field": .bool(true)
+            ])
+            return .object(fields)
+        }
+        wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(1),
+                               "type": .string("connection.request"), "payload": .object(["op_id": .string("op-1")])]))
+        await awaitSnapshot(model)
         XCTAssertNil(model.pendingRequest)
         XCTAssertFalse(model.mayAnswer)
         XCTAssertEqual(model.turn, .needsAttention)
@@ -898,13 +824,13 @@ extension BotAnsweringTests {
         }
     }
 
-    func testModernDesktopDeclineAndApprovalKeepDistinctResultVocabulary() async {
+    func testModernVaultSkipAndApprovalKeepDistinctResultVocabulary() async {
         let wire = BotFixtureWire()
-        wire.openRequests = .array([serverRequest("mcp.setup")])
+        wire.openRequests = .array([serverRequest("vault.code")])
         let model = await blocked(on: wire)
         await model.declineDesktopTask(action(model))
         XCTAssertEqual(wire.calls.last { $0.0 == "request.answer" }?.1["result"],
-                       .object(["value": .string(BotDesktopTaskRequest.declinedResult)]))
+                       .object(["value": .string("")]))
         model.suspend()
 
         wire.openRequests = .array([serverRequest("approval", params: BotFixtureWire.approval(id: "queue-id").fields!)])
@@ -1067,4 +993,417 @@ extension BotAnsweringTests {
         model.suspend()
     }
 
+}
+
+// MARK: connection operations
+
+/// Builders for `manage_connections` frames in the host's shapes
+/// (`tui_gateway/contracts/connectors_operation.py` at the pin).
+enum BotConnectionFixture {
+    static let deadline = 1_900_000_000.0
+
+    static func gmail(state: String = "pending") -> BotJSON {
+        .object(["name": .string("gmail"), "kind": .string("connector"), "action": .string("connect"),
+                 "state": .string(state), "connect_url": .string("https://accounts.example/oauth?op=1"),
+                 "detail": .string("Read, label and archive mail.")])
+    }
+
+    static func github(state: String = "pending") -> BotJSON {
+        .object(["name": .string("github"), "kind": .string("mcp"), "action": .string("install"),
+                 "state": .string(state),
+                 "required_env": .array([
+                    .object(["name": .string("GITHUB_TOKEN"), "required": .bool(true), "secret": .bool(true),
+                             "default": .string(""), "prompt": .string("A fine-grained token")]),
+                    .object(["name": .string("GITHUB_HOST"), "required": .bool(false), "secret": .bool(false),
+                             "default": .string("github.com")])
+                 ])])
+    }
+
+    static func operation(_ id: String = "op-1", seq: Int = 1, settled: Bool? = nil,
+                          targets: [BotJSON] = [gmail(), github()]) -> BotJSON {
+        var fields: [String: BotJSON] = [
+            "op_id": .string(id), "seq": .number(Double(seq)), "deadline_at": .number(deadline),
+            "timeout_seconds": .number(300), "targets": .array(targets), "tool_call_id": .string("call-1")
+        ]
+        if let settled { fields["settled"] = .bool(settled) }
+        return .object(fields)
+    }
+
+    static func event(_ type: String, seq: Int, payload: BotJSON) -> BotJSON {
+        .object(["session_id": .string("runtime"), "seq": .number(Double(seq)), "type": .string(type), "payload": payload])
+    }
+}
+
+extension BotPendingRequestParsingTests {
+    /// Unknown values keep their row but offer nothing; a row without a name or a
+    /// repeated name is dropped; the update frame's own `from`/`to` keys are ignored.
+    func testConnectionOperationReadsEveryHostShapeTolerantly() throws {
+        var payload = BotConnectionFixture.operation(seq: 7, settled: false, targets: [
+            BotConnectionFixture.gmail(),
+            BotConnectionFixture.github(),
+            .object(["name": .string("linear"), "kind": .string("mcp"), "action": .string("authorize"),
+                     "state": .string("initiated"), "connect_url": .string("https://mcp.linear.app/authorize")]),
+            .object(["name": .string("notion"), "kind": .string("mcp"), "action": .string("enable"), "state": .string("pending")]),
+            .object(["name": .string("future"), "kind": .string("hologram"), "action": .string("beam"), "state": .string("paused"),
+                     "connect_url": .string("https://example.com")]),
+            .object(["kind": .string("connector"), "state": .string("pending")]),
+            BotConnectionFixture.gmail(state: "connected")
+        ]).fields!
+        payload["target"] = .string("gmail"); payload["from"] = .string("pending"); payload["to"] = .string("initiated")
+        payload["actor"] = .string("backend_watcher"); payload["detail"] = .string("change detail, not a row")
+        let operation = try XCTUnwrap(BotConnectionOperation(.object(payload)))
+
+        XCTAssertEqual(operation.opID, "op-1")
+        XCTAssertEqual(operation.seq, 7)
+        XCTAssertEqual(operation.deadline, Date(timeIntervalSince1970: BotConnectionFixture.deadline))
+        XCTAssertFalse(operation.isSettled)
+        XCTAssertEqual(operation.targets.map(\.name), ["gmail", "github", "linear", "notion", "future"])
+        XCTAssertEqual(operation.targets[0].state, .pending)
+        XCTAssertEqual(operation.targets[0].detail, "Read, label and archive mail.")
+
+        let github = operation.targets[1]
+        XCTAssertEqual(github.requiredEnv.map(\.name), ["GITHUB_TOKEN", "GITHUB_HOST"])
+        XCTAssertTrue(github.requiredEnv[0].isSecret)
+        XCTAssertNil(github.requiredEnv[0].defaultValue)
+        XCTAssertEqual(github.requiredEnv[1].defaultValue, "github.com")
+        XCTAssertFalse(github.requiredEnv[1].isRequired)
+        // A missing `required_env` is an install with nothing left to ask.
+        XCTAssertEqual(operation.targets[3].requiredEnv, [])
+
+        let future = operation.targets[4]
+        XCTAssertNil(future.kind); XCTAssertNil(future.action); XCTAssertNil(future.state)
+        XCTAssertFalse(future.canSkip); XCTAssertFalse(future.canConnect)
+        XCTAssertNil(future.linkToOpen); XCTAssertFalse(future.finishesOnTheMac)
+
+        // A known kind and state do not make an unknown action answerable.
+        var teleport = BotConnectionFixture.gmail().fields!
+        teleport["action"] = .string("teleport")
+        let unknownAction = try XCTUnwrap(BotConnectionOperation.Target(.object(teleport)))
+        XCTAssertNil(unknownAction.action)
+        XCTAssertFalse(unknownAction.canSkip)
+        XCTAssertNil(unknownAction.linkToOpen)
+    }
+
+    func testAConnectionOperationWithoutAnIdCounterDeadlineOrRowIsNotShown() {
+        var valid = BotConnectionFixture.operation().fields!
+        for key in ["op_id", "seq", "deadline_at", "targets"] {
+            var broken = valid; broken.removeValue(forKey: key)
+            XCTAssertNil(BotConnectionOperation(.object(broken)), key)
+        }
+        valid["targets"] = .array([.object(["kind": .string("mcp")])])
+        XCTAssertNil(BotConnectionOperation(.object(valid)))
+        XCTAssertNil(BotConnectionOperation(.null))
+    }
+
+    /// Each row offers only the moves the host allows for its kind and state.
+    func testConnectionRowsOfferOnlyWhatTheHostAllows() throws {
+        func row(_ json: BotJSON) throws -> BotConnectionOperation.Target {
+            try XCTUnwrap(BotConnectionOperation.Target(json))
+        }
+        // A managed connector opens its https sign-in while pending or started.
+        let gmail = try row(BotConnectionFixture.gmail())
+        XCTAssertEqual(gmail.linkToOpen, URL(string: "https://accounts.example/oauth?op=1"))
+        XCTAssertFalse(gmail.canConnect)
+        XCTAssertTrue(gmail.canSkip)
+        for state in ["failed", "expired"] {
+            let dead = try row(BotConnectionFixture.gmail(state: state))
+            XCTAssertNil(dead.linkToOpen, state)
+            XCTAssertTrue(dead.canSkip, state)
+        }
+        for state in ["connected", "skipped", "not_connected", "unavailable"] {
+            XCTAssertFalse(try row(BotConnectionFixture.gmail(state: state)).canSkip, state)
+        }
+        var app = BotConnectionFixture.gmail().fields!
+        app["connect_url"] = .string("hermes-desktop://connections/done")
+        XCTAssertNil(try row(.object(app)).linkToOpen)
+
+        // An MCP sign-in returns to the Mac's loopback: never a phone link.
+        let linear = try row(.object(["name": .string("linear"), "kind": .string("mcp"), "action": .string("authorize"),
+                                      "state": .string("initiated"), "connect_url": .string("https://mcp.linear.app/a")]))
+        XCTAssertNil(linear.linkToOpen)
+        XCTAssertTrue(linear.finishesOnTheMac)
+        XCTAssertFalse(linear.canConnect)
+        XCTAssertTrue(linear.canSkip)
+        var oauthInstall = BotConnectionFixture.github(state: "initiated").fields!
+        oauthInstall["connect_url"] = .string("https://auth.example/authorize")
+        XCTAssertTrue(try row(.object(oauthInstall)).finishesOnTheMac)
+
+        // An install connects once every required value is filled, and only with declared names.
+        let github = try row(BotConnectionFixture.github())
+        XCTAssertTrue(github.canConnect)
+        XCTAssertFalse(github.accepts([:]))
+        XCTAssertFalse(github.accepts(["GITHUB_TOKEN": ""]))
+        XCTAssertTrue(github.accepts(["GITHUB_TOKEN": "ghp_1"]))
+        XCTAssertTrue(github.accepts(["GITHUB_TOKEN": "ghp_1", "GITHUB_HOST": "ghe.example"]))
+        XCTAssertFalse(github.accepts(["GITHUB_TOKEN": "ghp_1", "PATH": "/tmp"]))
+        XCTAssertTrue(try row(BotConnectionFixture.github(state: "failed")).canConnect)
+        XCTAssertFalse(try row(BotConnectionFixture.github(state: "initiated")).canConnect)
+        let enable = try row(.object(["name": .string("notion"), "kind": .string("mcp"), "action": .string("enable"),
+                                      "state": .string("pending")]))
+        XCTAssertTrue(enable.accepts([:]))
+    }
+
+    /// A plain field starts at its default and Connect sends it, because the host
+    /// never fills one in: a required one is ready untouched, and only emptying it
+    /// holds Connect back.
+    func testConnectionFieldsSendTheirDefaultUntouched() throws {
+        let linear = try XCTUnwrap(BotConnectionOperation.Target(.object([
+            "name": .string("linear"), "kind": .string("mcp"), "action": .string("install"), "state": .string("pending"),
+            "required_env": .array([.object(["name": .string("LINEAR_URL"), "required": .bool(true),
+                                             "secret": .bool(false), "default": .string("https://api.linear.app")])])
+        ])))
+        XCTAssertEqual(linear.env(from: [:]), ["LINEAR_URL": "https://api.linear.app"])
+        XCTAssertTrue(linear.accepts(linear.env(from: [:])))
+        XCTAssertEqual(linear.env(from: ["LINEAR_URL": " https://linear.example "]), ["LINEAR_URL": "https://linear.example"])
+        XCTAssertFalse(linear.accepts(linear.env(from: ["LINEAR_URL": " "])))
+
+        // An optional default rides along too; a secret never has one.
+        let github = try XCTUnwrap(BotConnectionOperation.Target(BotConnectionFixture.github()))
+        XCTAssertEqual(github.env(from: ["GITHUB_TOKEN": "ghp_1"]), ["GITHUB_TOKEN": "ghp_1", "GITHUB_HOST": "github.com"])
+        XCTAssertEqual(github.env(from: ["GITHUB_TOKEN": "ghp_1", "GITHUB_HOST": ""]), ["GITHUB_TOKEN": "ghp_1"])
+    }
+
+    func testConnectionAnswersUseTheHostsResultShape() {
+        XCTAssertEqual(BotConnectionOperation.Answer.skip(target: "gmail").result,
+                       .object(["targets": .array([.object(["name": .string("gmail"), "status": .string("skipped")])])]))
+        XCTAssertEqual(BotConnectionOperation.Answer.connect(target: "notion", env: [:]).result,
+                       .object(["targets": .array([.object(["name": .string("notion"), "status": .string("approved")])])]))
+        XCTAssertEqual(BotConnectionOperation.Answer.connect(target: "github", env: ["GITHUB_TOKEN": "ghp_1"]).result,
+                       .object(["targets": .array([.object(["name": .string("github"), "status": .string("approved"),
+                                                            "env": .object(["GITHUB_TOKEN": .string("ghp_1")])])])]))
+        XCTAssertEqual(BotConnectionOperation.Answer.continueWithout.result, .object(["settled_by": .string("continue")]))
+    }
+
+    /// A frame that is not newer, or belongs to another operation, moves nothing.
+    func testOnlyANewerFrameOfTheSameOperationReplacesIt() throws {
+        let held = try XCTUnwrap(BotConnectionOperation(BotConnectionFixture.operation(seq: 3)))
+        let older = try XCTUnwrap(BotConnectionOperation(BotConnectionFixture.operation(seq: 2, targets: [BotConnectionFixture.gmail(state: "connected")])))
+        let equal = try XCTUnwrap(BotConnectionOperation(BotConnectionFixture.operation(seq: 3, targets: [BotConnectionFixture.gmail(state: "connected")])))
+        let foreign = try XCTUnwrap(BotConnectionOperation(BotConnectionFixture.operation("op-2", seq: 9)))
+        let newer = try XCTUnwrap(BotConnectionOperation(BotConnectionFixture.operation(seq: 4, targets: [BotConnectionFixture.gmail(state: "connected")])))
+        XCTAssertEqual(held.applying(older), held)
+        XCTAssertEqual(held.applying(equal), held)
+        XCTAssertEqual(held.applying(foreign), held)
+        XCTAssertEqual(held.applying(newer), newer)
+    }
+
+    func testTheDeadlineReadsInWholeMinutesAndNeverBelowOne() {
+        let deadline = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(BotConnectionOperation.minutesLeft(until: deadline, now: deadline.addingTimeInterval(-300)), 5)
+        XCTAssertEqual(BotConnectionOperation.minutesLeft(until: deadline, now: deadline.addingTimeInterval(-241)), 5)
+        XCTAssertEqual(BotConnectionOperation.minutesLeft(until: deadline, now: deadline.addingTimeInterval(-240)), 4)
+        XCTAssertEqual(BotConnectionOperation.minutesLeft(until: deadline, now: deadline.addingTimeInterval(30)), 1)
+    }
+}
+
+extension BotAnsweringTests {
+    private func operation(_ model: BotConversation) -> BotConnectionOperation? {
+        guard case .connection(let operation)? = model.pendingRequest else { return nil }
+        return operation
+    }
+
+    /// The card restores from the snapshot with the host's deadline, follows only
+    /// newer frames, and leaves on the settled one without an older frame or
+    /// snapshot bringing it back.
+    func testAConnectionCardRestoresFollowsNewerFramesAndLeavesWhenSettled() async throws {
+        let wire = BotFixtureWire()
+        wire.pendingConnection = BotConnectionFixture.operation(seq: 2)
+        let model = await blocked(on: wire)
+        let restored = try XCTUnwrap(operation(model))
+        XCTAssertEqual(restored.seq, 2)
+        XCTAssertEqual(restored.deadline, Date(timeIntervalSince1970: BotConnectionFixture.deadline))
+        XCTAssertEqual(model.turn, .needsAttention)
+        XCTAssertTrue(model.mayAnswer)
+
+        wire.onEvent?(BotConnectionFixture.event("connection.update", seq: 1, payload: BotConnectionFixture.operation(
+            seq: 1, settled: false, targets: [BotConnectionFixture.gmail(state: "connected"), BotConnectionFixture.github()])))
+        XCTAssertEqual(operation(model)?.targets.first?.state, .pending)
+
+        wire.onEvent?(BotConnectionFixture.event("connection.update", seq: 2, payload: BotConnectionFixture.operation(
+            seq: 3, settled: false, targets: [BotConnectionFixture.gmail(state: "connected"), BotConnectionFixture.github()])))
+        XCTAssertEqual(operation(model)?.targets.first?.state, .connected)
+        // The snapshot this frame triggers still holds seq 2; it must not regress the row.
+        // The turn does not change, so wait on the host serving that read instead.
+        let served = expectation(description: "Snapshot served")
+        wire.transformResume = { snapshot in
+            wire.transformResume = nil
+            served.fulfill()
+            return snapshot
+        }
+        await fulfillment(of: [served], timeout: 5)
+        XCTAssertEqual(operation(model)?.seq, 3)
+        XCTAssertEqual(model.turn, .needsAttention)
+
+        wire.onEvent?(BotConnectionFixture.event("connection.update", seq: 3, payload: BotConnectionFixture.operation(
+            seq: 4, settled: true, targets: [BotConnectionFixture.gmail(state: "connected"), BotConnectionFixture.github(state: "not_connected")])))
+        XCTAssertNil(model.pendingRequest)
+        // A late request frame for the settled operation stays closed.
+        wire.onEvent?(BotConnectionFixture.event("connection.request", seq: 4, payload: BotConnectionFixture.operation(seq: 2)))
+        XCTAssertNil(model.pendingRequest)
+        wire.pendingConnection = .null
+        await awaitSnapshot(model)
+        XCTAssertNil(model.pendingRequest)
+        XCTAssertEqual(model.turn, .running)
+        model.suspend()
+    }
+
+    /// Resume omits `pending_connection` once nothing is open: answered at the
+    /// Mac, or timed out. The card goes with it.
+    func testAResumeWithoutPendingConnectionClearsTheCard() async {
+        let wire = BotFixtureWire()
+        wire.pendingConnection = BotConnectionFixture.operation()
+        let model = await blocked(on: wire)
+        XCTAssertNotNil(operation(model))
+        wire.pendingConnection = .null
+        wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(1),
+                               "type": .string("session.info"), "payload": .object([:])]))
+        await awaitSnapshot(model)
+        XCTAssertNil(model.pendingRequest)
+        XCTAssertEqual(model.turn, .running)
+        model.suspend()
+    }
+
+    /// A reconnect drops the card and restores it from the host, even when the
+    /// replay ring repeats the request frame: one card, one row per app.
+    func testAReconnectRestoresTheCardWithoutADuplicateRow() async {
+        let wire = BotFixtureWire()
+        wire.pendingConnection = BotConnectionFixture.operation(seq: 2)
+        let model = await blocked(on: wire)
+        wire.onDisconnect?(BotFailure.transport)
+        XCTAssertNil(model.pendingRequest)
+        wire.replay = BotFixtureWire.replay(latest: 1, events: [
+            BotConnectionFixture.event("connection.request", seq: 1, payload: BotConnectionFixture.operation(seq: 1))
+        ])
+        await model.recover()
+        XCTAssertEqual(operation(model)?.seq, 2)
+        XCTAssertEqual(operation(model)?.targets.map(\.name), ["gmail", "github"])
+        XCTAssertEqual(model.turn, .needsAttention)
+        model.suspend()
+    }
+
+    /// Skip answers only its row: the operation stays open and answerable. Connect
+    /// sends the typed values once and only when every required one is there.
+    func testSkipAndConnectAnswerOneRowAndLeaveTheOperationOpen() async {
+        let wire = BotFixtureWire()
+        wire.pendingConnection = BotConnectionFixture.operation()
+        let model = await blocked(on: wire)
+
+        await model.respondToConnection(action(model), .skip(target: "gmail"))
+        XCTAssertEqual(wire.calls.last { $0.0 == "connection.respond" }?.1, [
+            "session_id": .string("runtime"), "op_id": .string("op-1"),
+            "result": .object(["targets": .array([.object(["name": .string("gmail"), "status": .string("skipped")])])])
+        ])
+        XCTAssertNotNil(operation(model))
+        XCTAssertEqual(model.turn, .needsAttention)
+        XCTAssertNil(model.requestResolution)
+        XCTAssertTrue(model.mayAnswer)
+
+        await model.respondToConnection(action(model), .connect(target: "github", env: ["GITHUB_HOST": "ghe.example"]))
+        await model.respondToConnection(action(model), .connect(target: "gmail", env: [:]))
+        XCTAssertEqual(wire.calls.filter { $0.0 == "connection.respond" }.count, 1)
+
+        await model.respondToConnection(action(model), .connect(target: "github", env: ["GITHUB_TOKEN": "ghp_1"]))
+        let sent = wire.calls.filter { $0.0 == "connection.respond" }
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(sent.last?.1["result"], .object(["targets": .array([.object([
+            "name": .string("github"), "status": .string("approved"), "env": .object(["GITHUB_TOKEN": .string("ghp_1")])
+        ])])]))
+        model.suspend()
+    }
+
+    /// Continue settles the whole operation: the card goes at once and the host
+    /// decides what the turn does next.
+    func testContinueSettlesTheOperationAndReleasesTheBot() async {
+        let wire = BotFixtureWire()
+        wire.pendingConnection = BotConnectionFixture.operation()
+        wire.connectionRespond = { _ in
+            wire.pendingConnection = .null
+            return .object(["status": .string("ok"), "settled": .bool(true)])
+        }
+        let model = await blocked(on: wire)
+        await model.respondToConnection(action(model), .continueWithout)
+        XCTAssertEqual(wire.calls.last { $0.0 == "connection.respond" }?.1["result"], .object(["settled_by": .string("continue")]))
+        XCTAssertNil(model.pendingRequest)
+        await awaitSnapshot(model)
+        XCTAssertEqual(model.turn, .running)
+        model.suspend()
+    }
+
+    /// 4004 means the operation settled before the answer landed: the card goes
+    /// inert with that verdict, the connection stays up, and a snapshot follows.
+    func testAnAnswerToASettledOperationReportsAlreadyResolved() async {
+        let wire = BotFixtureWire()
+        wire.pendingConnection = BotConnectionFixture.operation()
+        wire.respondFailure = .rejected(4004)
+        let model = await blocked(on: wire)
+        await model.respondToConnection(action(model), .skip(target: "gmail"))
+        XCTAssertEqual(model.requestResolution, BotRequestResolution(requestID: "op-1", outcome: .alreadyResolved))
+        XCTAssertFalse(model.mayAnswer)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertEqual(model.connectionState, .connected)
+        wire.pendingConnection = .null
+        await awaitSnapshot(model)
+        XCTAssertNil(model.pendingRequest)
+        model.suspend()
+    }
+
+    /// A lost reply cannot tell sent from not sent: the outcome is unknown and
+    /// the answer is never resent.
+    func testALostConnectionAnswerIsUncertainAndNeverResent() async {
+        let wire = BotFixtureWire()
+        wire.pendingConnection = BotConnectionFixture.operation()
+        let model = await blocked(on: wire)
+        wire.respondFailure = .transport
+        await model.respondToConnection(action(model), .continueWithout)
+        XCTAssertEqual(model.requestResolution?.outcome, .uncertain)
+        XCTAssertEqual(model.connectionState, .disconnected)
+        wire.respondFailure = nil
+        await model.recover()
+        XCTAssertEqual(wire.calls.filter { $0.0 == "connection.respond" }.count, 1)
+        XCTAssertTrue(model.mayAnswer)
+        model.suspend()
+    }
+
+    /// Guide or Queue while the card is open releases the operation first, so the
+    /// message does not wait behind the blocked tool. A host that already settled
+    /// it (4004) does not hold the message back; Interrupt needs no Continue.
+    func testGuideAndQueueContinueAnOpenOperationBeforeTheMessage() async throws {
+        for (mode, settledAlready) in [(BotPromptMode.steer, false), (.queue, false), (.steer, true), (.redirect, false)] {
+            let wire = BotFixtureWire()
+            wire.pendingConnection = BotConnectionFixture.operation()
+            wire.connectionRespond = { _ in
+                if settledAlready { throw BotFailure.rejected(4004) }
+                return .object(["status": .string("ok"), "settled": .bool(true)])
+            }
+            let model = await blocked(on: wire)
+            model.editDraft("check the inbox")
+            await model.submit(try XCTUnwrap(model.preparePrompt(mode)))
+            let methods = wire.calls.map(\.0).filter { $0 == "connection.respond" || $0 == mode.method }
+            if mode == .redirect {
+                XCTAssertEqual(methods, [mode.method])
+            } else {
+                XCTAssertEqual(methods, ["connection.respond", mode.method], "\(mode)")
+                XCTAssertEqual(wire.calls.first { $0.0 == "connection.respond" }?.1["result"],
+                               .object(["settled_by": .string("continue")]))
+            }
+            XCTAssertEqual(model.draft, "")
+            model.suspend()
+        }
+    }
+
+    /// A lost Continue fails the message before it is dispatched: the draft stays
+    /// and nothing is retried.
+    func testALostContinueHoldsTheMessageBack() async throws {
+        let wire = BotFixtureWire()
+        wire.pendingConnection = BotConnectionFixture.operation()
+        wire.connectionRespond = { _ in throw BotFailure.transport }
+        let model = await blocked(on: wire)
+        model.editDraft("check the inbox")
+        await model.submit(try XCTUnwrap(model.preparePrompt(.steer)))
+        XCTAssertFalse(wire.calls.contains { $0.0 == "session.steer" })
+        XCTAssertEqual(wire.calls.filter { $0.0 == "connection.respond" }.count, 1)
+        XCTAssertEqual(model.draft, "check the inbox")
+        XCTAssertFalse(model.uncertainSend)
+        model.suspend()
+    }
 }

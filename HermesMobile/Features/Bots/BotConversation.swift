@@ -6,6 +6,36 @@ import Observation
     static let canonicalTitle = "Bot Chat"
     enum ConnectionState { case disconnected, recovering, connected }
     enum TurnState { case unknown, idle, submitting, running, needsAttention, stopping, uncertain, interrupted }
+    /// What the Bot Chat title face shows for the current turn (#757). Waiting and failed
+    /// override the pinned expression, since a pin is only the resting face; every other
+    /// surface keeps the pin. Only `.working` moves beyond a blink.
+    enum TitleFace {
+        case resting, working, waiting, failed
+
+        /// The eyes that replace the pinned expression, or nil to keep it.
+        var expression: BotAvatarExpression? {
+            switch self {
+            case .waiting: return .curious
+            case .failed: return .sad
+            case .resting, .working: return nil
+            }
+        }
+
+        /// The motion for an active scene: only work sways (from `beatStart`); every other
+        /// face just blinks, so a pending approval never runs the 15 fps beat.
+        func motion(beatStart: Date) -> BotFaceMotion {
+            self == .working ? .working(since: beatStart) : .idle
+        }
+
+        /// What VoiceOver adds after the bot's name; nil when the face shows no state.
+        var accessibilityValue: String? {
+            switch self {
+            case .waiting: return String(localized: "Needs attention")
+            case .failed: return String(localized: "Turn failed")
+            case .resting, .working: return nil
+            }
+        }
+    }
     struct StopAction: Equatable { let generation: Int; let revision: Int; let runtime: String }
     /// The identity an answer is bound to, captured when the user taps and
     /// revalidated at the socket write so a stale card cannot answer a newer
@@ -38,6 +68,11 @@ import Observation
     @ObservationIgnored private var recentRoot: String?
     @ObservationIgnored private var recentOwner: UUID?
     private(set) var liveMessages: [ChatMessage] = []
+    /// The settled row that opened the running turn (its prompt or delegation
+    /// delivery), once the host has persisted it into `messages`; nil while the
+    /// prompt is only live or none is in flight. The live prompt row draws
+    /// only when this is nil.
+    private(set) var activePromptMessageID: String?
     private(set) var errorMessage: String?
     let chatControls = BotChatControls()
     let attachments: BotAttachmentDraft
@@ -71,28 +106,60 @@ import Observation
     private(set) var sequence = 0
     private(set) var epoch: String?
     private(set) var replayWasReset = false
-    private(set) var settledActivity: [BotSettledActivity] = []
+    private(set) var settledActivity: [BotSettledActivity] = [] {
+        didSet { settledActivityByAnchor = Dictionary(grouping: settledActivity, by: \.anchorMessageID) }
+    }
+    /// `settledActivity` grouped by the message each block precedes (nil: after
+    /// the last), rebuilt on every assignment so the transcript body looks a
+    /// row's activity up instead of scanning the whole history per message.
+    private(set) var settledActivityByAnchor: [String?: [BotSettledActivity]] = [:]
     private(set) var liveActivity = BotTurnActivity()
     private(set) var plan: BotPlan?
-    /// `status.update` text while the bot works (compacting, compressing); nil once ready.
+    /// The transient status line while the bot works: `status.update` text
+    /// (compacting, compressing) or the latest `thinking.delta` spinner text.
+    /// Replaced, never appended; nil once ready or when the turn settles.
     private(set) var workStatus: String?
-    /// The approval or question from the last snapshot's `pending_approval` /
-    /// `pending_clarify`. Snapshot-owned, so an answer given in Desktop clears it
-    /// on the next read without the phone polling for it.
+    /// The approval from the last snapshot's `pending_approval`. Snapshot-owned,
+    /// so an answer given in Desktop clears it on the next read without the phone
+    /// polling for it.
     private(set) var blockingRequest: BotPendingRequest?
-    /// A legacy credential prompt or Desktop-renderer task, owned by the event stream.
-    private(set) var streamRequest: BotStreamRequest?
-    /// Nil means a legacy host. An empty array authoritatively clears modern requests.
-    private var serverRequests: [BotServerRequest]?
+    /// Server requests for this runtime, live or restored from `open_requests`.
+    private var serverRequests: [BotServerRequest] = []
+    /// The open `manage_connections` operation, live or restored from
+    /// `pending_connection`. Cleared by its settled frame, a snapshot without
+    /// the field, or a disconnect; reconnecting restores it from the host.
+    private(set) var connectionOperation: BotConnectionOperation?
+    /// The last operation seen settling, so an older in-flight frame or snapshot
+    /// never brings its card back.
+    private var settledConnectionID: String?
     private var requestRevision = 0
     /// Set while an answer is in flight, to keep the card's controls inert.
     private(set) var answeringRequestID: String?
     /// The verdict on the request currently on screen, if it has one.
     private(set) var requestResolution: BotRequestResolution?
+    /// The last action the host confirmed, for the chat view's haptic.
+    private(set) var feedback: BotFeedback?
+    /// Rows with a `message.react` in flight. Their footer controls stay inert
+    /// and `react` drops any other Tapback for them until the reply, so a late
+    /// reply never overwrites a newer choice.
+    private(set) var reactingRowIDs: Set<Int> = []
+    /// Reaction lists the host sent (a `message.react` reply or a live
+    /// `message.reaction`), by row, stamped with `reactionRevision`. A full
+    /// snapshot requested before a list arrived may have read the older one,
+    /// so it keeps these rows' newer lists; a later snapshot drops them.
+    @ObservationIgnored private var reactionPatches: [Int: (revision: Int, reactions: JSONValue)] = [:]
+    @ObservationIgnored private var reactionRevision = 0
+    /// On once a snapshot shows the turn busy, so the snapshot that settles it
+    /// idle plays one completion. A Stop, an interruption, a new runtime and
+    /// `suspend()` turn it off: a stopped turn, one that ended while the app was
+    /// away, or one lost with its runtime plays none.
+    @ObservationIgnored private var completionArmed = false
     private var tip: String?
     private var generation = 0
     private var turnRevision = 0
-    private var turnStartedAt: Double?
+    /// The host's start time for the current turn, in Unix seconds; the only
+    /// date the live prompt has until the turn settles.
+    private(set) var turnStartedAt: Double?
     private var confirmedWorkingStart: Date?
     private var clockRevision = 0
     /// When this phone first saw the current turn, for a host that sends no start time.
@@ -162,7 +229,7 @@ import Observation
     private func discardRecentTranscript(keepingVisibleHistory: Bool = false) {
         historyCache?.recent.remove { $0 == recentKey }
         recentOwner = nil; recentRoot = nil; hasRecentTranscript = false
-        if !keepingVisibleHistory { messages = []; settledActivity = []; liveMessages = [] }
+        if !keepingVisibleHistory { messages = []; settledActivity = []; liveMessages = []; activePromptMessageID = nil }
     }
 
     /// Only a current server snapshot can start the transcript clock. Live Activity's
@@ -247,6 +314,18 @@ import Observation
             && !localOperation && !uncertainStop
     }
 
+    /// Waiting covers any blocking request, including one the phone cannot read. Failed
+    /// lasts while the host keeps the turn's error, so it survives reopening the chat and
+    /// clears on the next send; a user Stop rests. A disconnect resets `turn`, so it rests too.
+    var titleFace: TitleFace {
+        switch turn {
+        case .needsAttention: return .waiting
+        case .interrupted: return turnFailed ? .failed : .resting
+        case .running, .stopping: return .working
+        case .unknown, .idle, .submitting, .uncertain: return .resting
+        }
+    }
+
     var mayGuide: Bool {
         hydrated && connectionState == .connected && [.running, .needsAttention].contains(turn)
             && !localOperation && !uncertainSend && !uncertainStop && answeringRequestID == nil
@@ -272,15 +351,17 @@ import Observation
 
     var mayEditDraft: Bool { hydrated && !localOperation }
 
-    /// The one request blocking this conversation. A clarify or approval wins over
-    /// a stream request: it is the outer blocker, and the host resolves the inner
-    /// one on its own deadline either way.
+    /// The one request blocking this conversation, in order: a question, the
+    /// snapshot's approval, a server-request approval, any other server request
+    /// (a credential prompt or a Desktop task such as `vault.*`), then an open
+    /// connection operation.
     var pendingRequest: BotPendingRequest? {
-        let current = serverRequests?.compactMap(\.pending) ?? []
+        let current = serverRequests.compactMap(\.pending)
         return current.first { if case .question = $0 { return true }; return false }
             ?? blockingRequest
             ?? current.first { if case .approval = $0 { return true }; return false }
-            ?? current.first ?? streamRequest?.pending
+            ?? current.first
+            ?? connectionOperation.map(BotPendingRequest.connection)
     }
 
     /// True when the user may answer the request on screen.
@@ -289,20 +370,19 @@ import Observation
         return mayDispatchAnswer(for: request.requestID)
     }
 
-    /// True when the request on screen can be called off from here. Separate
-    /// from `mayAnswer`: a Desktop task is never answerable, but the one kind
-    /// with a person in the loop can still be declined rather than waited out.
+    /// True when the request on screen can be skipped from here. Separate from
+    /// `mayAnswer`: a Desktop task is never answerable, but the kinds with a
+    /// person in the loop can still be declined rather than waited out.
     var mayDecline: Bool {
-        guard case .desktopTask(let task)? = pendingRequest, task.kind.isDeclinable else { return false }
+        guard case .desktopTask(let task)? = pendingRequest, task.kind.needsSomeoneAtTheMac else { return false }
         return mayDispatchAnswer(for: task.requestID)
     }
 
     /// A resolved or expired request stays inert; an uncertain one is actionable
     /// again once reconnected, because a second deliberate tap is the user's
     /// decision, not an automatic replay.
-    private func mayDispatchAnswer(for requestID: String?) -> Bool {
-        guard connectionState == .connected, !localOperation, answeringRequestID == nil,
-              let id = requestID else { return false }
+    private func mayDispatchAnswer(for id: String) -> Bool {
+        guard connectionState == .connected, !localOperation, answeringRequestID == nil else { return false }
         if let resolution = requestResolution, resolution.requestID == id { return !resolution.blocksFurtherAnswers }
         return true
     }
@@ -313,15 +393,23 @@ import Observation
         drafts.setDraft(text, for: draftKey)
     }
 
+    /// A tapped quick-reply chip. It fills an empty draft and never sends: Send
+    /// stays the user's second, deliberate tap. A draft already started is left alone.
+    func applyQuickReply(_ reply: BotQuickReply) {
+        guard draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        editDraft(reply.text)
+    }
+
     /// Reads this connection's skills once it is connected.
     ///
     /// The composer drives this, because its `/` panel is the only thing that
     /// needs them. A failed read is silent and retried the next time the composer
     /// asks; a reply for a conversation that has moved on is dropped.
     func loadSlashCatalog() async {
-        guard connectionState == .connected, !slashCatalogLoaded else { return }
+        guard connectionState == .connected, !slashCatalogLoaded, let runtime else { return }
         let owner = generation
-        guard let reply = try? await request("commands.catalog", [:], owner: owner), generation == owner else { return }
+        guard let reply = try? await request("commands.catalog", ["session_id": .string(runtime)], owner: owner),
+              generation == owner else { return }
         slashCatalogLoaded = true
         slashSkills = BotSlashCatalog.skills(from: reply)
     }
@@ -361,6 +449,76 @@ import Observation
             "profile": .string(profile.id)
         ], owner: generation)
         return BotFilePathSearch.matches(from: reply)
+    }
+
+    /// Whether the settled row can take a Tapback now. Live rows have no
+    /// `rowID`, and a chat still reconnecting shows its rows read-only.
+    func mayReact(to message: ChatMessage) -> Bool {
+        guard connectionState == .connected, runtime != nil, let rowID = message.rowID else { return false }
+        return !reactingRowIDs.contains(rowID)
+    }
+
+    /// Sets your Tapback on one settled row, or clears it with nil. Picking
+    /// the emoji you already have also clears it: the host toggles a repeat,
+    /// so the phone always sends the intent (null) rather than the emoji again.
+    /// Not optimistic: the row changes only from the host's reply, which lists
+    /// the row's reactions in full. A rejected call leaves the row as it was
+    /// and says so; a lost reply is never resent, and the next full snapshot
+    /// shows what the host kept.
+    func react(to message: ChatMessage, emoji: String?) async {
+        guard mayReact(to: message), let rowID = message.rowID, let runtime,
+              let current = messages.first(where: { $0.rowID == rowID }) else { return }
+        let mine = current.botReactions.first { $0.author == .user }?.emoji
+        let intent = emoji == mine ? nil : emoji
+        guard intent != nil || mine != nil else { return }
+        let owner = generation
+        reactingRowIDs.insert(rowID)
+        defer { if generation == owner { reactingRowIDs.remove(rowID) } }
+        do {
+            let reply = try await request("message.react", [
+                "session_id": .string(runtime), "row_id": .number(Double(rowID)),
+                "emoji": intent.map(BotJSON.string) ?? .null
+            ], owner: owner) { [weak self] in
+                guard let self else { throw BotFailure.stale }
+                try self.check(owner)
+                guard self.runtime == runtime else { throw BotFailure.stale }
+            }
+            guard reply["row_id"].integer == rowID, reply["reactions"].list != nil else { throw BotFailure.unsupported }
+            applyReactions(rowID: rowID, reply["reactions"])
+        } catch {
+            guard generation == owner, !Task.isCancelled, error as? BotFailure != .stale else { return }
+            if case BotFailure.rejected = error {
+                // The host answered over a live socket: nothing changed.
+            } else if error as? BotFailure == .unsupported {
+                // An unreadable reply: the write may have landed. Re-read, never resend.
+                fullSnapshotNeeded = true; snapshotDirty = true; scheduleRefresh()
+            } else {
+                disconnected(error)
+            }
+            errorMessage = String(localized: "Could not update the reaction.")
+        }
+    }
+
+    /// Puts the host's reaction list on the row it names; an unknown row is ignored.
+    /// With `author`, only that author's entries are taken and the row keeps the
+    /// rest: the agent's live event is written on another host thread and can
+    /// land after a newer `message.react` reply, so it must not replace yours.
+    private func applyReactions(rowID: Int?, _ reactions: BotJSON, author: BotReaction.Author? = nil) {
+        guard let rowID, case .array(let incoming) = reactions.jsonValue,
+              let index = messages.firstIndex(where: { $0.rowID == rowID }) else { return }
+        var list = incoming
+        if let author {
+            func isTheirs(_ entry: JSONValue) -> Bool {
+                guard case .object(let fields) = entry, case .string(let name)? = fields["author"] else { return false }
+                return name == author.rawValue
+            }
+            let kept: [JSONValue]
+            if case .array(let current)? = messages[index].displayMetadata?["reactions"] { kept = current } else { kept = [] }
+            list = kept.filter { !isTheirs($0) } + incoming.filter(isTheirs)
+        }
+        reactionRevision += 1
+        reactionPatches[rowID] = (reactionRevision, .array(list))
+        messages[index] = messages[index].replacingBotReactions(.array(list))
     }
 
     /// Ask Hermex on a passage selected in the transcript. Durable straight
@@ -445,6 +603,8 @@ import Observation
             guard first["session_key"].text == foundTip, let foundRuntime = first["session_id"].text,
                   !foundRuntime.isEmpty, let foundEpoch = wire.replayEpoch else { throw BotFailure.wrongIdentity }
             replayWasReset = epoch != foundEpoch || runtime != foundRuntime
+            // A new runtime did not inherit the old turn, so its idle is no completion.
+            if runtime != foundRuntime { completionArmed = false }
             if replayWasReset { sequence = 0 }
             runtime = foundRuntime; epoch = foundEpoch
             let replayRequestsRevision = requestRevision
@@ -452,8 +612,10 @@ import Observation
             try reconcileReplay(replay, requestsRevision: replayRequestsRevision)
             let requestsRevision = requestRevision
             let clockRevision = clockRevision
+            let reactionRevision = reactionRevision
             let current = try await request("session.resume", resumeParams(), owner: owner)
-            try applySnapshot(current, full: true, requestsRevision: requestsRevision, clockRevision: clockRevision)
+            try applySnapshot(current, full: true, requestsRevision: requestsRevision, clockRevision: clockRevision,
+                              reactionRevision: reactionRevision)
             try check(owner)
             let controlsContext = BotChatControls.Context(connectionID: connection.id, profile: profile.id,
                                                           runtime: foundRuntime, generation: owner)
@@ -527,12 +689,13 @@ import Observation
             }
             missed.removeFirst(start)
         }
+        // Requests were restored from open_requests above; replay rebuilds activity
+        // and the connection card, which the full snapshot below then confirms.
         for event in missed {
             let type = event["type"].text ?? ""
-            // Legacy credential/Desktop-task prompts have only replay events;
-            // modern prompts were restored from open_requests above.
-            if applyStreamRequest(type: type, payload: event["payload"]) { continue }
-            applyActivity(type: type, payload: event["payload"])
+            if !applyConnectionEvent(type: type, payload: event["payload"]) {
+                applyActivity(type: type, payload: event["payload"])
+            }
         }
     }
 
@@ -544,13 +707,23 @@ import Observation
         case "message.start":
             clockRevision += 1
             confirmedWorkingStart = nil
-            liveActivity = BotTurnActivity(); workStatus = nil; streamRequest = nil
+            liveActivity = BotTurnActivity(); workStatus = nil
             return false
         case "todo.updated":
             if let next = BotPlan(payload), next.revision >= (plan?.revision ?? 0) { plan = next }
         case "status.update":
             let text = payload["text"].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             workStatus = payload["kind"].text == "ready" || text.isEmpty ? nil : text
+        case "thinking.delta":
+            // Spinner rewrites ("pondering…"), not reasoning: each frame replaces
+            // the last, and an empty one clears it.
+            let text = payload["text"].text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            workStatus = text.isEmpty ? nil : text
+        case "reasoning.available":
+            // It carried the final answer text live, so it is not reasoning; the
+            // settled snapshot shows the real reasoning. Consumed so it never
+            // triggers a snapshot read.
+            break
         default:
             // A mutating call notifies observers even when it changes nothing, so
             // `message.delta` and other unconsumed types must not reach the reducer.
@@ -561,7 +734,7 @@ import Observation
     }
 
     private func applySnapshot(_ snapshot: BotJSON, full: Bool, settingsRevision: Int? = nil, requestsRevision: Int? = nil,
-                               clockRevision: Int) throws {
+                               clockRevision: Int, reactionRevision: Int) throws {
         defer { syncLiveActivity() }
         guard snapshot["session_id"].text == runtime, snapshot["session_key"].text == tip,
               let running = snapshot["running"].flag, snapshot["hydrating"].flag != true else { throw BotFailure.unsupported }
@@ -569,7 +742,11 @@ import Observation
         if full {
             guard let history = snapshot["messages"].list, snapshot["messages_omitted"].flag != true else { throw BotFailure.unsupported }
             let projected = BotTranscriptProjection.project(history: history, root: root ?? "")
-            messages = projected.messages
+            reactionPatches = reactionPatches.filter { $0.value.revision > reactionRevision }
+            messages = reactionPatches.isEmpty ? projected.messages : projected.messages.map { message in
+                guard let rowID = message.rowID, let patch = reactionPatches[rowID] else { return message }
+                return message.replacingBotReactions(patch.reactions)
+            }
             settledActivity = projected.activity
             if let historyCache, let root, let tip {
                 historyCacheTask?.cancel()
@@ -593,26 +770,38 @@ import Observation
         } else { confirmedWorkingStart = nil }
         if startedAt != turnStartedAt { turnRevision += 1; turnStartedAt = startedAt; turnObservedAt = Date() }
         liveMessages = []
-        // The host can list the prompt in `messages` while it is still the
-        // in-flight `user`, so the same bubble would draw twice until the turn
-        // settles. The settled row wins when it is this turn's prompt; a same-text
-        // prompt from an earlier turn (dated before this turn began) does not
-        // count, so a repeated message still shows while history lags.
+        var activePrompt: String?
+        // The host saves the running turn's opening row (a prompt, or a
+        // delegation delivery) and each step after it mid-turn, so `messages`
+        // can list it while it is still the in-flight `user`. The settled row
+        // wins when the last turn boundary (steers ride inside a turn) is dated
+        // at or after this turn began: the host stamps it after starting the
+        // turn. Text can't decide: a slash skill's row shows its invocation,
+        // not the expanded prompt in flight. Only an undated row falls back to
+        // the text, so a repeated message from an earlier turn still shows
+        // while history lags.
         if let text = inflight["user"].text, !text.isEmpty {
             let display = BotMentions.displayText(text)
-            let settled = messages.last
-            let sameText = settled?.role == "user" && settled?.content == display
-            let fromEarlierTurn = startedAt.map { start in (settled?.timestamp ?? start) < start } ?? false
-            if !(sameText && !fromEarlierTurn) {
+            let settled = messages.last(where: BotTranscriptProjection.isTurnBoundary)
+            let isThisTurn = settled.map { row in
+                guard let start = startedAt, let stamp = row.timestamp else { return row.content == display }
+                return stamp >= start
+            } ?? false
+            if let settled, isThisTurn {
+                activePrompt = settled.id
+            } else {
                 liveMessages.append(ChatMessage(role: "user", content: display, timestamp: nil, messageId: "live-user"))
             }
         }
+        activePromptMessageID = activePrompt
         if let text = inflight["assistant"].text, !text.isEmpty {
             liveMessages.append(ChatMessage(role: "assistant", content: text, timestamp: nil, messageId: "live-assistant"))
         }
+        // Read before the idle branch below clears it: a turn with a Stop in
+        // flight is never the one that completes.
+        let stopping = uncertainStop || stopAcknowledged
         if !running {
             uncertainStop = false; stopAcknowledged = false; workStatus = nil
-            streamRequest = nil
             // Only a full snapshot carries the settled rows, so live rows wait for it
             // instead of vanishing on the inflight read that first reports idle.
             if full { liveActivity.clearTurnWork() }
@@ -620,15 +809,18 @@ import Observation
         if requestsRevision == nil || requestsRevision == requestRevision {
             restoreServerRequests(snapshot)
             applyPendingRequest(snapshot)
+            restoreConnectionOperation(snapshot)
         }
         // A request the phone cannot address still blocks the bot. Claiming the
         // turn is running would be the lie; attention without a card is the truth.
-        let attention = pendingRequest != nil || serverRequests?.isEmpty == false
-            || snapshot["pending_approval"] != .null || snapshot["pending_clarify"] != .null
+        // A `pending_connection` this build cannot read is one of those.
+        let attention = pendingRequest != nil || !serverRequests.isEmpty
+            || snapshot["pending_approval"] != .null || snapshot["pending_connection"] != .null
         let continuation = snapshot["auto_continue"] != .null && snapshot["auto_continue"].flag != false
         let queued = snapshot["queued"] != .null
         let busy = running || continuation || queued || attention
         if snapshotIsBusy != busy { turnRevision += 1; snapshotIsBusy = busy }
+        if stopping { completionArmed = false } else if busy { completionArmed = true }
         if attention { turn = .needsAttention }
         else if uncertainStop && stopAcknowledged { turn = .stopping }
         else if uncertainSend || uncertainStop { turn = .uncertain }
@@ -636,21 +828,23 @@ import Observation
         else if running || continuation || queued { turn = .running }
         else if inflight["error"] != .null || snapshot["status"].text == "interrupted" {
             turn = .interrupted; turnFailed = inflight["error"] != .null
+            completionArmed = false
         }
-        else { turn = .idle }
+        else {
+            turn = .idle
+            // Only this snapshot edge completes a turn; events and replay never do,
+            // so a duplicate or replayed frame cannot play it twice.
+            if completionArmed { completionArmed = false; emit(.turnCompleted) }
+        }
         if settingsRevision == nil || settingsRevision == chatControls.snapshotRevision {
             chatControls.snapshot(snapshot["info"], idle: !busy)
         }
     }
 
-    /// Installs the snapshot's pending approval or question. A clarify outranks an
-    /// approval because approvals resolve inside a tool batch while a clarify blocks
-    /// the whole turn. A different request id drops the previous request's verdict
-    /// so a new card is never born inert.
+    /// Installs the snapshot's pending approval. A different request id drops the
+    /// previous request's verdict so a new card is never born inert.
     private func applyPendingRequest(_ snapshot: BotJSON) {
-        let question = serverRequests == nil ? BotQuestionRequest(snapshot["pending_clarify"]).map(BotPendingRequest.question) : nil
-        let approval = BotApprovalRequest(snapshot["pending_approval"]).map(BotPendingRequest.approval)
-        let next = question ?? approval
+        let next = BotApprovalRequest(snapshot["pending_approval"]).map(BotPendingRequest.approval)
         if next?.requestID != blockingRequest?.requestID {
             answeringRequestID = nil
             if requestResolution?.requestID != next?.requestID { requestResolution = nil }
@@ -659,18 +853,42 @@ import Observation
     }
 
     private func restoreServerRequests(_ snapshot: BotJSON) {
-        // 0.21.2 omits empty open_requests from resume; replay always carries it.
-        // Once this socket has established the modern contract, omission clears.
-        guard let rows = snapshot["open_requests"].list else {
-            if serverRequests != nil { serverRequests = [] }
-            return
-        }
+        // Resume omits an empty open_requests; replay always carries it.
+        let rows = snapshot["open_requests"].list ?? []
         serverRequests = rows.compactMap(BotServerRequest.init).filter { $0.sessionID == runtime }
-        streamRequest = nil
     }
 
-    private func usesServerRequest(_ action: AnswerAction) -> Bool {
-        serverRequests?.contains { $0.pending?.requestID == action.requestID } == true
+    /// Resume omits `pending_connection` when no operation is open, so a missing
+    /// or unreadable field clears the card.
+    private func restoreConnectionOperation(_ snapshot: BotJSON) {
+        guard let frame = BotConnectionOperation(snapshot["pending_connection"]) else {
+            connectionOperation = nil; return
+        }
+        applyConnection(frame, opens: true)
+    }
+
+    /// Applies `connection.request` and `connection.update`. Returns false for
+    /// every other event type.
+    private func applyConnectionEvent(type: String, payload: BotJSON) -> Bool {
+        guard type == "connection.request" || type == "connection.update" else { return false }
+        if let frame = BotConnectionOperation(payload) { applyConnection(frame, opens: type == "connection.request") }
+        return true
+    }
+
+    /// A frame of the held operation replaces it when newer; a frame that opens
+    /// an operation replaces whatever was held. The settled frame closes it.
+    private func applyConnection(_ frame: BotConnectionOperation, opens: Bool) {
+        guard frame.opID != settledConnectionID else { return }
+        let next: BotConnectionOperation
+        if let held = connectionOperation, held.opID == frame.opID { next = held.applying(frame) }
+        else if opens { next = frame }
+        else { return }
+        if next.isSettled { closeConnectionOperation(next.opID) } else { connectionOperation = next }
+    }
+
+    private func closeConnectionOperation(_ opID: String) {
+        settledConnectionID = opID
+        if connectionOperation?.opID == opID { connectionOperation = nil }
     }
 
     /// The proxy gives a definitive ok/expired receipt for both live and restored
@@ -733,6 +951,9 @@ import Observation
                 text = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
             }
             try check(owner)
+            if action.mode == .steer || action.mode == .queue, let operation = connectionOperation {
+                try await continueConnection(operation.opID, runtime: action.runtime, owner: owner)
+            }
             // Only prompt admission can have an unknown outcome. Keep this
             // durable before dispatch, but never hold a draft during upload.
             drafts.setBotSubmissionUncertain(true, for: draftKey)
@@ -755,6 +976,8 @@ import Observation
                 return
             }
             guard outcome != .unknown else { throw BotFailure.unsupported }
+            // A voice-stop phrase is taken but starts no turn, so it is not a send.
+            if outcome != .voiceStopped { emit(.sent) }
             drafts.setDraft("", for: draftKey)
             drafts.setQuotes([], for: draftKey)
             drafts.setAttachments([], for: draftKey)
@@ -807,6 +1030,25 @@ import Observation
         }
     }
 
+    /// Releases an open connection operation before a Guide or Queue message, as
+    /// Desktop does, so the message does not wait behind the blocked tool until
+    /// the deadline. A host rejection (most often: it already settled) lets the
+    /// message go anyway. A lost reply fails the send before the prompt is
+    /// dispatched, and nothing is retried.
+    private func continueConnection(_ opID: String, runtime: String, owner: Int) async throws {
+        do {
+            let reply = try await request("connection.respond", [
+                "session_id": .string(runtime), "op_id": .string(opID),
+                "result": BotConnectionOperation.Answer.continueWithout.result
+            ], owner: owner) { [weak self] in
+                guard let self else { throw BotFailure.stale }
+                try self.check(owner)
+                guard self.connectionState == .connected, self.runtime == runtime else { throw BotFailure.stale }
+            }
+            if reply["settled"].flag == true { closeConnectionOperation(opID) }
+        } catch BotFailure.rejected {}
+    }
+
     /// Every returned path is bound to this captured action; partial uploads never
     /// enter another prompt. Uploaded files remain host-owned if Send is cancelled.
     func cancelAttachmentUpload() { attachmentUploadTask?.cancel() }
@@ -833,7 +1075,8 @@ import Observation
         // a fresh read instead — and the panel gets the newer skills for free. The
         // last microseconds of the race cannot be closed from here: the gateway has
         // no skill-only dispatch.
-        slashSkills = BotSlashCatalog.skills(from: try await request("commands.catalog", [:], owner: owner))
+        slashSkills = BotSlashCatalog.skills(from: try await request(
+            "commands.catalog", ["session_id": .string(action.runtime)], owner: owner))
         guard let skill = SlashSkillFormatter.skill(named: invocation.name, in: slashSkills) else {
             throw BotFailure.unsupported
         }
@@ -907,6 +1150,7 @@ import Observation
         guard mayStop, action == prepareStop() else { return }
         let owner = generation
         localOperation = true; uncertainStop = true; turn = .stopping; turnRevision += 1
+        completionArmed = false
         let revision = turnRevision
         do {
             _ = try await request("session.interrupt", ["session_id": .string(action.runtime)], owner: owner) { [weak self] in
@@ -916,6 +1160,7 @@ import Observation
             }
             localOperation = false
             stopAcknowledged = true
+            emit(.stopped)
             // Acknowledgement alone is not completion. Snapshot must establish idle.
             snapshotDirty = true; fullSnapshotNeeded = true; scheduleRefresh()
         } catch {
@@ -937,7 +1182,7 @@ import Observation
     func respond(_ action: AnswerAction, choice: BotApprovalRequest.Choice) async {
         guard case .approval(let request)? = pendingRequest, request.requestID == action.requestID,
               request.choices.contains(choice), action == prepareAnswer() else { return }
-        await deliver(action) {
+        await deliver(action, confirming: .approved(choice)) {
             let reply = try await self.request("approval.respond", [
                 "session_id": .string(action.runtime), "request_id": .string(action.requestID),
                 "choice": .string(choice.rawValue)
@@ -948,7 +1193,7 @@ import Observation
         }
     }
 
-    /// Answers a clarify question. A batch sends one `clarify.respond` per question
+    /// Answers a clarify question. A batch sends one `clarify.lock` per question
     /// id in order; the host locks each answer and the last one releases the turn.
     func answerQuestion(_ action: AnswerAction, _ answers: [BotQuestionAnswer]) async {
         guard case .question(let request)? = pendingRequest, request.requestID == action.requestID,
@@ -975,19 +1220,14 @@ import Observation
         await dispatchAnswers([BotQuestionAnswer(questionID: nil, text: "")], for: action)
     }
 
-    /// Sends the value the user typed for a `sudo.request` or `secret.request`.
+    /// Sends the value the user typed for a `sudo` or `secret` request.
     /// The value is passed straight to the dispatch and never stored on the model,
     /// so nothing retains it once the write completes.
     func answerCredential(_ action: AnswerAction, value: String) async {
         guard case .credential(let request)? = pendingRequest, request.requestID == action.requestID,
               action == prepareAnswer() else { return }
-        await deliver(action) {
-            let reply = try await self.usesServerRequest(action)
-                ? self.answerServerRequest(action, result: ["value": .string(value)])
-                : self.request(request.kind.respondMethod, [
-                "request_id": .string(action.requestID),
-                request.kind.valueKey: .string(value)
-            ], owner: action.generation, validateDispatch: self.answerGuard(action))
+        await deliver(action, confirming: .answered) {
+            let reply = try await self.answerServerRequest(action, result: ["value": .string(value)])
             // The host tolerates a late answer to a prompt it already dropped and
             // says so rather than erroring; nothing was applied.
             return reply["status"].text == "expired" ? .alreadyResolved : .answered
@@ -1001,47 +1241,33 @@ import Observation
         await answerCredential(action, value: "")
     }
 
-    /// Calls off a Desktop task the phone cannot answer but can decline. The
-    /// host reads `declined` as a final no and its tool is told never to re-ask,
-    /// so the bot moves on now instead of parking for the full deadline.
+    /// Skips a `vault.*` prompt the phone cannot answer. An empty `value` is the
+    /// host's own "declined", so the bot moves on now instead of waiting for
+    /// someone at the Mac.
     func declineDesktopTask(_ action: AnswerAction) async {
         guard case .desktopTask(let task)? = pendingRequest, task.requestID == action.requestID,
-              task.kind.isDeclinable, action == prepareAnswer() else { return }
-        await deliver(action) {
-            let reply = try await self.usesServerRequest(action)
-                ? self.answerServerRequest(action, result: ["value": .string(BotDesktopTaskRequest.declinedResult)])
-                : self.request(task.kind.respondMethod, [
-                "request_id": .string(action.requestID),
-                "result": .string(BotDesktopTaskRequest.declinedResult)
-            ], owner: action.generation, validateDispatch: self.answerGuard(action))
+              task.kind.needsSomeoneAtTheMac, action == prepareAnswer() else { return }
+        await deliver(action, confirming: .declined) {
+            let reply = try await self.answerServerRequest(action, result: ["value": .string("")])
             return reply["status"].text == "expired" ? .alreadyResolved : .answered
         }
     }
 
     private func dispatchAnswers(_ answers: [BotQuestionAnswer], for action: AnswerAction) async {
-        let modern = usesServerRequest(action)
-        await deliver(action) {
+        await deliver(action, confirming: .answered) {
             for answer in answers {
-                var params: [String: BotJSON] = [
-                    "request_id": .string(action.requestID), "answer": .string(answer.text)
-                ]
-                if let id = answer.questionID { params["question_id"] = .string(id) }
                 let reply: BotJSON
-                if modern {
-                    if answer.questionID != nil {
-                        reply = try await self.request("clarify.lock", params, owner: action.generation,
-                                                       validateDispatch: self.answerGuard(action))
-                    } else {
-                        reply = try await self.answerServerRequest(action, result: ["answer": .string(answer.text)])
-                    }
+                if let id = answer.questionID {
+                    reply = try await self.request("clarify.lock", [
+                        "request_id": .string(action.requestID), "question_id": .string(id), "answer": .string(answer.text)
+                    ], owner: action.generation, validateDispatch: self.answerGuard(action))
                 } else {
-                    reply = try await self.request("clarify.respond", params, owner: action.generation,
-                                                   validateDispatch: self.answerGuard(action))
+                    reply = try await self.answerServerRequest(action, result: ["answer": .string(answer.text)])
                 }
                 // A late answer to a prompt the host already dropped comes back as
                 // `expired`; nothing was locked, so the rest have nothing to lock either.
                 if reply["status"].text == "expired" { return .alreadyResolved }
-                if modern, answer.questionID != nil {
+                if answer.questionID != nil {
                     guard reply["status"].text == "ok", let remaining = reply["remaining"].list else {
                         throw BotFailure.unsupported
                     }
@@ -1051,6 +1277,54 @@ import Observation
                 }
             }
             return .answered
+        }
+    }
+
+    /// Answers one row of the connection card, or Continue. Captured like every
+    /// answer and never retried. The operation stays open until the host says it
+    /// settled: its update frames move the rows, and a Skip that leaves other rows
+    /// open leaves the bot waiting. `4004` means the operation had already settled.
+    func respondToConnection(_ action: AnswerAction, _ answer: BotConnectionOperation.Answer) async {
+        guard case .connection(let operation)? = pendingRequest, operation.opID == action.requestID,
+              answer.isOffered(by: operation), action == prepareAnswer() else { return }
+        localOperation = true
+        answeringRequestID = action.requestID
+        errorMessage = nil
+        do {
+            let reply = try await request("connection.respond", [
+                "session_id": .string(action.runtime), "op_id": .string(action.requestID), "result": answer.result
+            ], owner: action.generation, validateDispatch: answerGuard(action))
+            guard reply["status"].text == "ok", let settled = reply["settled"].flag else { throw BotFailure.unsupported }
+            guard action.generation == generation, !Task.isCancelled else { return }
+            localOperation = false; answeringRequestID = nil
+            requestRevision += 1
+            if settled {
+                closeConnectionOperation(action.requestID)
+                // The host owns what happens next; read it instead of assuming.
+                turnRevision += 1; turn = .unknown; fullSnapshotNeeded = true
+            }
+            snapshotDirty = true; scheduleRefresh()
+        } catch {
+            guard action.generation == generation, !Task.isCancelled else { return }
+            localOperation = false; answeringRequestID = nil
+            if error as? BotFailure == .stale { return }
+            if case BotFailure.rejected(let code) = error {
+                // The host replied over a live socket, so nothing it refused took effect.
+                if code == 4004 {
+                    requestResolution = BotRequestResolution(requestID: action.requestID, outcome: .alreadyResolved)
+                    fullSnapshotNeeded = true
+                } else {
+                    errorMessage = [401, 403, -32601].contains(code)
+                        ? BotFailure.rejected(code).localizedDescription
+                        : String(localized: "The bot could not accept that answer. Check this bot in Desktop.")
+                }
+                // A refused move usually means the row changed first; show where it is now.
+                requestRevision += 1
+                snapshotDirty = true; scheduleRefresh()
+                return
+            }
+            requestResolution = BotRequestResolution(requestID: action.requestID, outcome: .uncertain)
+            disconnected(error)
         }
     }
 
@@ -1068,7 +1342,8 @@ import Observation
     /// Runs one answer dispatch under the rules every request kind shares.
     /// The closure returns the host's verdict, or nil for an incomplete batch
     /// that needs reconciliation. A lost reply leaves the outcome unknown.
-    private func deliver(_ action: AnswerAction,
+    /// `event` is published only when the host says it took the answer.
+    private func deliver(_ action: AnswerAction, confirming event: BotFeedback.Event,
                          _ dispatch: () async throws -> BotRequestResolution.Outcome?) async {
         localOperation = true
         answeringRequestID = action.requestID
@@ -1078,10 +1353,10 @@ import Observation
             guard action.generation == generation, !Task.isCancelled else { return }
             localOperation = false; answeringRequestID = nil
             requestResolution = outcome.map { BotRequestResolution(requestID: action.requestID, outcome: $0) }
+            if outcome == .answered { emit(event) }
             // Retire accepted requests immediately, then reconcile with the host.
             // A partially locked batch remains visible until the fresh snapshot.
-            if streamRequest?.pending.requestID == action.requestID { streamRequest = nil }
-            if outcome != nil { serverRequests?.removeAll { $0.pending?.requestID == action.requestID } }
+            if outcome != nil { serverRequests.removeAll { $0.pending?.requestID == action.requestID } }
             requestRevision += 1
             // The host owns what happens next; read the snapshot instead of
             // assuming the turn resumed.
@@ -1106,15 +1381,18 @@ import Observation
         }
     }
 
+    private func emit(_ event: BotFeedback.Event) {
+        feedback = BotFeedback(event, after: feedback)
+    }
+
     private func observe(_ event: BotJSON) {
         guard connectionState != .disconnected, runtime != nil else { return }
         defer { syncLiveActivity() }
         if let request = BotServerRequest(event) {
             guard request.sessionID == runtime else { return }
-            if serverRequests == nil { serverRequests = [] }
-            if let index = serverRequests?.firstIndex(where: { $0.id == request.id }) {
-                serverRequests?[index] = request
-            } else { serverRequests?.append(request) }
+            if let index = serverRequests.firstIndex(where: { $0.id == request.id }) {
+                serverRequests[index] = request
+            } else { serverRequests.append(request) }
             requestRevision += 1
             turnRevision += 1
             if !localOperation { turn = .needsAttention }
@@ -1126,8 +1404,8 @@ import Observation
             clockRevision += 1; confirmedWorkingStart = nil
             replayWasReset = true; snapshotDirty = true; fullSnapshotNeeded = true
             turnRevision += 1
-            liveActivity = BotTurnActivity(); streamRequest = nil
-            serverRequests?.removeAll(); requestRevision += 1
+            liveActivity = BotTurnActivity()
+            serverRequests.removeAll(); requestRevision += 1
             if !localOperation { turn = .unknown }
             scheduleRefresh(); return
         }
@@ -1136,14 +1414,22 @@ import Observation
         if discontinuity {
             clockRevision += 1; confirmedWorkingStart = nil
             replayWasReset = true; fullSnapshotNeeded = true; turnRevision += 1
-            // Missed events may hold tool rows, a notice's clear or a stream
-            // request's expiry; partial or stale state is worse than none.
-            liveActivity = BotTurnActivity(); streamRequest = nil
-            serverRequests?.removeAll(); requestRevision += 1
+            // Missed events may hold tool rows, a notice's clear or a request's
+            // cancellation; partial or stale state is worse than none.
+            liveActivity = BotTurnActivity()
+            serverRequests.removeAll(); requestRevision += 1
             if !localOperation { turn = .unknown }
         }
         sequence = next
         let type = event["type"].text ?? ""
+        // A newer frame than any snapshot already in flight, like a live request.
+        if applyConnectionEvent(type: type, payload: event["payload"]) { requestRevision += 1 }
+        // The agent's `react_to_message` tool paints its Tapback live; only the
+        // agent's entry is taken from the payload, so it changes nothing else.
+        if type == "message.reaction" {
+            applyReactions(rowID: event["payload"]["row_id"].integer, event["payload"]["reactions"], author: .agent)
+            if !discontinuity { return }
+        }
         if ["subagent.spawn_requested", "subagent.start", "subagent.progress",
             "subagent.tool", "subagent.complete"].contains(type) {
             delegatedWork.noteSubagentEvent()
@@ -1151,13 +1437,13 @@ import Observation
         if ["session.info", "message.start", "message.complete", "session.control.update"].contains(type) {
             chatControls.refresh()
         }
-        let streamRequestChanged = applyStreamRequest(type: type, payload: event["payload"])
+        let requestCancelled = applyRequestCancel(type: type, payload: event["payload"])
         // Activity events never change the inflight text, so a continuous stream
         // during known work updates local state without another snapshot read.
-        if !streamRequestChanged, applyActivity(type: type, payload: event["payload"]),
+        if !requestCancelled, applyActivity(type: type, payload: event["payload"]),
            !discontinuity, turn == .running { return }
-        if streamRequestChanged
-            || ["message.start", "message.complete", "session.info", "error", "approval.request", "clarify.request"].contains(type) {
+        if requestCancelled
+            || ["message.start", "message.complete", "session.info", "error", "connection.request"].contains(type) {
             turnRevision += 1
             fullSnapshotNeeded = true
             // Current state is pending reconciliation; don't dispatch new work.
@@ -1168,32 +1454,18 @@ import Observation
         scheduleRefresh()
     }
 
-    /// Applies modern cancellation and legacy credential/Desktop-task events.
-    /// Returns true when the pending request changed.
-    private func applyStreamRequest(type: String, payload: BotJSON) -> Bool {
-        if type == "request.cancel", let id = payload["id"].text, !id.isEmpty,
-           let method = payload["method"].text, !method.isEmpty {
-            if let request = serverRequests?.first(where: { $0.id == id && $0.method == method }) {
-                serverRequests?.removeAll { $0.id == id }
-                if blockingRequest?.requestID == request.pending?.requestID { blockingRequest = nil }
-            }
-            // Even an unseen request may be present in an older in-flight snapshot.
-            requestRevision += 1
-            return true
+    /// Applies `request.cancel`, which withdraws only the matching envelope.
+    /// Returns true when it was one.
+    private func applyRequestCancel(type: String, payload: BotJSON) -> Bool {
+        guard type == "request.cancel", let id = payload["id"].text, !id.isEmpty,
+              let method = payload["method"].text, !method.isEmpty else { return false }
+        if let request = serverRequests.first(where: { $0.id == id && $0.method == method }) {
+            serverRequests.removeAll { $0.id == id }
+            if blockingRequest?.requestID == request.pending?.requestID { blockingRequest = nil }
         }
-        if let request = BotStreamRequest.requested(eventType: type, payload: payload) {
-            guard streamRequest != request else { return false }
-            // A new prompt inherits nothing from the one it replaces.
-            answeringRequestID = nil
-            if requestResolution?.requestID != request.pending.requestID { requestResolution = nil }
-            streamRequest = request
-            return true
-        }
-        if let prefix = BotStreamRequest.expiredPrefix(eventType: type), streamRequest?.eventPrefix == prefix {
-            streamRequest = nil
-            return true
-        }
-        return false
+        // Even an unseen request may be present in an older in-flight snapshot.
+        requestRevision += 1
+        return true
     }
 
     private func scheduleRefresh() {
@@ -1212,9 +1484,11 @@ import Observation
                     let settingsRevision = self.chatControls.snapshotRevision
                     let requestsRevision = self.requestRevision
                     let clockRevision = self.clockRevision
+                    let reactionRevision = self.reactionRevision
                     let reply = try await self.request("session.resume", self.resumeParams(full: full), owner: owner)
                     try self.applySnapshot(reply, full: full, settingsRevision: settingsRevision,
-                                           requestsRevision: requestsRevision, clockRevision: clockRevision)
+                                           requestsRevision: requestsRevision, clockRevision: clockRevision,
+                                           reactionRevision: reactionRevision)
                     if self.snapshotDirty { try await Task.sleep(for: .milliseconds(250)) }
                 }
                 self.refreshTask = nil
@@ -1232,9 +1506,9 @@ import Observation
         delegatedWork.disconnect()
         wire.close()
         refreshTask?.cancel(); refreshTask = nil
-        // A stream request lives only in the stream, so a lost socket makes its
-        // state unknowable. The card goes rather than lying about it.
-        streamRequest = nil; serverRequests = nil; answeringRequestID = nil
+        // Reconnecting restores the host's current requests from open_requests
+        // and pending_connection.
+        serverRequests = []; connectionOperation = nil; answeringRequestID = nil
         connectionState = .disconnected
         turn = uncertainSend || uncertainStop ? .uncertain : .unknown
         turnRevision += 1
@@ -1244,7 +1518,7 @@ import Observation
         case .rejected(let code): shouldRetryConnection = [408, 429].contains(code) || (500...599).contains(code)
         default: shouldRetryConnection = false
         }
-        errorMessage = shouldRetryConnection ? nil : failure.localizedDescription
+        errorMessage = shouldRetryConnection ? nil : BotConnectionAdvice.message(for: failure, address: connection.address)
         syncLiveActivity()
         scheduleReconnect()
     }
@@ -1272,6 +1546,7 @@ import Observation
     }
 
     func suspend() {
+        completionArmed = false
         saveRecentTranscript()
         historyCacheTask?.cancel(); historyCacheTask = nil
         isActive = false; shouldRetryConnection = false; isReconnecting = false
@@ -1290,7 +1565,8 @@ import Observation
         refreshTask?.cancel(); refreshTask = nil
         wire.close()
         localOperation = false; submittingPrompt = nil
-        streamRequest = nil; serverRequests = nil; answeringRequestID = nil
+        serverRequests = []; connectionOperation = nil; answeringRequestID = nil
+        reactingRowIDs = []; reactionPatches = [:]
         connectionState = .disconnected; turn = .unknown
         syncLiveActivity()
     }
