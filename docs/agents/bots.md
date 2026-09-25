@@ -620,8 +620,8 @@ read: the inbox goes live without waiting for it. A dropped socket, a changed
 connection, or a failed connection read clears them; leaving the screen keeps
 them. Because `sessions.changed` can miss a turn's end (post-turn work
 writes nothing), the inbox re-reads `session.active_list` alone every five
-seconds while it is open, connected, and some bot is busy, and stops once all
-are idle. Caveats: `waiting` needs a client that sent `client.capabilities`
+seconds while it is open, connected, and some bot is busy (or a read failed
+while one was), and stops once all are idle. Caveats: `waiting` needs a client that sent `client.capabilities`
 (or none attached, #699); messaging-gateway and cron turns run in other
 processes and never appear; a tip the live agent rotated after the roster read
 matches no bot until the next roster read.
