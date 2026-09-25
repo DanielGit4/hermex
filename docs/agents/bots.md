@@ -18,6 +18,10 @@ OAuth, webui fallback, server provisioning or competing-backend path.
 counterpart of `UPSTREAM_TESTED_SHA`. `BotClient.connect()` captures `version`
 and the connection screen stores it on the `BotConnection` record. Successful
 sign-in saves and dismisses regardless of version; no version warning is shown.
+With a saved connection, the screen's Status section reads the public `/api/status`
+once per appearance or "Check again" (no credentials, no retries) and shows the live
+version (or the stored one), gateway state and platform counts; scheduled Tasks need
+the gateway, Bot chat notifications do not.
 Each RPC validates the contract just in time. Advancing the pin is described in AGENTS.md
 (Working with the server); update the file and the constant together.
 
