@@ -22,9 +22,15 @@ developed by Hermes Kanban cards worked by Claude Code. Read this file together 
   set by the gitignored `Config/Local.xcconfig`. Never use `com.uzairansar.*` IDs,
   never edit `Config/Shared.xcconfig` identity lines, never touch the maintainer's
   TestFlight scripts (`scripts/branch-testflight`, release workflow).
-- Simulator work needs no Apple team. Device installs use Daniel's Personal Team
-  until his own Apple Developer Program membership exists; then TestFlight via
-  `.github/workflows/fork-testflight.yml` (disabled until secrets are set).
+- Simulator work needs no Apple team. Device installs use Daniel's free Personal Team
+  `7LGYLP323F` (set in `Config/Local.xcconfig`) through `scripts/fork-install-device`,
+  which layers `Config/ForkPersonalTeam.xcconfig`: the main app signs with
+  `Config/HermesMobile.personal-team.entitlements` (no `aps-environment`, because
+  Personal Teams cannot sign Push). Those builds expire after 7 days. Once Daniel's own
+  Apple Developer Program membership exists: TestFlight via
+  `.github/workflows/fork-testflight.yml` (disabled until secrets are set), with push.
+- Lanes never run `fork-install-device` and never use `-allowProvisioningUpdates`;
+  device installs are Daniel's step.
 - `scripts/test-sim` needs `HERMEX_BUNDLE_ID=com.danielgit4.hermexdev`.
 - Lane simulator: iPhone 17 Pro, iOS 26.5, `78BE6C32-D801-4009-9CF2-BFD31EA02B87`.
   The main checkout uses iPhone 17 `21D71958-8B13-4CE6-BCF2-709933E0D3C8`.
@@ -50,8 +56,7 @@ developed by Hermes Kanban cards worked by Claude Code. Read this file together 
     consequence.
 - **Contract pin:** dashboard routes are verified against hermes-agent
   `HERMES_AGENT_TESTED_SHA` (0.21.x). Verify shapes by reading the router source in
-  `~/.hermes/hermes-agent/hermes_cli/web_routers/` and with read-only `curl`
-  against the live dashboard. Record verified route/shape per PR.
+  `~/.hermes/hermes-agent/hermes_cli/web_routers/`. Record verified route/shape per PR.
 
 ## Build order (one card each, in order)
 
@@ -67,8 +72,9 @@ developed by Hermes Kanban cards worked by Claude Code. Read this file together 
 
 ## Live dashboard (no credentials for lanes)
 
-- URL: `http://100.67.209.26:9119` today; after the HTTPS move
-  `https://macstudio-von-daniel.tailbcd47c.ts.net:9443`.
+- URL: `https://macstudio-von-daniel.tailbcd47c.ts.net:9443` (Tailscale Serve, tailnet
+  only). The dashboard itself listens on `127.0.0.1:9119`; the old
+  `http://100.67.209.26:9119` address is closed.
 - Lanes have **no dashboard credential**. Verify routes and shapes from the router
   source in `~/.hermes/hermes-agent/hermes_cli/web_routers/` and build test fixtures
   from those shapes. Unauthenticated `GET /api/status` is the only live call allowed.

@@ -1,0 +1,65 @@
+#!/bin/zsh
+# Fork-only: build "Hermex Dev" and install it on Daniel's iPhone with the free
+# Personal Team (Config/Local.xcconfig -> DEVELOPMENT_TEAM).
+#
+# Usage: scripts/fork-install-device [device-udid-or-name]
+#
+# First run: plug the iPhone in by USB, unlock it, tap "Trust This Computer",
+# and enable Settings > Privacy & Security > Developer Mode (iOS asks after the
+# first install; the phone restarts). Personal Team builds expire after 7 days —
+# rerun this script to refresh. Push notifications are not available on this
+# build (Apple restriction for free teams); everything else works.
+set -euo pipefail
+
+repo=${0:A:h:h}
+cd "$repo"
+
+if ! grep -qE '^DEVELOPMENT_TEAM *= *[A-Z0-9]{10}' Config/Local.xcconfig 2>/dev/null; then
+  echo "Config/Local.xcconfig has no DEVELOPMENT_TEAM; see FORK.md." >&2
+  exit 1
+fi
+
+device=${1:-}
+if [[ -z "$device" ]]; then
+  devices_json=$(mktemp -t hermex-devices)
+  xcrun devicectl list devices --quiet --json-output "$devices_json" >/dev/null 2>&1 || true
+  device=$(/usr/bin/python3 - "$devices_json" <<'PY'
+import json, sys
+try:
+    devices = json.load(open(sys.argv[1]))["result"]["devices"]
+except Exception:
+    devices = []
+for d in devices:
+    props = d.get("hardwareProperties", {})
+    if props.get("platform") == "iOS" and props.get("reality") == "physical":
+        print(d.get("identifier", ""))
+        break
+PY
+)
+  rm -f "$devices_json"
+fi
+if [[ -z "$device" ]]; then
+  echo "No iPhone found. Plug it in by USB, unlock it and trust this Mac, then rerun." >&2
+  exit 1
+fi
+
+dd="$HOME/Library/Developer/Xcode/DerivedData/hermex-fork-device"
+app="$dd/Build/Products/Debug-iphoneos/HermesMobile.app"
+rm -rf "$app"   # never install a stale build if this one fails
+
+build=(xcodebuild
+  -project HermesMobile.xcodeproj -scheme HermesMobile -configuration Debug
+  -destination "generic/platform=iOS" -derivedDataPath "$dd"
+  -xcconfig Config/ForkPersonalTeam.xcconfig -allowProvisioningUpdates
+  build)
+if command -v xcbeautify >/dev/null; then
+  "${build[@]}" | xcbeautify
+else
+  "${build[@]}"
+fi
+
+[[ -d "$app" ]] || { echo "Build produced no app at $app" >&2; exit 1; }
+
+xcrun devicectl device install app --device "$device" "$app"
+echo "Installed Hermex Dev on $device. On first launch iOS may ask you to trust the"
+echo "developer: Settings > General > VPN & Device Management > Apple Development."

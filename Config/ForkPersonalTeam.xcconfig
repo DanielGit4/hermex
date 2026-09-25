@@ -1,0 +1,14 @@
+// Fork-only: on-device builds signed with Daniel's free Personal Team (see
+// Config/Local.xcconfig). Pass with `-xcconfig Config/ForkPersonalTeam.xcconfig`; like
+// ForkDev.xcconfig it outranks target-level settings.
+//
+// Personal teams cannot sign Push Notifications, so only the main app swaps to a copy of
+// its entitlements without aps-environment. Every other target keeps its own file.
+// TestFlight builds (paid team) keep using ForkDev.xcconfig and keep push.
+#include "ForkDev.xcconfig"
+
+FORK_ENTITLEMENTS_HermesMobile = Config/HermesMobile.personal-team.entitlements
+FORK_ENTITLEMENTS_HermesShareExtension = HermesShareExtension/Resources/HermesShareExtension.entitlements
+FORK_ENTITLEMENTS_HermesLiveActivityWidget = HermesLiveActivityWidget/Resources/HermesLiveActivityWidget.entitlements
+FORK_ENTITLEMENTS_HermesNotificationService = HermesNotificationService/Resources/HermesNotificationService.entitlements
+CODE_SIGN_ENTITLEMENTS = $(FORK_ENTITLEMENTS_$(TARGET_NAME))
