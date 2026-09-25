@@ -77,6 +77,9 @@ import Vision
         let next = BotConversation(server: server, connection: identity, profile: profile, historyCache: cache, wire: wire)
         XCTAssertEqual(next.messages, messages, "Warm entry keeps long text, metadata and delegation cards")
         XCTAssertEqual(next.settledActivity, activity)
+        XCTAssertFalse(activity.isEmpty)
+        XCTAssertEqual(next.settledActivityByAnchor, Dictionary(grouping: activity, by: \.anchorMessageID),
+                       "the restored activity is grouped by the row it precedes")
         XCTAssertTrue(next.hasRecentTranscript)
         XCTAssertNil(next.runtime)
         XCTAssertNil(next.root, "A display snapshot must not dictate the canonical root")
@@ -90,6 +93,7 @@ import Vision
         XCTAssertEqual(next.messages, messages)
         wire.beforeResume = nil; release?.resume(); await refresh.value
         XCTAssertEqual(next.messages.map(\.content), ["saved"], "Fresh history replaces the cached projection, without duplicates")
+        XCTAssertTrue(next.settledActivityByAnchor.isEmpty, "the grouping follows the fresh snapshot")
         XCTAssertFalse(next.hasRecentTranscript)
         next.suspend()
     }
@@ -149,6 +153,18 @@ import Vision
     private func make(_ wire: BotFixtureWire, drafts: ChatDraftStore? = nil, reconnectDelay: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) -> BotConversation {
         BotConversation(server: server, connection: connection, profile: profile, wire: wire,
                         drafts: drafts ?? ChatDraftStore(persistence: BotMemoryDrafts(), debounceDuration: .seconds(60)), reconnectDelay: reconnectDelay)
+    }
+
+    func testQuickReplyFillsOnlyAnEmptyDraftAndNeverSends() async {
+        let wire = BotFixtureWire()
+        let model = make(wire); await model.recover()
+        XCTAssertTrue(model.maySend)
+        model.applyQuickReply(BotQuickReply(text: "Run the tests"))
+        XCTAssertEqual(model.draft, "Run the tests")
+        model.applyQuickReply(BotQuickReply(text: "Continue"))
+        XCTAssertEqual(model.draft, "Run the tests", "A draft the user already has is left alone")
+        XCTAssertFalse(wire.calls.contains { ["prompt.submit", "session.steer", "session.redirect", "command.dispatch"].contains($0.0) })
+        model.suspend()
     }
 
     func testTransientDisconnectAutomaticallyRecoversWithoutResending() async {
@@ -229,6 +245,24 @@ import Vision
         XCTAssertEqual(delays, [1, 2, 4, 8, 16, 30, 30].map { .seconds($0) })
         XCTAssertEqual(model.connectionState, .disconnected)
         XCTAssertEqual(model.errorMessage, BotFailure.rejected(401).localizedDescription)
+        model.suspend()
+    }
+
+    func testReconnectStopsWithAdviceWhenTheAddressIsNotADashboard() async {
+        let wire = BotFixtureWire()
+        var delays = 0
+        let model = make(wire, reconnectDelay: { _ in
+            delays += 1
+            wire.lookupFailure = .notDashboard
+        })
+        await model.recover()
+        let stopped = expectation(description: "The address needs the user's attention")
+        wire.onDisconnect?(BotFailure.transport)
+        withObservationTracking { _ = model.isReconnecting } onChange: { stopped.fulfill() }
+        await fulfillment(of: [stopped], timeout: 3)
+        XCTAssertEqual(delays, 1, "no retry is scheduled after .notDashboard")
+        XCTAssertEqual(model.connectionState, .disconnected)
+        XCTAssertEqual(model.errorMessage, "hermes.local isn't a Hermes dashboard. Use the dashboard address, not the Hermes Web UI.")
         model.suspend()
     }
 
@@ -400,6 +434,105 @@ import Vision
         XCTAssertEqual(model.turn, .idle)
         XCTAssertEqual(wire.calls.filter { $0.0 == "prompt.submit" }.count, 1)
         model.suspend()
+    }
+
+    // MARK: feedback (haptics)
+
+    func testOnlyAnAdmittedPromptPublishesSent() async throws {
+        let cases: [(BotPromptMode, BotJSON?, Bool, BotFeedback.Event?)] = [
+            (.send, nil, false, .sent),
+            (.steer, nil, true, .sent),
+            (.steer, .object(["status": .string("rejected")]), true, nil),
+            (.send, .object(["status": .string("future")]), false, nil),
+            (.send, .object(["voice_stopped": .bool(true)]), false, nil)
+        ]
+        for (mode, reply, running, expected) in cases {
+            let wire = BotFixtureWire(); wire.running = running; wire.promptReply = reply
+            let model = make(wire); await model.recover(); model.editDraft("hello")
+            await model.submit(try XCTUnwrap(model.preparePrompt(mode)))
+            XCTAssertEqual(model.feedback?.event, expected, "\(mode) \(String(describing: reply))")
+            model.suspend()
+        }
+    }
+
+    func testAcknowledgedStopPublishesStoppedAndItsTurnNeverCompletes() async throws {
+        let wire = BotFixtureWire(); wire.running = true
+        let model = make(wire); await model.recover()
+        await model.stop(try XCTUnwrap(model.prepareStop()))
+        XCTAssertEqual(model.feedback, BotFeedback(.stopped, after: nil))
+        // The host winds down, then settles idle: neither snapshot completes the turn.
+        await applyLiveSnapshot(model, wire, seq: 1)
+        wire.running = false
+        await applyLiveSnapshot(model, wire, seq: 2)
+        XCTAssertEqual(model.turn, .idle)
+        XCTAssertEqual(model.feedback, BotFeedback(.stopped, after: nil))
+        model.suspend()
+    }
+
+    func testApprovalPublishesItsChoiceOnlyWhenTheHostResolvedIt() async throws {
+        for resolved in [1, 0] {
+            let wire = BotFixtureWire(); wire.attention = true; wire.approvalResolved = resolved
+            let model = make(wire); await model.recover()
+            await model.respond(try XCTUnwrap(model.prepareAnswer()), choice: .deny)
+            XCTAssertEqual(model.feedback?.event, resolved > 0 ? .approved(.deny) : nil)
+            model.suspend()
+        }
+    }
+
+    func testABusyTurnSettlingIdleCompletesOnceAndReplayAddsNothing() async {
+        let wire = BotFixtureWire(); wire.running = true
+        let model = make(wire); await model.recover()
+        XCTAssertNil(model.feedback, "opening on a running turn is not a completion")
+        wire.running = false
+        await applyLiveSnapshot(model, wire, seq: 1)
+        XCTAssertEqual(model.feedback, BotFeedback(.turnCompleted, after: nil))
+        // Another idle read and a sequence gap both reread an idle host.
+        await applyLiveSnapshot(model, wire, seq: 2)
+        await applyLiveSnapshot(model, wire, seq: 9)
+        XCTAssertTrue(model.replayWasReset)
+        XCTAssertEqual(model.feedback?.id, 1)
+        model.suspend()
+    }
+
+    func testATurnThatEndedWhileSuspendedOrWasIdleOnOpenPlaysNothing() async {
+        let wire = BotFixtureWire(); wire.running = true
+        let model = make(wire); await model.recover()
+        model.suspend()
+        wire.running = false
+        await model.recover()
+        XCTAssertEqual(model.turn, .idle)
+        XCTAssertNil(model.feedback)
+        await applyLiveSnapshot(model, wire, seq: 1)
+        XCTAssertNil(model.feedback)
+        model.suspend()
+    }
+
+    func testAReconnectKeepsTheArmOnlyWhenTheRuntimeSurvives() async {
+        for (newRuntime, expected) in [("runtime", BotFeedback.Event.turnCompleted), ("runtime-2", nil)] {
+            let wire = BotFixtureWire(); wire.running = true
+            let model = make(wire, reconnectDelay: { _ in }); await model.recover()
+            // The socket drops mid-turn; the host settles idle before it returns.
+            wire.running = false; wire.runtimeID = newRuntime
+            let connected = expectation(description: "reconnected to \(newRuntime)")
+            wire.onDisconnect?(BotFailure.transport)
+            withObservationTracking { _ = model.isReconnecting } onChange: { connected.fulfill() }
+            await fulfillment(of: [connected], timeout: 3)
+            XCTAssertEqual(model.connectionState, .connected)
+            XCTAssertEqual(model.feedback?.event, expected, newRuntime)
+            model.suspend()
+        }
+    }
+
+    /// Fires one live event and waits for the snapshot it schedules. Only a
+    /// snapshot writes `liveMessages`, and each one here carries a fresh reply,
+    /// so the wait never depends on an unchanged value republishing.
+    private func applyLiveSnapshot(_ model: BotConversation, _ wire: BotFixtureWire, seq: Int) async {
+        wire.inflight = .object(["assistant": .string("snapshot \(seq)")])
+        let applied = expectation(description: "snapshot \(seq) applied")
+        withObservationTracking { _ = model.liveMessages } onChange: { applied.fulfill() }
+        wire.onEvent?(typed(seq, "message.complete"))
+        await fulfillment(of: [applied], timeout: 5)
+        XCTAssertEqual(model.liveMessages.last?.content, "snapshot \(seq)")
     }
 
     func testEditingDraftOrChangingConnectionInvalidatesRedirectConfirmation() async throws {
@@ -598,6 +731,52 @@ import Vision
         }
     }
 
+    func testTitleFaceWaitsOnRequestsAndIsSadOnlyAfterAHostFailure() async {
+        let wire = BotFixtureWire(); wire.running = true
+        let model = make(wire)
+        await model.recover()
+        XCTAssertEqual(model.titleFace, .working)
+        wire.attention = true
+        await model.recover()
+        XCTAssertEqual(model.titleFace, .waiting)
+        wire.attention = false; wire.running = false; wire.inflight = .object(["error": .string("boom")])
+        await model.recover()
+        XCTAssertEqual(model.titleFace, .failed)
+        model.suspend()
+        XCTAssertEqual(model.titleFace, .resting, "A disconnected chat shows the pinned face")
+        await model.recover()
+        XCTAssertEqual(model.titleFace, .failed, "The host keeps the error until the next turn")
+        wire.running = true; wire.inflight = .null
+        await model.recover()
+        XCTAssertEqual(model.titleFace, .working)
+        wire.running = false
+        wire.transformResume = { snapshot in
+            guard case .object(var fields) = snapshot else { return snapshot }
+            fields["status"] = .string("interrupted")
+            return .object(fields)
+        }
+        await model.recover()
+        XCTAssertEqual(model.turn, .interrupted)
+        XCTAssertEqual(model.titleFace, .resting, "A user Stop keeps the pinned face")
+        model.suspend()
+
+        XCTAssertEqual(BotConversation.TitleFace.waiting.expression, .curious)
+        XCTAssertEqual(BotConversation.TitleFace.failed.expression, .sad)
+        XCTAssertNil(BotConversation.TitleFace.working.expression)
+        XCTAssertNil(BotConversation.TitleFace.resting.expression)
+
+        let beat = Date(timeIntervalSince1970: 1_000)
+        XCTAssertEqual(BotConversation.TitleFace.working.motion(beatStart: beat), .working(since: beat))
+        XCTAssertEqual(BotConversation.TitleFace.waiting.motion(beatStart: beat), .idle, "An approval never sways")
+        XCTAssertEqual(BotConversation.TitleFace.failed.motion(beatStart: beat), .idle)
+        XCTAssertEqual(BotConversation.TitleFace.resting.motion(beatStart: beat), .idle)
+
+        XCTAssertEqual(BotConversation.TitleFace.waiting.accessibilityValue, String(localized: "Needs attention"))
+        XCTAssertEqual(BotConversation.TitleFace.failed.accessibilityValue, String(localized: "Turn failed"))
+        XCTAssertNil(BotConversation.TitleFace.working.accessibilityValue)
+        XCTAssertNil(BotConversation.TitleFace.resting.accessibilityValue)
+    }
+
     func testReplayFaultsReplaceHistoryWithoutAppendingOverlap() async {
         let wire = BotFixtureWire(); let model = make(wire)
         await model.recover()
@@ -768,12 +947,71 @@ import Vision
         model.suspend()
     }
 
+    /// The host persists each step mid-turn, so a snapshot can list the prompt
+    /// followed by reasoning or an interim reply. The prompt is still this
+    /// turn's, draws once, and names the running turn for folding.
+    func testMidTurnPersistedPromptNamesTheRunningTurnAndDrawsOnce() async {
+        let wire = BotFixtureWire(); wire.running = true; wire.turnStartedAt = 200
+        wire.history = [.object(["role": .string("user"), "text": .string("Tell me story"), "timestamp": .number(210)]),
+                        .object(["role": .string("assistant"), "text": .string(""), "reasoning": .string("Pick a hero"),
+                                 "timestamp": .number(215)]),
+                        .object(["role": .string("assistant"), "text": .string("Drafting"), "timestamp": .number(220)])]
+        wire.inflight = .object(["user": .string("Tell me story"), "assistant": .string("Once")])
+        let model = make(wire); await model.recover()
+        XCTAssertEqual(model.activePromptMessageID, model.messages.first?.id)
+        XCTAssertNotNil(model.activePromptMessageID)
+        XCTAssertFalse(model.liveMessages.contains { $0.role == "user" }, "the settled row already shows the prompt")
+        XCTAssertEqual((model.messages + model.liveMessages).filter { $0.content == "Tell me story" }.count, 1)
+
+        // Last turn's same-text prompt, dated before this turn began, is not this one.
+        wire.history = [.object(["role": .string("user"), "text": .string("Tell me story"), "timestamp": .number(100)]),
+                        .object(["role": .string("assistant"), "text": .string("The end"), "timestamp": .number(150)])]
+        await model.recover()
+        XCTAssertNil(model.activePromptMessageID)
+        XCTAssertEqual(model.liveMessages.map(\.content), ["Tell me story", "Once"])
+
+        wire.running = false; wire.inflight = .null
+        await model.recover()
+        XCTAssertNil(model.activePromptMessageID, "no prompt in flight")
+        model.suspend()
+    }
+
+    /// A slash skill's saved row shows its invocation while the in-flight `user`
+    /// is the expanded body, and a delegation delivery saves as a card: text
+    /// can't match either, so the turn clock names the running turn's row.
+    func testRunningSkillOrDelegationTurnNamesItsSavedRowByTheTurnClock() async {
+        let wire = BotFixtureWire(); wire.running = true; wire.turnStartedAt = 200
+        let reply: BotJSON = .object(["role": .string("assistant"), "text": .string("Looking"), "timestamp": .number(215)])
+        let rows: [BotJSON] = [
+            .object(["role": .string("user"), "text": .string("/work fix the leak"),
+                     "display_kind": .string("skill_invocation"), "timestamp": .number(210)]),
+            .object(["role": .string("user"), "text": .string("[ASYNC DELEGATION BATCH COMPLETE — d1]\nReport"),
+                     "display_kind": .string(BotDelegationCompletion.displayKind), "timestamp": .number(210)])
+        ]
+        wire.inflight = .object(["user": .string("Expanded skill body"), "assistant": .string("Once")])
+        let model = make(wire)
+        for row in rows {
+            wire.history = [row, reply]
+            await model.recover()
+            XCTAssertEqual(model.activePromptMessageID, model.messages.first?.id)
+            XCTAssertFalse(model.liveMessages.contains { $0.role == "user" }, "the saved row already opens this turn")
+        }
+
+        // Dated before this turn began, it is last turn's row: the prompt shows live.
+        wire.history = [.object(["role": .string("user"), "text": .string("/work fix the leak"),
+                                 "display_kind": .string("skill_invocation"), "timestamp": .number(150)]), reply]
+        await model.recover()
+        XCTAssertNil(model.activePromptMessageID)
+        XCTAssertEqual(model.liveMessages.map(\.content), ["Expanded skill body", "Once"])
+        model.suspend()
+    }
+
     func testLongResponseInterleavesToolEventsThenSettlesWithoutDuplicateRows() async {
         let wire = BotFixtureWire(); wire.running = true
         let model = make(wire); await model.recover()
         wire.inflight = .object(["user": .string("Clear the inbox"), "assistant": .string("Archiving")])
         wire.onEvent?(typed(1, "message.start"))
-        wire.onEvent?(typed(2, "thinking.delta", .object(["text": .string("Archive first")])))
+        wire.onEvent?(typed(2, "reasoning.delta", .object(["text": .string("Archive first")])))
         wire.onEvent?(typed(3, "tool.start", .object(["tool_id": .string("t1"), "name": .string("terminal"), "args": .object(["command": .string("himalaya move")])])))
         let streamed = expectation(description: "inflight snapshot published")
         withObservationTracking { _ = model.liveMessages } onChange: { streamed.fulfill() }
@@ -824,6 +1062,26 @@ import Vision
         XCTAssertNil(model.workStatus)
         wire.onEvent?(typed(12, "message.start"))
         XCTAssertTrue(model.liveActivity.memoryNotes.isEmpty)
+        model.suspend()
+    }
+
+    /// `thinking.delta` is spinner text: each frame replaces the status line and
+    /// none reaches reasoning. `reasoning.available` carried the final answer
+    /// live, so it is not reasoning either. Neither costs a snapshot read.
+    func testThinkingIsAStatusLineAndReasoningAvailableIsNeverShownAsReasoning() async {
+        let wire = BotFixtureWire(); wire.running = true
+        let model = make(wire); await model.recover()
+        XCTAssertEqual(model.turn, .running)
+        let resumes = wire.calls.filter { $0.0 == "session.resume" }.count
+        wire.onEvent?(typed(1, "thinking.delta", .object(["text": .string("(◕‿◕) pondering…")])))
+        XCTAssertEqual(model.workStatus, "(◕‿◕) pondering…")
+        wire.onEvent?(typed(2, "thinking.delta", .object(["text": .string("(◕‿◕) contemplating…")])))
+        XCTAssertEqual(model.workStatus, "(◕‿◕) contemplating…")
+        wire.onEvent?(typed(3, "reasoning.available", .object(["text": .string("The final answer")])))
+        XCTAssertEqual(model.liveActivity.reasoning, "")
+        wire.onEvent?(typed(4, "thinking.delta", .object(["text": .string("")])))
+        XCTAssertNil(model.workStatus)
+        XCTAssertEqual(wire.calls.filter { $0.0 == "session.resume" }.count, resumes)
         model.suspend()
     }
 
@@ -988,6 +1246,201 @@ import Vision
         let visibleText = request.results?.compactMap { $0.topCandidates(1).first?.string }.joined(separator: " ") ?? ""
         XCTAssertTrue(visibleText.contains("VISIBLE LIVE OUTPUT"), "Live response must be visible at the latest edge, got: \(visibleText)")
     }
+
+    // MARK: - Tapbacks (#761)
+
+    private static let reactedRow: BotJSON = .object([
+        "role": .string("assistant"), "text": .string("Done"), "row_id": .number(7)
+    ])
+
+    private static func reactions(_ entries: [(String, String)]) -> BotJSON {
+        .array(entries.map { .object(["emoji": .string($0.0), "author": .string($0.1), "at": .number(1)]) })
+    }
+
+    private func reactCalls(_ wire: BotFixtureWire) -> [[String: BotJSON]] {
+        wire.calls.filter { $0.0 == "message.react" }.map(\.1)
+    }
+
+    func testReactSendsYourIntentAndPaintsOnlyTheHostsReply() async throws {
+        let wire = BotFixtureWire(); wire.history = [Self.reactedRow]
+        let model = make(wire); await model.recover()
+        var duringWrite: [[BotReaction]] = []
+        wire.react = { params in
+            // Not optimistic: the row is untouched and inert until the host answers.
+            duringWrite.append(model.messages[0].botReactions)
+            XCTAssertFalse(model.mayReact(to: model.messages[0]))
+            let emoji = params["emoji"]?.text
+            return .object(["row_id": .number(7), "reactions": emoji.map { Self.reactions([($0, "user"), ("‼️", "agent")]) }
+                                ?? Self.reactions([("‼️", "agent")])])
+        }
+
+        await model.react(to: model.messages[0], emoji: "👍")
+        XCTAssertEqual(model.messages[0].botReactions, [.init(emoji: "👍", author: .user), .init(emoji: "‼️", author: .agent)])
+        await model.react(to: model.messages[0], emoji: "❤️")
+        XCTAssertEqual(model.messages[0].botReactions.first, .init(emoji: "❤️", author: .user))
+        // Picking the emoji you already have sends the intent, never the emoji again.
+        await model.react(to: model.messages[0], emoji: "❤️")
+        XCTAssertEqual(model.messages[0].botReactions, [.init(emoji: "‼️", author: .agent)])
+        // Nothing of yours to remove: no write.
+        await model.react(to: model.messages[0], emoji: nil)
+
+        let calls = reactCalls(wire)
+        XCTAssertEqual(calls.map { $0["emoji"] }, [.string("👍"), .string("❤️"), .null])
+        XCTAssertEqual(duringWrite, [
+            [], [.init(emoji: "👍", author: .user), .init(emoji: "‼️", author: .agent)],
+            [.init(emoji: "❤️", author: .user), .init(emoji: "‼️", author: .agent)]
+        ])
+        XCTAssertTrue(calls.allSatisfy { Set($0.keys) == ["session_id", "row_id", "emoji"] })
+        XCTAssertTrue(calls.allSatisfy { $0["session_id"] == .string("runtime") && $0["row_id"] == .number(7) })
+        XCTAssertTrue(model.mayReact(to: model.messages[0]))
+        XCTAssertNil(model.errorMessage)
+        model.suspend()
+    }
+
+    func testASecondTapWhileAWriteIsInFlightSendsNothing() async throws {
+        let wire = BotFixtureWire(); wire.history = [Self.reactedRow]
+        let model = make(wire); await model.recover()
+        wire.react = { _ in
+            await model.react(to: model.messages[0], emoji: "😂")
+            return .object(["row_id": .number(7), "reactions": Self.reactions([("👍", "user")])])
+        }
+
+        await model.react(to: model.messages[0], emoji: "👍")
+
+        XCTAssertEqual(reactCalls(wire).count, 1)
+        XCTAssertEqual(model.messages[0].botReactions, [.init(emoji: "👍", author: .user)])
+        model.suspend()
+    }
+
+    func testRejectedReactLeavesTheRowUnchangedAndSaysSo() async throws {
+        let wire = BotFixtureWire(); wire.history = [Self.reactedRow]
+        let model = make(wire); await model.recover()
+        wire.react = { _ in throw BotFailure.rejected(4040) }
+
+        await model.react(to: model.messages[0], emoji: "👍")
+
+        XCTAssertEqual(reactCalls(wire).count, 1)
+        XCTAssertEqual(model.messages[0].botReactions, [])
+        XCTAssertEqual(model.errorMessage, "Could not update the reaction.")
+        XCTAssertEqual(model.connectionState, .connected)
+        XCTAssertTrue(model.mayReact(to: model.messages[0]))
+        model.suspend()
+    }
+
+    func testALostReplyIsNeverResentAndTheNextSnapshotDecides() async throws {
+        let wire = BotFixtureWire(); wire.history = [Self.reactedRow]
+        let model = make(wire, reconnectDelay: { _ in throw CancellationError() })
+        await model.recover()
+        wire.react = { _ in throw BotFailure.transport }
+
+        await model.react(to: model.messages[0], emoji: "👍")
+
+        XCTAssertEqual(model.messages[0].botReactions, [])
+        XCTAssertEqual(model.errorMessage, "Could not update the reaction.")
+        XCTAssertFalse(model.mayReact(to: model.messages[0]))
+
+        // The write landed after all; the reconnect's snapshot shows it.
+        wire.history = [.object(["role": .string("assistant"), "text": .string("Done"), "row_id": .number(7),
+                                 "display_metadata": .object(["reactions": Self.reactions([("👍", "user")])])])]
+        await model.recover()
+        XCTAssertEqual(model.messages[0].botReactions, [.init(emoji: "👍", author: .user)])
+        XCTAssertEqual(reactCalls(wire).count, 1)
+        model.suspend()
+    }
+
+    func testASnapshotReadBeforeTheReactReplyKeepsTheReaction() async throws {
+        let wire = BotFixtureWire(); wire.history = [Self.reactedRow]
+        let model = make(wire); await model.recover()
+        wire.react = { _ in .object(["row_id": .number(7), "reactions": Self.reactions([("👍", "user")])]) }
+        // The full resume a completed turn asks for is still reading older history
+        // when the react lands; its reply lists the row without your 👍.
+        wire.history = [Self.reactedRow, .object(["role": .string("assistant"), "text": .string("Next"), "row_id": .number(8)])]
+        let applied = expectation(description: "stale full snapshot applied")
+        wire.beforeResume = {
+            wire.beforeResume = nil
+            await model.react(to: model.messages[0], emoji: "👍")
+            withObservationTracking { _ = model.messages } onChange: { applied.fulfill() }
+        }
+        wire.onEvent?(typed(1, "message.complete"))
+        await fulfillment(of: [applied], timeout: 3)
+
+        XCTAssertEqual(model.messages.map(\.content), ["Done", "Next"])
+        XCTAssertEqual(model.messages[0].botReactions, [.init(emoji: "👍", author: .user)])
+        // So a second 👍 sends the removal the user means, never the emoji the host would toggle.
+        await model.react(to: model.messages[0], emoji: "👍")
+        XCTAssertEqual(reactCalls(wire).map { $0["emoji"] }, [.string("👍"), .null])
+
+        // A snapshot requested after the replies is the host's word again.
+        wire.history = [Self.reactedRow]
+        let settled = expectation(description: "fresh full snapshot applied")
+        withObservationTracking { _ = model.messages } onChange: { settled.fulfill() }
+        wire.onEvent?(typed(2, "message.complete"))
+        await fulfillment(of: [settled], timeout: 3)
+        XCTAssertEqual(model.messages.map(\.botReactions), [[]])
+        model.suspend()
+    }
+
+    func testAReplyForAReplacedConnectionIsDropped() async throws {
+        let wire = BotFixtureWire(); wire.history = [Self.reactedRow]
+        let model = make(wire); await model.recover()
+        wire.react = { _ in
+            model.suspend()
+            return .object(["row_id": .number(7), "reactions": Self.reactions([("👍", "user")])])
+        }
+
+        await model.react(to: model.messages[0], emoji: "👍")
+
+        XCTAssertEqual(reactCalls(wire).count, 1)
+        XCTAssertEqual(model.messages[0].botReactions, [])
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.mayReact(to: model.messages[0]))
+    }
+
+    func testTheAgentsLiveReactionPatchesItsRowOnly() async throws {
+        let wire = BotFixtureWire(); wire.running = true
+        wire.history = [Self.reactedRow, .object(["role": .string("user"), "text": .string("Thanks"), "row_id": .number(8)])]
+        let model = make(wire); await model.recover()
+
+        wire.onEvent?(typed(1, "message.reaction", .object([
+            "row_id": .number(8), "reactions": Self.reactions([("❤️", "agent")]), "role": .string("user")
+        ])))
+        wire.onEvent?(typed(2, "message.reaction", .object([
+            "row_id": .number(99), "reactions": Self.reactions([("👎", "agent")]), "role": .string("user")
+        ])))
+
+        XCTAssertEqual(model.messages.map(\.botReactions), [[], [.init(emoji: "❤️", author: .agent)]])
+        model.suspend()
+    }
+
+    func testALateAgentReactionEventKeepsYourNewerReaction() async throws {
+        let wire = BotFixtureWire(); wire.running = true; wire.history = [Self.reactedRow]
+        let model = make(wire); await model.recover()
+        wire.react = { _ in .object(["row_id": .number(7), "reactions": Self.reactions([("‼️", "agent"), ("❤️", "user")])]) }
+        await model.react(to: model.messages[0], emoji: "❤️")
+
+        // The agent's tool wrote before your react but its event lands after the reply.
+        wire.onEvent?(typed(1, "message.reaction", .object([
+            "row_id": .number(7), "reactions": Self.reactions([("‼️", "agent")]), "role": .string("assistant")
+        ])))
+
+        XCTAssertEqual(Set(model.messages[0].botReactions), [.init(emoji: "‼️", author: .agent), .init(emoji: "❤️", author: .user)])
+        model.suspend()
+    }
+
+    func testLiveRowsAndAnOfflineChatCannotReact() async throws {
+        let wire = BotFixtureWire(); wire.running = true
+        wire.history = [Self.reactedRow]
+        wire.inflight = .object(["assistant": .string("Working")])
+        let model = make(wire)
+        XCTAssertFalse(model.mayReact(to: ChatMessage(role: "assistant", content: "x", timestamp: nil, messageId: "m", rowID: 7)))
+        await model.recover()
+        let live = try XCTUnwrap(model.liveMessages.first)
+        XCTAssertNil(live.rowID)
+        XCTAssertFalse(model.mayReact(to: live))
+        XCTAssertTrue(model.mayReact(to: model.messages[0]))
+        model.suspend()
+        XCTAssertFalse(model.mayReact(to: model.messages[0]))
+    }
 }
 
 /// Drives real display-link frames so a capture happens after layout, never
@@ -1036,14 +1489,19 @@ actor BotMemoryDrafts: ChatDraftPersisting {
     /// `pendingApproval` directly to control the payload.
     var attention = false
     var pendingApproval: BotJSON?
-    var pendingClarify = BotJSON.null
+    /// A `clarify` server request in `open_requests`, in the `clarify()` shape:
+    /// its `request_id` becomes the envelope id. Cleared once answered.
+    var openClarify = BotJSON.null
     var openRequests = BotJSON.null
+    /// The snapshot's `pending_connection`: an open `manage_connections` operation.
+    var pendingConnection = BotJSON.null
+    /// What `connection.respond` answers; by default `ok`, not settled.
+    var connectionRespond: (([String: BotJSON]) throws -> BotJSON)?
     var answerRequest: ((String, [String: BotJSON]) throws -> BotJSON)?
-    /// What `approval.respond` reports unblocking, and what `clarify.respond` reports.
+    /// What `approval.respond` reports unblocking.
     var approvalResolved = 1
-    var clarifyStatus = "ok"
-    /// What `sudo.respond` / `secret.respond` report; "ok" or "expired".
-    var credentialStatus = "ok"
+    /// What `request.answer` / `clarify.lock` report by default; "ok" or "expired".
+    var answerStatus = "ok"
     var respondFailure: BotFailure?
     var todoState = BotJSON.null
     var history: [BotJSON] = [.object(["role": .string("assistant"), "text": .string("saved")])]
@@ -1061,6 +1519,8 @@ actor BotMemoryDrafts: ChatDraftPersisting {
     var dispatchFailure: BotFailure?
     var promptReply: BotJSON?
     var stopFailure: BotFailure?
+    /// What `message.react` answers; nil means the host does not have it.
+    var react: (([String: BotJSON]) async throws -> BotJSON)?
     var beforeDispatch: ((String) -> Void)?
     var beforeSubmit: (() async -> Void)?
     var beforeResume: (() async -> Void)?
@@ -1100,7 +1560,8 @@ actor BotMemoryDrafts: ChatDraftPersisting {
                 "messages": .array(history), "inflight": inflight, "queued": queued,
                 "turn_started_at": turnStartedAt.map(BotJSON.number) ?? .null,
                 "pending_approval": pendingApproval ?? (attention ? BotFixtureWire.approval() : .null),
-                "pending_clarify": pendingClarify, "open_requests": openRequests,
+                "open_requests": openRequestsWithClarify,
+                "pending_connection": pendingConnection,
                 "todo_state": todoState,
                 "info": .object(["profile_name": .string("inbox-triage")])
             ])
@@ -1108,19 +1569,16 @@ actor BotMemoryDrafts: ChatDraftPersisting {
         case "request.answer", "clarify.lock":
             if let respondFailure { throw respondFailure }
             if let answerRequest { return try answerRequest(method, params) }
-            openRequests = .array([])
-            return .object(["status": .string("ok"), "remaining": .array([])])
+            if answerStatus == "ok" { openRequests = .array([]); openClarify = .null }
+            return .object(["status": .string(answerStatus), "remaining": .array([])])
+        case "connection.respond":
+            if let respondFailure { throw respondFailure }
+            if let connectionRespond { return try connectionRespond(params) }
+            return .object(["status": .string("ok"), "settled": .bool(false)])
         case "approval.respond":
             if let respondFailure { throw respondFailure }
             if approvalResolved > 0 { attention = false; pendingApproval = nil }
             return .object(["resolved": .number(Double(approvalResolved))])
-        case "clarify.respond":
-            if let respondFailure { throw respondFailure }
-            if clarifyStatus == "ok" { pendingClarify = .null }
-            return .object(["status": .string(clarifyStatus)])
-        case "sudo.respond", "secret.respond", "mcp.setup.respond":
-            if let respondFailure { throw respondFailure }
-            return .object(["status": .string(credentialStatus)])
         case "session.events.since": return replay
         case "subagent.list": return .object(["subagents": .array([]), "delegations": .array([])])
         case "commands.catalog":
@@ -1140,13 +1598,25 @@ actor BotMemoryDrafts: ChatDraftPersisting {
         case "session.interrupt":
             if let stopFailure { throw stopFailure }
             return .object(["interrupted": .bool(true)])
+        case "message.react":
+            guard let react else { throw BotFailure.unsupported }
+            return try await react(params)
         default:
             if let settingsCall { return settingsCall(method, params) }
             throw BotFailure.unsupported
         }
     }
+    /// `openRequests` plus `openClarify` as its server-request envelope.
+    private var openRequestsWithClarify: BotJSON {
+        guard var params = openClarify.fields else { return openRequests }
+        let id = params.removeValue(forKey: "request_id") ?? .string("clr")
+        params["session_id"] = .string(runtimeID)
+        let frame = BotJSON.object(["id": id, "method": .string("clarify"), "params": .object(params)])
+        return .array((openRequests.list ?? []) + [frame])
+    }
+
     /// The gateway's `_approval_request_payload` shape, as it reaches both the
-    /// `approval.request` event and the resume snapshot.
+    /// `approval` server request and the resume snapshot.
     static func approval(id: String = "req-1", command: String = "rm -rf build",
                          choices: [String] = ["once", "session", "always", "deny"]) -> BotJSON {
         .object([
@@ -1156,7 +1626,7 @@ actor BotMemoryDrafts: ChatDraftPersisting {
         ])
     }
 
-    /// The single-question `clarify.request` / `pending_clarify` shape.
+    /// The single-question `clarify` shape, plus the id its envelope carries.
     static func clarify(id: String = "clr-1", question: String = "Which mailbox first?",
                         choices: [String] = ["Primary (Recommended)", "Follow-ups"],
                         multiSelect: Bool = false) -> BotJSON {

@@ -1,16 +1,17 @@
 import Observation
 import UIKit
 
-/// The Bots inbox for one configured server: the roster, Desktop's pin and hidden
-/// organization, device-local unread marks, and one live subscription that lasts
-/// while the inbox is visible. `open()` owns the transport and `close()` ends it;
-/// every late reply is dropped by the wire identity check, so a replaced or closed
-/// connection never writes into the screen.
+/// The Bots inbox for one configured server: the roster, Desktop's pin, hidden and
+/// section organization, each bot's live turn state, device-local unread marks and
+/// section order, and one live subscription that lasts while the inbox is visible.
+/// `open()` owns the transport and `close()` ends it; every late reply is dropped by
+/// the wire identity check, so a replaced or closed connection never writes into the screen.
 @MainActor @Observable final class BotInbox {
     enum Link: Equatable { case idle, connecting, live, disconnected }
 
     /// The roster split the way Desktop draws it: pinned first, the rest in server
     /// order, hidden bots apart and only when revealed or when a search names them.
+    /// The inbox list regroups these into `sections`; search reads them flat.
     struct Rows: Equatable {
         var pinned: [BotProfile] = []
         var others: [BotProfile] = []
@@ -36,34 +37,120 @@ import UIKit
         }
     }
 
-    /// Pinned tiles stay separate; all other visible chats share one timeline.
-    var chats: [ChatRow] {
+    /// One of Desktop's named sections, as this roster names it.
+    struct SectionName: Identifiable, Equatable {
+        let id: String
+        let name: String
+    }
+
+    /// One block of the list under the tiles: a named section, or the final
+    /// unfiled block (`name == nil`) holding unfiled bots and every room.
+    struct ChatSection: Identifiable {
+        let id: String
+        let name: String?
+        let chats: [ChatRow]
+    }
+
+    /// Everything except the pinned tiles, as sections in `sectionNames` order with
+    /// the unfiled block last. Each block is in `byAttention` order; an empty one is left out.
+    /// With no named sections this is one unfiled block, the flat list as before.
+    var sections: [ChatSection] {
         let rows = rows(matching: "")
-        let bots = (rows.others + rows.hidden).map(ChatRow.bot)
-        // A hidden room lives in the revealed list whether or not it is also
-        // pinned, exactly as a hidden bot does, so it can always be unhidden.
-        let groups = visibleRooms.filter { isRoomHidden($0) ? showsHidden : !isRoomPinned($0) }.map(ChatRow.room)
-        return Self.byActivity(bots + groups)
+        var filed: [String: [ChatRow]] = [:]
+        var unfiled: [ChatRow] = []
+        for profile in rows.others + rows.hidden {
+            if let id = profile.sectionID, profile.sectionName != nil { filed[id, default: []].append(.bot(profile)) }
+            else { unfiled.append(.bot(profile)) }
+        }
+        // Rooms are never sectioned: Desktop keeps a room's section on the machine
+        // that filed it. A hidden room lives in the revealed list whether or not it
+        // is also pinned, exactly as a hidden bot does, so it can always be unhidden.
+        unfiled += visibleRooms.filter { isRoomHidden($0) ? showsHidden : !isRoomPinned($0) }.map(ChatRow.room)
+        var blocks = sectionNames.compactMap { section in
+            filed[section.id].map { ChatSection(id: "section:" + section.id, name: section.name, chats: byAttention($0)) }
+        }
+        if !unfiled.isEmpty { blocks.append(ChatSection(id: "unfiled", name: nil, chats: byAttention(unfiled))) }
+        return blocks
+    }
+
+    /// Every named section on the roster, pinned and hidden members included, in
+    /// this phone's order: the ids the user placed first, the rest A–Z. A section
+    /// takes the name most of its members carry, ties going to the first member in
+    /// roster order, so a rename still being stamped across members reads calmly.
+    /// Also the "Move to Section" destinations, so a pinned-only section is offered.
+    var sectionNames: [SectionName] {
+        var tallies: [String: [(name: String, count: Int)]] = [:]
+        var ids: [String] = []
+        for profile in profiles {
+            guard let id = profile.sectionID, let name = profile.sectionName else { continue }
+            if tallies[id] == nil { ids.append(id) }
+            if let index = tallies[id, default: []].firstIndex(where: { $0.name == name }) { tallies[id]![index].count += 1 }
+            else { tallies[id, default: []].append((name, 1)) }
+        }
+        let named = ids.map { id in
+            let names = tallies[id]!
+            // Strictly greater keeps the earliest name on a tie.
+            let winner = names.dropFirst().reduce(names[0]) { $1.count > $0.count ? $1 : $0 }
+            return SectionName(id: id, name: winner.name)
+        }
+        return Self.ordered(named, placed: sectionOrder)
+    }
+
+    /// The sections "Reorder Sections…" offers, in `sectionNames` order: only those
+    /// the list can head. A section of only pinned bots lives in the tiles, so it
+    /// has no header to move; a hidden-only one stays, since Show hidden draws it.
+    var reorderableSectionNames: [SectionName] {
+        let listed = Set(profiles.compactMap { $0.sectionName != nil && (!$0.pinned || $0.hidden) ? $0.sectionID : nil })
+        return sectionNames.filter { listed.contains($0.id) }
+    }
+
+    /// Placed ids keep their position; unplaced sections follow A–Z by name (ties
+    /// by id). Placed ids the roster no longer has are ignored.
+    static func ordered(_ sections: [SectionName], placed: [String]) -> [SectionName] {
+        let byID = Dictionary(sections.map { ($0.id, $0) }) { first, _ in first }
+        var used = Set<String>()
+        let front = placed.compactMap { id in used.insert(id).inserted ? byID[id] : nil }
+        let rest = sections.filter { !used.contains($0.id) }.sorted {
+            switch $0.name.localizedStandardCompare($1.name) {
+            case .orderedAscending: return true
+            case .orderedDescending: return false
+            case .orderedSame: return $0.id < $1.id
+            }
+        }
+        return front + rest
     }
 
     /// The tiles above the timeline: Desktop's pinned bots, then rooms pinned on
-    /// this phone, each group by activity.
+    /// this phone, each group in `byAttention` order.
     var pinned: [ChatRow] {
-        Self.byActivity(rows(matching: "").pinned.map(ChatRow.bot))
-            + Self.byActivity(visibleRooms.filter { isRoomPinned($0) && !isRoomHidden($0) }.map(ChatRow.room))
+        byAttention(rows(matching: "").pinned.map(ChatRow.bot))
+            + byAttention(visibleRooms.filter { isRoomPinned($0) && !isRoomHidden($0) }.map(ChatRow.room))
     }
 
     private var visibleRooms: [BotGroupRoom] { roomCapabilities.enabled ? rooms : [] }
 
-    private static func byActivity(_ rows: [ChatRow]) -> [ChatRow] {
-        rows.sorted {
-            switch ($0.activity, $1.activity) {
+    /// The one order inside every group (each tile group and each section): waiting,
+    /// then working, then unread, then newest, undated last and ties by id. Rooms
+    /// have no live status or unread mark, so they rank with idle bots. Only rows
+    /// inside a group move; `ChatRow.id` stays stable so a move never rebuilds a row.
+    private func byAttention(_ rows: [ChatRow]) -> [ChatRow] {
+        func rank(_ row: ChatRow) -> Int {
+            guard case .bot(let profile) = row else { return 3 }
+            switch liveStatuses[profile.id] {
+            case .waiting: return 0
+            case .working: return 1
+            case nil: return isUnread(profile) ? 2 : 3
+            }
+        }
+        return rows.map { (row: $0, rank: rank($0)) }.sorted {
+            if $0.rank != $1.rank { return $0.rank < $1.rank }
+            switch ($0.row.activity, $1.row.activity) {
             case let (lhs?, rhs?) where lhs != rhs: return lhs > rhs
             case (_?, nil): return true
             case (nil, _?): return false
-            default: return $0.id < $1.id
+            default: return $0.row.id < $1.row.id
             }
-        }
+        }.map(\.row)
     }
 
     let server: URL
@@ -75,12 +162,19 @@ import UIKit
     /// Rooms pinned or hidden on this phone. The host has no such fields for
     /// rooms, so unlike a bot's pin these never reach Desktop.
     private(set) var roomFlags = BotRoomOrganizeStore.Flags()
+    /// Section ids in the order the user placed them on this phone; empty means A–Z.
+    /// Desktop keeps its own order locally and never sees this one.
+    private(set) var sectionOrder: [String] = []
     private(set) var avatars: [String: UIImage] = [:]
     private(set) var link = Link.idle
     private(set) var errorMessage: String?
-    /// Outcome of the last pin or hide write when it did not apply.
+    /// What to check once an empty inbox has failed to reach the host
+    /// `routeFailuresBeforeAdvice` times in a row. The quiet retry goes on behind it,
+    /// and `open()` leaves it alone so it holds steady between attempts.
+    private(set) var routeAdvice: String?
+    /// Outcome of the last pin, hide or section write when it did not apply.
     private(set) var notice: String?
-    /// Profiles with a pin or hide write in flight; their actions stay inert.
+    /// Profiles with a look write in flight; their actions stay inert.
     private(set) var editing: Set<String> = []
     /// Deletes whose reply was lost. The next roster read settles them: a bot that
     /// is gone gets its local state purged then, one that is still there is kept.
@@ -90,17 +184,32 @@ import UIKit
     /// Device-local watermarks for the current connection: the canonical
     /// `last_active` the user last saw for each Profile. Never leaves the phone.
     private(set) var seen: [String: Double] = [:]
+    /// Live turn state per Profile from the newest `session.active_list` read on this
+    /// connection. Emptied when the socket drops or the connection changes, so a row
+    /// never claims work nobody can vouch for.
+    private(set) var liveStatuses: [String: BotLiveStatus] = [:]
 
     private var wire: (any BotTransport)?
     private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempts = 0
+    private var routeFailures = 0
+    private static let routeFailuresBeforeAdvice = 3
     private var reloadTask: Task<Void, Never>?
     private var reloadWanted = false
     private var reloadSerial = 0
+    /// False once the host answered `session.active_list` with "method not found";
+    /// statuses stay hidden until the next socket.
+    private var readsLiveStatus = true
+    private var statusSerial = 0
+    /// True after a status read failed while a bot was busy, so re-reads go on until
+    /// one succeeds instead of leaving that turn unmarked until the next event.
+    private var retriesStatusRead = false
+    private var statusPollTask: Task<Void, Never>?
     private var returnedFrom: String?
     private let store: BotConnectionStore
     private let unread: BotUnreadStore
     private let roomStore: BotRoomOrganizeStore
+    private let sectionOrderStore: BotSectionOrderStore
     private let avatarStore: BotAvatarStore
     private let historyCache: BotHistoryCache
     private let makeWire: @MainActor (BotConnection) -> any BotTransport
@@ -111,16 +220,24 @@ import UIKit
     private let reloadSpacing: Duration
     /// Waits before each silent reconnect after a lost socket; the last one repeats.
     private let reconnectDelays: [Duration]
+    /// Gap between status-only re-reads while some bot is busy. `sessions.changed`
+    /// can miss a turn's end (post-turn work writes nothing), so the inbox re-reads
+    /// on its own while it is open, connected, and a row shows Working or Waiting.
+    private let statusPollInterval: Duration
 
     init(server: URL, store: BotConnectionStore? = nil, unread: BotUnreadStore = BotUnreadStore(),
          roomStore: BotRoomOrganizeStore = BotRoomOrganizeStore(),
+         sectionOrderStore: BotSectionOrderStore = BotSectionOrderStore(),
          avatarStore: BotAvatarStore? = nil, historyCache: BotHistoryCache = .shared, reloadSpacing: Duration = .seconds(1),
          reconnectDelays: [Duration] = [.seconds(1), .seconds(2), .seconds(4), .seconds(8), .seconds(16), .seconds(30)],
+         statusPollInterval: Duration = .seconds(5),
          makeWire: (@MainActor (BotConnection) -> any BotTransport)? = nil,
          purgeLocalState: (@MainActor (UUID, String) async -> Void)? = nil) {
         self.server = server; self.store = store ?? BotConnectionStore(); self.unread = unread; self.roomStore = roomStore
+        self.sectionOrderStore = sectionOrderStore
         self.avatarStore = avatarStore ?? .shared; self.reloadSpacing = reloadSpacing
         self.reconnectDelays = reconnectDelays; self.historyCache = historyCache
+        self.statusPollInterval = statusPollInterval
         self.makeWire = makeWire ?? { BotClient(connection: $0) }
         self.purgeLocalState = purgeLocalState ?? { connectionID, profile in
             try? await BotHistoryCache.shared.removeProfile(server: server, connectionID: connectionID, profileID: profile)
@@ -171,15 +288,21 @@ import UIKit
             let saved = try store.load(server: server)
             if connection?.id != saved?.id {
                 profiles = []; avatars = [:]; seen = [:]; rooms = []; roomCapabilities = BotRoomCapabilities(.null)
-                roomFlags = BotRoomOrganizeStore.Flags()
+                roomFlags = BotRoomOrganizeStore.Flags(); sectionOrder = []; setLiveStatuses([:])
+            }
+            // The form can keep the UUID under a new address; advice for the old host
+            // and its failure streak do not carry over to the new one.
+            if connection?.id != saved?.id || connection?.address != saved?.address {
+                routeFailures = 0; routeAdvice = nil
             }
             connection = saved
             guard let saved else { link = .idle; return }
             if seen.isEmpty { seen = unread.load(connectionID: saved.id) }
             if roomFlags == BotRoomOrganizeStore.Flags() { roomFlags = roomStore.load(connectionID: saved.id) }
+            if sectionOrder.isEmpty { sectionOrder = sectionOrderStore.load(server: server, connectionID: saved.id) }
             let opened = makeWire(saved)
             client = opened
-            wire = opened; link = .connecting; errorMessage = nil; notice = nil
+            wire = opened; link = .connecting; errorMessage = nil; notice = nil; readsLiveStatus = true; retriesStatusRead = false
             opened.onEvent = { [weak self] event in
                 guard let self, self.wire === opened, event["type"].text == "sessions.changed" else { return }
                 self.noteChange()
@@ -190,12 +313,20 @@ import UIKit
             }
             try await opened.connect()
             guard wire === opened, !Task.isCancelled else { return }
+            // The host answered, so the route advice no longer holds, even though the
+            // roster and rooms have yet to load.
+            routeFailures = 0; routeAdvice = nil
+            recordInstallID(opened.serverInstallID, for: saved)
             guard await reload(opened) else { return }
+            // The status read runs beside rooms and avatars; nothing above waits for it.
+            let statuses = statusPollTask
             await refreshRooms(opened)
             guard wire === opened, !Task.isCancelled else { return }
             link = .live
             reconnectAttempts = 0
             await refreshAvatars(opened)
+            // A pull-to-refresh ends once the fresh statuses are in, too.
+            await statuses?.value
         } catch {
             guard !Task.isCancelled else { return }
             if let client {
@@ -207,13 +338,32 @@ import UIKit
                 // A saved-connection read can fail before any client exists; that is
                 // still a visible failure with the Reconnect path, not a stale roster.
                 link = .disconnected; errorMessage = (error as? BotFailure ?? .transport).localizedDescription
+                setLiveStatuses([:])
             }
         }
+    }
+
+    /// Trust on first use: stores the host's `install_id` on a record that has none, so
+    /// every later connect can refuse an address that starts reaching another host. The
+    /// record is re-read rather than taken from `opened`, because the connection form may
+    /// have saved a new password or name under the same UUID while this inbox connected.
+    /// The in-memory `connection` gains the id too, because the chats, rooms, creator and
+    /// editor opened from this inbox build their clients from it.
+    private func recordInstallID(_ live: String?, for opened: BotConnection) {
+        guard let live else { return }
+        if connection?.id == opened.id, connection?.address == opened.address, connection?.installID == nil {
+            connection?.installID = live
+        }
+        guard var fresh = try? store.load(server: server), fresh.id == opened.id,
+              fresh.address == opened.address, fresh.installID == nil else { return }
+        fresh.installID = live
+        try? store.save(fresh, server: server)
     }
 
     func close() {
         reconnectTask?.cancel(); reconnectTask = nil
         reloadTask?.cancel(); reloadTask = nil; reloadWanted = false
+        statusPollTask?.cancel(); statusPollTask = nil
         wire?.close(); wire = nil
         link = .idle
     }
@@ -221,12 +371,14 @@ import UIKit
     /// A lost socket or a failed read is retried quietly, with growing delays, for
     /// as long as the inbox stays open; the roster stays on screen meanwhile. Only
     /// a refusal the user has to act on shows a message and the Reconnect button:
-    /// sign-in, an unsupported host or address, and any other permanent HTTP
+    /// sign-in, an unsupported host or address, an address that now reaches a
+    /// different host or is not a dashboard, and any other permanent HTTP
     /// client error (a 404 is not a Hermes host). Server errors, rate limits and
-    /// JSON-RPC faults other than "method missing" are the retry loop's problem.
+    /// JSON-RPC faults other than "method missing" are the retry loop's problem;
+    /// an empty inbox shows `routeAdvice` if the host stays unreachable.
     private static func isRetryable(_ error: Error) -> Bool {
         switch error as? BotFailure {
-        case .unsupported, .wrongIdentity, .invalidAddress: return false
+        case .unsupported, .wrongIdentity, .differentHost, .invalidAddress, .notDashboard: return false
         case .rejected(-32601), .rejected(4090), .rejected(4130): return false
         case .rejected(408), .rejected(429): return true
         case .rejected(let code): return !(400..<500).contains(code)
@@ -234,10 +386,18 @@ import UIKit
         }
     }
 
+    /// The host could not be reached at all: no answer, or a proxy or Cloudflare
+    /// answering for it. Repeated, these replace an empty inbox's skeleton with advice.
+    private static func isRouteFailure(_ error: Error) -> Bool {
+        if error is URLError { return true }
+        guard case .rejected(let code)? = error as? BotFailure else { return false }
+        return (502...504).contains(code) || (520...530).contains(code)
+    }
+
     /// True until the first roster lands: the inbox shows a skeleton instead of a
     /// connection message while it connects, or quietly retries, with nothing to show.
     var isLoadingRoster: Bool {
-        connection != nil && profiles.isEmpty && errorMessage == nil && link != .live
+        connection != nil && profiles.isEmpty && errorMessage == nil && routeAdvice == nil && link != .live
     }
 
     func mayEdit(_ profile: BotProfile) -> Bool { link == .live && !editing.contains(profile.id) }
@@ -277,20 +437,50 @@ import UIKit
         await purgeLocalState(connection.id, profile)
     }
 
-    func setPinned(_ pinned: Bool, _ profile: BotProfile) async { await configure(profile, "pinned", .bool(pinned)) }
-    func setHidden(_ hidden: Bool, _ profile: BotProfile) async { await configure(profile, "hidden", .bool(hidden)) }
+    func setPinned(_ pinned: Bool, _ profile: BotProfile) async { await configure(profile, ["pinned": .bool(pinned)]) }
+    func setHidden(_ hidden: Bool, _ profile: BotProfile) async { await configure(profile, ["hidden": .bool(hidden)]) }
 
-    /// Writes one Desktop look field through `profiles.configure`, sending the whole
-    /// `hermes-bots` object back so unrelated Desktop fields survive, under the look
-    /// revision the row was read at. Nothing is shown as done until the host says
-    /// it applied and the roster is re-read; a conflict means Desktop wrote in
-    /// between, so the fresh roster is shown and the user decides whether to retry.
-    private func configure(_ profile: BotProfile, _ field: String, _ value: BotJSON) async {
+    /// Files the bot under a section already on the roster, stamping its id and the
+    /// name the inbox heads it with, as Desktop's "Move to section" does.
+    func moveToSection(_ profile: BotProfile, _ section: SectionName) async {
+        guard profile.sectionID != section.id || profile.sectionName != section.name else { return }
+        await configure(profile, ["sectionId": .string(section.id), "sectionName": .string(section.name)])
+    }
+
+    /// Files the bot under a new section named `name`, trimmed. A blank name writes
+    /// nothing; a name that exactly matches a section on the roster joins that one
+    /// instead of making a twin. Desktop adopts the new id at the end of its own list.
+    func moveToNewSection(_ profile: BotProfile, name: String) async {
+        let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        if let existing = sectionNames.first(where: { $0.name == name }) { return await moveToSection(profile, existing) }
+        await configure(profile, ["sectionId": .string(Self.newSectionID()), "sectionName": .string(name)])
+    }
+
+    /// Back to unfiled. Explicit nulls, not missing keys: Desktop merges the host's
+    /// meta over its local copy, so a dropped key would keep its stale section alive.
+    func removeFromSection(_ profile: BotProfile) async {
+        await configure(profile, ["sectionId": .null, "sectionName": .null])
+    }
+
+    /// Desktop's section id format: `sec-<epoch ms, base 36>-<5 base-36 chars>`.
+    static func newSectionID(now: Date = .now) -> String {
+        let alphabet = Array("0123456789abcdefghijklmnopqrstuvwxyz")
+        let millis = String(Int64(now.timeIntervalSince1970 * 1000), radix: 36)
+        return "sec-\(millis)-" + String((0..<5).map { _ in alphabet.randomElement()! })
+    }
+
+    /// Writes Desktop look fields through `profiles.configure`, sending the whole
+    /// `hermes-bots` object back with `changes` applied so unrelated Desktop fields
+    /// survive, under the look revision the row was read at. Nothing is shown as done
+    /// until the host says it applied and the roster is re-read; a conflict means
+    /// Desktop wrote in between, so the fresh roster is shown and the user decides
+    /// whether to retry.
+    private func configure(_ profile: BotProfile, _ changes: [String: BotJSON]) async {
         guard mayEdit(profile), let client = wire else { return }
         editing.insert(profile.id); notice = nil
         defer { editing.remove(profile.id) }
-        var look = profile.look
-        look[field] = value
+        let look = profile.look.merging(changes) { $1 }
         do {
             let reply = try await client.call("profiles.configure", [
                 "name": .string(profile.id),
@@ -329,8 +519,9 @@ import UIKit
         }
     }
 
-    /// One `profiles.list` on the live socket. Only the newest request's reply is
-    /// applied, and only while `client` still owns the inbox.
+    /// One `profiles.list` on the live socket, then starts a live-status read against
+    /// it without waiting for one. Only the newest request's reply is applied, and
+    /// only while `client` still owns the inbox.
     private func reload(_ client: any BotTransport) async -> Bool {
         reloadSerial += 1
         let serial = reloadSerial
@@ -362,12 +553,59 @@ import UIKit
                 await forget(name)
                 guard wire === client, serial == reloadSerial else { return false }
             }
+            startLiveStatusRead(client)
             return true
         } catch {
             guard wire === client, serial == reloadSerial else { return false }
             drop(client, error: error)
             return false
         }
+    }
+
+    /// Replaces any status read or re-read in flight with one read, now or after
+    /// `delay`. `statusPollTask` always holds the newest one, so `close()`, a drop or
+    /// a newer read cancels it.
+    private func startLiveStatusRead(_ client: any BotTransport, after delay: Duration? = nil) {
+        statusPollTask?.cancel(); statusPollTask = nil
+        guard readsLiveStatus else { return }
+        statusPollTask = Task { [weak self] in
+            if let delay, (try? await Task.sleep(for: delay)) == nil { return }
+            // A sleep that ended before its cancel still wakes; a cancelled read was replaced.
+            guard !Task.isCancelled, let self, self.wire === client else { return }
+            await self.readLiveStatuses(client)
+        }
+    }
+
+    /// One read-only `session.active_list`, mapped onto the current roster. A reply
+    /// applies only while `client` owns the inbox, the read was not cancelled, and no
+    /// newer status or roster read has started. A failed read shows no statuses
+    /// rather than old ones, and never drops the socket: the roster owns the link.
+    /// While a bot is busy, or a read failed while one was, the next read is
+    /// scheduled `statusPollInterval` later; once every bot is idle it stops.
+    private func readLiveStatuses(_ client: any BotTransport) async {
+        statusSerial += 1
+        let serial = statusSerial, roster = reloadSerial
+        func current() -> Bool {
+            !Task.isCancelled && wire === client && serial == statusSerial && roster == reloadSerial
+        }
+        do {
+            let reply = try await client.call("session.active_list", [:])
+            guard current() else { return }
+            setLiveStatuses(BotLiveStatus.statuses(reply["sessions"].list ?? [], profiles: profiles))
+            retriesStatusRead = false
+        } catch {
+            guard current() else { return }
+            if error as? BotFailure == .rejected(-32601) { readsLiveStatus = false }
+            retriesStatusRead = retriesStatusRead || !liveStatuses.isEmpty
+            setLiveStatuses([:])
+        }
+        if liveStatuses.isEmpty && !retriesStatusRead { statusPollTask = nil }
+        else { startLiveStatusRead(client, after: statusPollInterval) }
+    }
+
+    /// Writes only a real change, so an unchanged re-read never invalidates the list.
+    private func setLiveStatuses(_ statuses: [String: BotLiveStatus]) {
+        if statuses != liveStatuses { liveStatuses = statuses }
     }
 
     func roomKey(_ room: BotGroupRoom) -> BotRoomKey? {
@@ -431,6 +669,29 @@ import UIKit
         if hidden { roomFlags.hidden.insert(room.id) } else { roomFlags.hidden.remove(room.id) }
         persistRoomFlags()
     }
+
+    /// Places the named sections in `ids` order on this phone only. Sections not in
+    /// `ids`, including ones Desktop adds later, follow A–Z after them.
+    func setSectionOrder(_ ids: [String]) {
+        guard let connection, ids != sectionOrder else { return }
+        sectionOrder = ids
+        sectionOrderStore.save(ids, server: server, connectionID: connection.id)
+    }
+
+    /// Saves a drag in "Reorder Sections…", given the sheet's ids in their new order.
+    /// A placed section the sheet leaves out (pinned-only for now) keeps its slot,
+    /// so its placement survives until the list can head it again.
+    func placeReorderableSections(_ ids: [String]) {
+        let listed = Set(ids)
+        var next = ids[...]
+        setSectionOrder(sectionNames.compactMap { section in
+            if listed.contains(section.id) { return next.popFirst() }
+            return sectionOrder.contains(section.id) ? section.id : nil
+        })
+    }
+
+    /// Back to A–Z: forgets every placement for this connection.
+    func resetSectionOrder() { setSectionOrder([]) }
 
     /// Rename and disband follow the room screen's gates: the host must offer the
     /// method, the room must be this gateway's own, and no write for it may be in
@@ -537,11 +798,19 @@ import UIKit
 
     private func drop(_ client: any BotTransport, error: Error) {
         reloadTask?.cancel(); reloadTask = nil; reloadWanted = false
+        statusPollTask?.cancel(); statusPollTask = nil; setLiveStatuses([:])
         client.close(); wire = nil
         link = .disconnected
+        let address = connection?.address
         guard Self.isRetryable(error) else {
-            errorMessage = (error as? BotFailure ?? .transport).localizedDescription
+            routeFailures = 0; routeAdvice = nil
+            errorMessage = address.map { BotConnectionAdvice.message(for: error, address: $0) }
+                ?? (error as? BotFailure ?? .transport).localizedDescription
             return
+        }
+        if Self.isRouteFailure(error) { routeFailures += 1 } else { routeFailures = 0; routeAdvice = nil }
+        if routeFailures >= Self.routeFailuresBeforeAdvice, profiles.isEmpty, let address {
+            routeAdvice = BotConnectionAdvice.message(for: error, address: address)
         }
         let delay = reconnectDelays[min(reconnectAttempts, reconnectDelays.count - 1)]
         reconnectAttempts += 1
@@ -578,6 +847,30 @@ struct BotUnreadStore {
 
     func remove(connectionID: UUID) {
         defaults.removeObject(forKey: key(connectionID))
+    }
+}
+
+/// Phone-local order of Desktop's named sections, keyed by configured server and
+/// connection UUID. Desktop's own order lives in its plugin storage and is never
+/// read or written from here, so this is plain `UserDefaults` like the unread marks.
+struct BotSectionOrderStore {
+    var defaults: UserDefaults = .standard
+
+    private func key(_ server: URL, _ connectionID: UUID) -> String {
+        "bot-inbox-section-order." + connectionID.uuidString + "|" + server.absoluteString
+    }
+
+    func load(server: URL, connectionID: UUID) -> [String] {
+        defaults.stringArray(forKey: key(server, connectionID)) ?? []
+    }
+
+    func save(_ ids: [String], server: URL, connectionID: UUID) {
+        if ids.isEmpty { remove(server: server, connectionID: connectionID) }
+        else { defaults.set(ids, forKey: key(server, connectionID)) }
+    }
+
+    func remove(server: URL, connectionID: UUID) {
+        defaults.removeObject(forKey: key(server, connectionID))
     }
 }
 
