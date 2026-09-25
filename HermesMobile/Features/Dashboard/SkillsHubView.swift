@@ -105,10 +105,16 @@ struct SkillsHubView: View {
     /// Hub skills are the only ones `hermes skills uninstall` removes, so only their rows offer it.
     @ViewBuilder
     private func installedRow(_ skill: DashboardSkill) -> some View {
-        let row = InstalledSkillRow(skill: skill, lock: model.hubLockByName[skill.name],
+        let lock = model.hubLockByName[skill.name]
+        let row = InstalledSkillRow(skill: skill, lock: lock,
                                     isWorking: model.isRunning(.uninstall(name: skill.name)))
-        if skill.isFromHub {
+        let link = NavigationLink {
+            InstalledSkillDetailView(model: model, skill: skill, lock: lock)
+        } label: {
             row
+        }
+        if skill.isFromHub {
+            link
                 .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                     Button("Uninstall", role: .destructive) { skillPendingUninstall = skill }
                         .disabled(model.isWorking)
@@ -118,7 +124,7 @@ struct SkillsHubView: View {
                         .disabled(model.isWorking)
                 }
         } else {
-            row
+            link
         }
     }
 

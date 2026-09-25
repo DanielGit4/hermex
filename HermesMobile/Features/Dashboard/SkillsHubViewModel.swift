@@ -30,11 +30,13 @@ import Observation
         var lines: [String] = []
     }
 
-    /// An install shows the preview and the security scan before its button.
+    /// Preview and scan are independent network operations: a slow scan must not hold back
+    /// an already-complete preview, and a failed scan can be retried on its own.
     struct Review: Equatable {
         var preview: HubSkillPreview?
         var scan: HubSkillScan?
-        var state: LoadState
+        var previewState: LoadState = .idle
+        var scanState: LoadState = .idle
     }
 
     struct InstalledSection: Identifiable, Equatable {
@@ -52,6 +54,8 @@ import Observation
     private(set) var searchState: LoadState = .idle
     private(set) var timedOutSources: [String] = []
     private(set) var reviews: [String: Review] = [:]
+    private(set) var installedSkillContents: [String: DashboardSkillContent] = [:]
+    private(set) var installedSkillContentStates: [String: LoadState] = [:]
     private(set) var operation: OperationState?
     /// Why the device-owner check before an uninstall could not run, such as no passcode.
     var authenticationProblem: String?
@@ -138,29 +142,112 @@ import Observation
         }
     }
 
-    // MARK: - Review
+    // MARK: - Installed skill detail
 
-    func review(_ identifier: String, force: Bool = false) async {
-        if let existing = reviews[identifier] {
-            guard existing.state != .loading, force || existing.state != .loaded else { return }
-        }
-        reviews[identifier] = Review(state: .loading)
+    func loadInstalledSkillContent(_ name: String, force: Bool = false) async {
+        guard !name.isEmpty else { return }
+        let current = installedSkillContentStates[name] ?? .idle
+        guard current != .loading, force || current != .loaded else { return }
+        installedSkillContentStates[name] = .loading
         do {
-            async let preview = client.previewHubSkill(identifier)
-            async let scan = client.scanHubSkill(identifier)
-            let (loadedPreview, loadedScan) = try await (preview, scan)
-            reviews[identifier] = Review(preview: loadedPreview, scan: loadedScan, state: .loaded)
+            let content = try await client.installedSkillContent(name)
+            guard !Task.isCancelled else {
+                installedSkillContentStates[name] = .idle
+                return
+            }
+            installedSkillContents[name] = content
+            installedSkillContentStates[name] = .loaded
         } catch {
-            reviews[identifier] = DashboardProblem.isCancellation(error)
-                ? nil : Review(state: .failed(DashboardProblem(error)))
+            installedSkillContentStates[name] = (Task.isCancelled || DashboardProblem.isCancellation(error))
+                ? .idle : .failed(DashboardProblem(error))
         }
     }
 
-    /// Only after the preview and the scan are both on screen, the scan's policy lets the
-    /// host install it, and it is not installed already.
+    // MARK: - Review
+
+    func review(_ identifier: String, force: Bool = false) async {
+        let existing = reviews[identifier] ?? Review()
+        guard existing.previewState != .loading, existing.scanState != .loading else { return }
+        let loadPreview = force || existing.previewState != .loaded
+        let loadScan = force || existing.scanState != .loaded
+        guard loadPreview || loadScan else { return }
+
+        var current = existing
+        if loadPreview { current.previewState = .loading }
+        if loadScan { current.scanState = .loading }
+        reviews[identifier] = current
+
+        if loadPreview && loadScan {
+            async let preview: Void = loadPreviewPart(identifier)
+            async let scan: Void = loadScanPart(identifier)
+            await (preview, scan)
+        } else if loadPreview {
+            await loadPreviewPart(identifier)
+        } else {
+            await loadScanPart(identifier)
+        }
+    }
+
+    func retryPreview(_ identifier: String) async {
+        guard let review = reviews[identifier], review.previewState != .loading else { return }
+        updateReview(identifier) { $0.previewState = .loading }
+        await loadPreviewPart(identifier)
+    }
+
+    func retryScan(_ identifier: String) async {
+        guard let review = reviews[identifier], review.scanState != .loading else { return }
+        updateReview(identifier) { $0.scanState = .loading }
+        await loadScanPart(identifier)
+    }
+
+    private func loadPreviewPart(_ identifier: String) async {
+        do {
+            let preview = try await client.previewHubSkill(identifier)
+            guard !Task.isCancelled else {
+                updateReview(identifier) { $0.previewState = .idle }
+                return
+            }
+            updateReview(identifier) {
+                $0.preview = preview
+                $0.previewState = .loaded
+            }
+        } catch {
+            updateReview(identifier) {
+                $0.previewState = (Task.isCancelled || DashboardProblem.isCancellation(error))
+                    ? .idle : .failed(DashboardProblem(error))
+            }
+        }
+    }
+
+    private func loadScanPart(_ identifier: String) async {
+        do {
+            let scan = try await client.scanHubSkill(identifier)
+            guard !Task.isCancelled else {
+                updateReview(identifier) { $0.scanState = .idle }
+                return
+            }
+            updateReview(identifier) {
+                $0.scan = scan
+                $0.scanState = .loaded
+            }
+        } catch {
+            updateReview(identifier) {
+                $0.scanState = (Task.isCancelled || DashboardProblem.isCancellation(error))
+                    ? .idle : .failed(DashboardProblem(error))
+            }
+        }
+    }
+
+    private func updateReview(_ identifier: String, _ update: (inout Review) -> Void) {
+        var review = reviews[identifier] ?? Review()
+        update(&review)
+        reviews[identifier] = review
+    }
+
+    /// Install requires both complete documents and an explicit host allow decision.
     func canInstall(_ identifier: String) -> Bool {
-        guard let review = reviews[identifier], review.state == .loaded, review.preview != nil,
-              let scan = review.scan, scan.allowsInstall else { return false }
+        guard let review = reviews[identifier], review.previewState == .loaded, review.preview != nil,
+              review.scanState == .loaded, let scan = review.scan, scan.allowsInstall else { return false }
         return !isInstalled(identifier) && !isWorking
     }
 

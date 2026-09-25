@@ -26,6 +26,17 @@ import XCTest
         XCTAssertTrue(model.hasHubSkills)
     }
 
+    func testInstalledSkillContentLoadsFromTheHostAndStripsFrontMatter() async throws {
+        let (model, _) = makeModel()
+
+        await model.loadInstalledSkillContent("github")
+
+        XCTAssertEqual(model.installedSkillContentStates["github"], .loaded)
+        XCTAssertEqual(model.installedSkillContents["github"]?.markdown, "# GitHub\n\nUse GitHub.")
+        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/content"),
+                       ["GET \(host)/api/skills/content?name=github"])
+    }
+
     func testAnEmptyHostIsLoadedAndEmpty() async {
         DashboardHTTPFixture.handler = { request in
             switch request.url?.path {
@@ -170,7 +181,7 @@ import XCTest
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/install"), [])
     }
 
-    func testAFailedReviewOffersNoInstall() async {
+    func testAFailedScanKeepsItsProblemSeparateFromThePreview() async {
         DashboardHTTPFixture.handler = { request in
             request.url?.path == "/api/skills/hub/scan" ? .json(502, .null) : nil
         }
@@ -178,9 +189,52 @@ import XCTest
 
         await model.review(identifier)
 
-        guard case .failed = model.reviews[identifier]?.state else { return XCTFail("Expected a failed review") }
-        XCTAssertNil(model.reviews[identifier]?.preview, "A preview without its scan is not shown as reviewed")
+        guard case .failed(let problem)? = model.reviews[identifier]?.scanState else {
+            return XCTFail("Expected a scan failure")
+        }
+        XCTAssertTrue(problem.message.contains("502"), problem.message)
+        XCTAssertEqual(model.reviews[identifier]?.previewState, .loaded)
+        XCTAssertNotNil(model.reviews[identifier]?.preview)
         XCTAssertFalse(model.canInstall(identifier))
+    }
+
+    func testPreviewAndScanHaveIndependentStates() async {
+        DashboardHTTPFixture.handler = { request in
+            request.url?.path == "/api/skills/hub/scan"
+                ? .json(502, .object(["detail": .string("Scan unavailable")])) : nil
+        }
+        let (model, _) = makeModel()
+
+        await model.review(identifier)
+
+        let review = model.reviews[identifier]
+        XCTAssertEqual(review?.previewState, .loaded)
+        XCTAssertEqual(review?.preview?.skillMarkdown, "# PDF tools\n\nExtract text from PDFs.")
+        guard case .failed = review?.scanState else { return XCTFail("Expected the scan to fail independently") }
+        XCTAssertFalse(model.canInstall(identifier), "A preview alone never enables installation")
+    }
+
+    func testScanTimeoutBecomesRetryableAndInstallWaitsForAnAllowDecision() async {
+        var shouldTimeOut = true
+        DashboardHTTPFixture.handler = { request in
+            guard request.url?.path == "/api/skills/hub/scan", shouldTimeOut else { return nil }
+            return .timedOut
+        }
+        let (model, _) = makeModel()
+
+        await model.review(identifier)
+
+        guard case .failed(let problem)? = model.reviews[identifier]?.scanState else {
+            return XCTFail("A request timeout must leave a retryable scan failure, not an indefinite spinner")
+        }
+        XCTAssertTrue(problem.isOffline)
+        XCTAssertFalse(model.canInstall(identifier))
+
+        shouldTimeOut = false
+        await model.retryScan(identifier)
+
+        XCTAssertEqual(model.reviews[identifier]?.scanState, .loaded)
+        XCTAssertTrue(model.canInstall(identifier), "A successfully allowed scan enables Install")
     }
 
     func testInstallShowsWorkingWhileTheHostRunsAndSucceedsOnlyOnceTheLockShowsIt() async throws {

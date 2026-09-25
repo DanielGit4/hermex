@@ -64,11 +64,12 @@ final class SkillsHubDecodingTests: XCTestCase {
     }
 
     func testPreviewDecodesMarkdownAndFilesAndFallsBackToTheRequestedIdentifier() throws {
-        let full = try XCTUnwrap(HubSkillPreview(try json("""
+        let full = try XCTUnwrap(HubSkillPreview(try json(#"""
         {"name": "pdf-tools", "description": "", "source": "skills-sh", "identifier": "skills-sh/acme/pdf-tools",
-         "trust_level": "community", "repo": null, "tags": [], "skill_md": "# PDF", "files": ["SKILL.md", "a.py"],
+         "trust_level": "community", "repo": null, "tags": [],
+         "skill_md": "---\nname: pdf-tools\ndescription: PDF utilities\n---\n# PDF", "files": ["SKILL.md", "a.py"],
          "size_bytes": 2048}
-        """), identifier: "skills-sh/acme/pdf-tools"))
+        """#), identifier: "skills-sh/acme/pdf-tools"))
         XCTAssertEqual(full.skill.name, "pdf-tools")
         XCTAssertNil(full.skill.description, "A blank description is no description")
         XCTAssertNil(full.skill.repo)
@@ -81,6 +82,13 @@ final class SkillsHubDecodingTests: XCTestCase {
         XCTAssertEqual(sparse.files, [])
 
         XCTAssertNil(HubSkillPreview(try json(#"["not", "an", "object"]"#), identifier: "requested/id"))
+    }
+
+    func testFrontMatterIsRemovedOnlyWhenItIsAClosedLeadingYAMLBlock() {
+        XCTAssertEqual(SkillMarkdown.withoutFrontMatter("---\nname: github\n---\n# GitHub"), "# GitHub")
+        XCTAssertEqual(SkillMarkdown.withoutFrontMatter("# GitHub\n---\nbody"), "# GitHub\n---\nbody")
+        XCTAssertEqual(SkillMarkdown.withoutFrontMatter("---\nname: github\n# no closing fence"),
+                       "---\nname: github\n# no closing fence")
     }
 
     func testScanDecodesTheFullShapeWithExtraFields() throws {
@@ -110,7 +118,7 @@ final class SkillsHubDecodingTests: XCTestCase {
     func testScanWithFieldsMissingOrUnknownLeavesTheDecisionToTheHost() throws {
         let sparse = HubSkillScan(try json(#"{"verdict": "safe", "tier1": null}"#))
         XCTAssertNil(sparse.policy)
-        XCTAssertTrue(sparse.allowsInstall, "An older host without a policy still enforces its own on install")
+        XCTAssertFalse(sparse.allowsInstall, "A missing install decision never enables Install")
         XCTAssertEqual(sparse.findings, [])
         XCTAssertEqual(sparse.severityCounts.total, 0)
         XCTAssertNil(sparse.advisoryPassed)

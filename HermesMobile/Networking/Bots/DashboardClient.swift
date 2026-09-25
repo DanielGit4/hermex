@@ -13,7 +13,9 @@ import Foundation
     init(connection: BotConnection, configuration: URLSessionConfiguration = .ephemeral) {
         self.connection = connection
         // Hub search fans out to every configured source with a 30-second budget on the host.
+        // Preview and scan also resolve remote bundles, so bound both inactivity and total time.
         configuration.timeoutIntervalForRequest = 60
+        configuration.timeoutIntervalForResource = 90
         session = URLSession(configuration: configuration)
     }
 
@@ -127,6 +129,13 @@ extension DashboardClient {
         let rows = try await get(BotEndpoint.skills.url(base: address))
         guard let list = rows.list else { throw DashboardFailure.unreadableResponse }
         return list.compactMap(DashboardSkill.init)
+    }
+
+    func installedSkillContent(_ name: String) async throws -> DashboardSkillContent {
+        let json = try await get(BotEndpoint.skillContent.url(base: address),
+                                 query: [URLQueryItem(name: "name", value: name)])
+        guard let content = DashboardSkillContent(json) else { throw DashboardFailure.unreadableResponse }
+        return content
     }
 
     /// The hub lock: hub-installed skills keyed by the identifier they were installed from.

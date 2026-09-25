@@ -124,6 +124,11 @@ import XCTest
         XCTAssertEqual(installed.first { $0.name == "git-helper" }?.provenance, "hub")
         XCTAssertEqual(installed.first { $0.name == "notes" }?.enabled, false)
 
+        let content = try await client.installedSkillContent("github")
+        XCTAssertEqual(content.name, "github")
+        XCTAssertEqual(content.markdown, "# GitHub\n\nUse GitHub.")
+        XCTAssertEqual(content.path, "/home/hermes/skills/github/SKILL.md")
+
         let lock = try await client.hubLock()
         XCTAssertEqual(lock["official/dev/git-helper"]?.trustLevel, "builtin")
 
@@ -151,6 +156,8 @@ import XCTest
         XCTAssertFalse(status.running)
         XCTAssertEqual(status.exitCode, 0)
 
+        XCTAssertTrue(DashboardHTTPFixture.calls.contains(
+            "GET https://host.example:9119/api/skills/content?name=github"))
         XCTAssertTrue(DashboardHTTPFixture.calls.contains(
             "GET https://host.example:9119/api/skills/hub/search?q=pdf&source=all&limit=20"))
         XCTAssertTrue(DashboardHTTPFixture.calls.contains(
@@ -188,6 +195,7 @@ final class DashboardHTTPFixture: URLProtocol {
     enum Reply {
         case json(Int, BotJSON)
         case offline
+        case timedOut
     }
 
     static let host = URL(string: "https://host.example:9119")!
@@ -258,6 +266,8 @@ final class DashboardHTTPFixture: URLProtocol {
         switch Self.handler?(request) ?? Self.lock.withLock({ Self.answer(request, body: decoded) }) {
         case .offline:
             client?.urlProtocol(self, didFailWithError: URLError(.notConnectedToInternet))
+        case .timedOut:
+            client?.urlProtocol(self, didFailWithError: URLError(.timedOut))
         case .json(let status, let value):
             let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: nil,
                                            headerFields: ["Content-Type": "application/json"])!
@@ -286,6 +296,10 @@ final class DashboardHTTPFixture: URLProtocol {
             }
             return .json(200, .array(hub + [skillRow("notes", provenance: "bundled", enabled: false),
                                             skillRow("scratchpad", provenance: "agent", enabled: true)]))
+        case "/api/skills/content":
+            return .json(200, .object(["name": .string("github"),
+                                       "content": .string("---\nname: github\ndescription: GitHub helpers\n---\n# GitHub\n\nUse GitHub."),
+                                       "path": .string("/home/hermes/skills/github/SKILL.md")]))
         case "/api/skills/hub/sources":
             return .json(200, .object(["sources": .array([.object(["id": .string("official"), "label": .string("Official (Nous)")])]),
                                        "index_available": .bool(true), "featured": .array([]),
@@ -295,7 +309,7 @@ final class DashboardHTTPFixture: URLProtocol {
                                        "timed_out": .array([.string("github")]), "installed": lockMap()]))
         case "/api/skills/hub/preview":
             var preview = hubSkill().fields ?? [:]
-            preview["skill_md"] = .string("# PDF tools\n\nExtract text from PDFs.")
+            preview["skill_md"] = .string("---\nname: pdf-tools\ndescription: Work with PDFs\n---\n# PDF tools\n\nExtract text from PDFs.")
             preview["files"] = .array([.string("SKILL.md"), .string("scripts/extract.py")])
             return .json(200, .object(preview))
         case "/api/skills/hub/scan":
