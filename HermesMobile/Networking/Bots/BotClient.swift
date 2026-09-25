@@ -147,7 +147,8 @@ import Foundation
                "sudo.respond", "secret.respond", "mcp.setup.respond", "request.answer", "clarify.lock",
                "model.options", "config.set", "session.cwd.set", "session.control.read", "session.control",
                "commands.catalog", "command.dispatch", "complete.path",
-               "subagent.list", "subagent.tail", "subagent.interrupt"].contains(method) || BotRoomRPC.methods.contains(method)
+               "subagent.list", "subagent.tail", "subagent.interrupt",
+               "message.react"].contains(method) || BotRoomRPC.methods.contains(method)
         else { throw BotFailure.unsupported }
         try BotRoomRPC.validate(method, params)
         try Self.validateProfileEditorCall(method, params)
@@ -155,6 +156,7 @@ import Foundation
         try Self.validateSlashCall(method, params)
         try Self.validateCompletionCall(method, params)
         try Self.validateSubagentCall(method, params)
+        try Self.validateReactCall(method, params)
         guard let socket, !Task.isCancelled else { throw BotFailure.stale }
         nextID += 1
         let id = nextID
@@ -363,6 +365,24 @@ import Foundation
                   params["subagent_id"]?.text?.isEmpty == false else { throw BotFailure.unsupported }
         default:
             return
+        }
+    }
+
+    /// Tapbacks are one more typed exception: your own reaction on one
+    /// persisted row of the live session. `emoji` is a non-empty string or
+    /// null (clear); `author` and `newest_role` are refused, so the phone can
+    /// never react as the agent or address a row it has not seen.
+    private static func validateReactCall(_ method: String, _ params: [String: BotJSON]) throws {
+        guard method == "message.react" else { return }
+        guard Set(params.keys) == ["session_id", "row_id", "emoji"],
+              params["session_id"]?.text?.isEmpty == false,
+              params["row_id"]?.integer != nil
+        else { throw BotFailure.unsupported }
+        switch params["emoji"] {
+        case .null?: return
+        case .string(let emoji)?:
+            guard !emoji.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw BotFailure.unsupported }
+        default: throw BotFailure.unsupported
         }
     }
 
