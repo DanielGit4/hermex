@@ -25,6 +25,36 @@ struct DashboardSkill: Identifiable, Hashable {
     }
 }
 
+/// The host's `GET /api/skills/content` response for an installed skill.
+struct DashboardSkillContent: Hashable {
+    let name: String
+    let markdown: String
+    let path: String?
+
+    init?(_ json: BotJSON) {
+        guard let name = json["name"].text.trimmedNonEmpty,
+              let content = json["content"].text else { return nil }
+        self.name = name
+        markdown = SkillMarkdown.withoutFrontMatter(content)
+        path = json["path"].text.trimmedNonEmpty
+    }
+}
+
+/// SKILL.md files are YAML-front-matter documents, not Markdown documents from line one.
+enum SkillMarkdown {
+    static func withoutFrontMatter(_ markdown: String) -> String {
+        let lines = markdown.components(separatedBy: .newlines)
+        guard lines.first?.trimmingCharacters(in: .whitespacesAndNewlines) == "---",
+              let closingFence = lines.dropFirst().firstIndex(where: {
+                  let line = $0.trimmingCharacters(in: .whitespacesAndNewlines)
+                  return line == "---" || line == "..."
+              }) else { return markdown }
+        return lines.dropFirst(closingFence + 1)
+            .joined(separator: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 /// One hub lock entry, keyed by the identifier the skill was installed from.
 struct HubLockEntry: Hashable {
     let name: String?
@@ -93,7 +123,7 @@ struct HubSkillPreview: Hashable {
     init?(_ json: BotJSON, identifier: String) {
         guard json.fields != nil, let skill = HubSkill(json, identifier: identifier) else { return nil }
         self.skill = skill
-        skillMarkdown = json["skill_md"].text.trimmedNonEmpty
+        skillMarkdown = json["skill_md"].text.map(SkillMarkdown.withoutFrontMatter).trimmedNonEmpty
         files = (json["files"].list ?? []).compactMap { $0.text.trimmedNonEmpty }
     }
 }
@@ -150,9 +180,8 @@ struct HubSkillScan: Hashable {
         advisoryFindingCount = advisory["findings"].list?.count
     }
 
-    /// An older host that sends no policy still enforces its own on install, and Hermex
-    /// only reports success once the host shows the skill installed.
-    var allowsInstall: Bool { policy == nil || policy == .allow }
+    /// Installation is enabled only when the host explicitly allows it.
+    var allowsInstall: Bool { policy == .allow }
 }
 
 /// `GET /api/actions/{name}/status` for a spawned install, uninstall or update.

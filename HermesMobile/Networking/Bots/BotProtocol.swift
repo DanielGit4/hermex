@@ -125,6 +125,7 @@ enum BotEndpoint: String {
     /// identifier). Install `{identifier}`, uninstall `{name}` and update only spawn
     /// `hermes skills …` and answer `{ok, pid, name}`: the outcome is `actionStatusURL`.
     case skills = "api/skills"
+    case skillContent = "api/skills/content"
     case skillsHubSources = "api/skills/hub/sources"
     case skillsHubSearch = "api/skills/hub/search"
     case skillsHubPreview = "api/skills/hub/preview"
