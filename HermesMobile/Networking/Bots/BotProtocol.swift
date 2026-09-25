@@ -133,11 +133,26 @@ enum BotEndpoint: String {
     case skillsHubInstall = "api/skills/hub/install"
     case skillsHubUninstall = "api/skills/hub/uninstall"
     case skillsHubUpdate = "api/skills/hub/update"
+    /// MCP routes the Dashboard uses, verified against hermes-agent 0.21.5
+    /// `hermes_cli/web_routers/mcp.py` on 2026-09-26, each with the optional `profile` left
+    /// unset. `servers` answers `{servers: [summary]}` with env values already redacted;
+    /// `catalog` answers `{entries, diagnostics}` (no `detect_apps`); `catalog/install` takes
+    /// `{name, env, enable}` and answers `{ok, name, background, action?}`, where a background
+    /// install is followed through `actionStatusURL`.
+    case mcpServers = "api/mcp/servers"
+    case mcpCatalog = "api/mcp/catalog"
+    case mcpCatalogInstall = "api/mcp/catalog/install"
     func url(base: URL) -> URL { base.appendingPathComponent(rawValue) }
     /// `GET /api/actions/{name}/status` (`actions.py`): `{name, running, exit_code, pid,
     /// lines}` for a spawned action. `name` is the one the spawning route answered.
     static func actionStatusURL(base: URL, name: String) -> URL {
         base.appendingPathComponent("api/actions").appendingPathComponent(name).appendingPathComponent("status")
+    }
+    /// `DELETE /api/mcp/servers/{name}`, or with an action `POST …/{name}/test` and
+    /// `PUT …/{name}/enabled`. `name` is one path segment, percent-encoded.
+    static func mcpServerURL(base: URL, name: String, action: String? = nil) -> URL {
+        let server = BotEndpoint.mcpServers.url(base: base).appendingPathComponent(name)
+        return action.map { server.appendingPathComponent($0) } ?? server
     }
     /// `POST /api/dashboard/agent-plugins/{name}/{action}` for `enable` and `disable`.
     static func pluginURL(base: URL, name: String, action: String) -> URL {

@@ -190,3 +190,50 @@ extension DashboardClient {
         return name
     }
 }
+
+/// The MCP routes in `BotEndpoint`, with no `profile`, so the host's launch profile answers.
+extension DashboardClient {
+    func mcpServers() async throws -> [MCPServer] {
+        guard let rows = try await get(BotEndpoint.mcpServers.url(base: address))["servers"].list else {
+            throw DashboardFailure.unreadableResponse
+        }
+        return rows.compactMap(MCPServer.init)
+    }
+
+    /// Connects to the server on the host and lists its tools. A failed probe is a result,
+    /// not an error: the host answers 200 with its reason.
+    func testMCPServer(_ name: String) async throws -> MCPTestResult {
+        let json = try await post(BotEndpoint.mcpServerURL(base: address, name: name, action: "test"))
+        guard let result = MCPTestResult(json) else { throw DashboardFailure.unreadableResponse }
+        return result
+    }
+
+    /// Returns the `enabled` value the host saved. It applies from the next session.
+    func setMCPServer(_ name: String, enabled: Bool) async throws -> Bool {
+        let json = try await put(BotEndpoint.mcpServerURL(base: address, name: name, action: "enabled"),
+                                 body: .object(["enabled": .bool(enabled)]))
+        guard let saved = json["enabled"].flag else { throw DashboardFailure.unreadableResponse }
+        return saved
+    }
+
+    func deleteMCPServer(_ name: String) async throws {
+        _ = try await delete(BotEndpoint.mcpServerURL(base: address, name: name))
+    }
+
+    func mcpCatalog() async throws -> MCPCatalog {
+        guard let catalog = MCPCatalog(try await get(BotEndpoint.mcpCatalog.url(base: address))) else {
+            throw DashboardFailure.unreadableResponse
+        }
+        return catalog
+    }
+
+    /// `env` goes to the host's `.env` before the install runs; callers send only declared,
+    /// non-empty values and never keep them.
+    func installMCPCatalogEntry(_ name: String, env: [String: String], enable: Bool) async throws -> MCPInstallStart {
+        let json = try await post(BotEndpoint.mcpCatalogInstall.url(base: address), body: .object([
+            "name": .string(name), "env": .object(env.mapValues(BotJSON.string)), "enable": .bool(enable)
+        ]))
+        guard let start = MCPInstallStart(json) else { throw DashboardFailure.unreadableResponse }
+        return start
+    }
+}

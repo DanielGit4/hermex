@@ -304,56 +304,16 @@ struct SkillsHubOperationBanner: View {
 
     var body: some View {
         if let operation = model.operation {
-            HStack(alignment: .top, spacing: 12) {
-                icon(for: operation.phase)
-                    .frame(width: 22)
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(title(for: operation))
-                        .font(.subheadline.weight(.semibold))
-                    if let lastLine = operation.lines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
-                        Text(verbatim: lastLine)
-                            .font(.caption.monospaced())
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    }
-                }
-
-                Spacer(minLength: 0)
-
-                if operation.phase != .running {
-                    Button {
-                        model.dismissOperationResult()
-                    } label: {
-                        Image(systemName: "xmark")
-                            .font(.footnote.weight(.semibold))
-                            .frame(width: 44, height: 44)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .accessibilityLabel("Dismiss")
-                    .padding(.vertical, -12)
-                }
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .padding(.horizontal, 16)
-            .padding(.bottom, 8)
-            .accessibilityElement(children: .contain)
+            DashboardOperationBanner(status: status(for: operation.phase), title: title(for: operation),
+                                     lines: operation.lines, dismiss: model.dismissOperationResult)
         }
     }
 
-    @ViewBuilder
-    private func icon(for phase: SkillsHubViewModel.OperationPhase) -> some View {
+    private func status(for phase: SkillsHubViewModel.OperationPhase) -> DashboardOperationBanner.Status {
         switch phase {
-        case .running:
-            ProgressView()
-        case .succeeded:
-            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-        case .failed:
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        case .running: return .running
+        case .succeeded: return .succeeded
+        case .failed: return .failed
         }
     }
 
@@ -367,6 +327,68 @@ struct SkillsHubOperationBanner: View {
             case .uninstall(let name): return String(localized: "Removing “\(name)” from your Hermes host…")
             case .update: return String(localized: "Updating hub skills on your Hermes host…")
             }
+        }
+    }
+}
+
+/// A dashboard action's progress, pinned to the bottom of the screens that start it: a
+/// spinner and the host's latest log line while it runs, then the outcome, dismissible.
+struct DashboardOperationBanner: View {
+    enum Status { case running, succeeded, failed }
+
+    let status: Status
+    let title: String
+    let lines: [String]
+    let dismiss: () -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            icon
+                .frame(width: 22)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                if let lastLine = lines.last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
+                    Text(verbatim: lastLine)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer(minLength: 0)
+
+            if status != .running {
+                Button(action: dismiss) {
+                    Image(systemName: "xmark")
+                        .font(.footnote.weight(.semibold))
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Dismiss")
+                .padding(.vertical, -12)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .padding(.horizontal, 16)
+        .padding(.bottom, 8)
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private var icon: some View {
+        switch status {
+        case .running:
+            ProgressView()
+        case .succeeded:
+            Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+        case .failed:
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
         }
     }
 }
