@@ -406,14 +406,32 @@ backgrounding, pull-to-refresh and Reconnect all go through `close()` then
 `open()`; a dropped socket keeps the roster on screen, says live updates
 stopped, and makes pin and hide inert until the next `open()`.
 
-Roster organization is Desktop's. `pinned` and `hidden` in
-`ui_meta["hermes-bots"]` are honored: pinned bots sit above the list as large
-avatar tiles with the name beneath, the rest follow in server order, and hidden
-bots stay out unless revealed for the session (dimmed, in place) or named by a
-search. Pin, Unpin, Hide and Unhide are the row's long-press menu. Desktop's
-user sections are not shown because their catalog (`bot-sections-v1`) lives in
-the Desktop renderer's `localStorage` and only an opaque `sectionId` reaches the
-phone; named section headers need upstream to publish the catalog on the host.
+Roster organization is Desktop's. `pinned`, `hidden`, `sectionId` and
+`sectionName` in `ui_meta["hermes-bots"]` are honored: pinned bots sit above the
+list as large avatar tiles with the name beneath and nowhere else, the rest are
+grouped under Desktop's named sections, and hidden bots stay out unless revealed
+for the session (dimmed, in their own section) or named by a search. Pin, Unpin,
+Hide and Unhide are the row's long-press menu.
+
+Desktop stamps the section's name beside its id on every filed bot (0.21.4 and
+later); its section list and order stay in each Desktop's local storage
+(`bot-sections-v1`). The phone groups by `sectionId`, heads each section with
+the name most members carry (ties go to the first member in `profiles.list`
+order), and treats a bot with no name, or a null `sectionId` after a delete, as
+unfiled. Sections sort A–Z (`localizedStandardCompare`, ties by id); unfiled bots
+and every group room follow as one final block, headed "Other chats" only when a
+named section is on screen. With no named sections the list has no headers.
+Rooms are never sectioned: Desktop keeps a room's section on the machine that
+filed it. Section changes arrive with the next roster read (open, pull to
+refresh, or a `sessions.changed` reload), as pin and hide changes do. The phone
+never files bots.
+
+"Reorder Sections…" in the + menu (shown with two or more named sections) places
+sections for this phone only: `BotSectionOrderStore` keeps the placed ids in
+`UserDefaults`, keyed by configured server and connection UUID, never sent to
+Desktop. Placed sections keep their position, the rest follow A–Z after them,
+and ids the roster no longer has are ignored. "Reset to A–Z" forgets the
+placement; removing the connection deletes it.
 `groups` are executable group rooms, not Desktop organization sections. Their read-only viewer is described below. A
 description of 24 characters or fewer reads as a role chip beside the name when
 the chat has a preview; the activity label is the time today, the weekday within
@@ -541,7 +559,7 @@ starts with no keys. Secret values never reach the phone. A create whose reply
 reports neither `model_set` nor `mirrored.model_inherited` shows a one-line
 note to pick a model. Duplicates clone config, skills and `SOUL.md` through
 `clone_from`; the drawn look is copied, the photo asset and Desktop
-organization (`pinned`, `sectionId`) are not, and the chat stays with the
+organization (`pinned`, `sectionId`, `sectionName`) are not, and the chat stays with the
 original. Create-from-description (`llm.oneshot`) is not offered.
 
 Delete is `DELETE /api/profiles/{name}` over the client's authenticated cookie
@@ -958,10 +976,10 @@ it never orchestrates member turns, retries work, or opens the hidden
 On inbox open and pull to refresh, `groups.capabilities` gates room rows: `driver`
 must be true and `methods` must include `groups.list`,
 `groups.state`, and `groups.log`. Missing capabilities hide rooms, including name
-search. Group rooms and unpinned bots share one newest-first list, using room
-updated time and bot last activity. Undated chats sort last; ties use stable chat
-identity. Revealed hidden bots join that order, with the reveal control at the
-bottom. Pinned bot tiles remain above the list.
+search. Group rooms sit in the unfiled block with unfiled bots; every block is
+newest first, using room updated time and bot last activity. Undated chats sort
+last; ties use stable chat identity. Revealed hidden bots join that order, with
+the reveal control at the bottom. Pinned bot tiles remain above the list.
 The top-right + menu offers New Bot and New Group Chat; group creation is disabled
 when the host lacks its capability. `groups.list` pages all active
 rooms; disbanded entries are excluded. Identity is configured server URL + Bot
