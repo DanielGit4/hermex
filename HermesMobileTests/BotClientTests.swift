@@ -197,7 +197,8 @@ import XCTest
 
         let calls: [(String, [String: BotJSON])] = [
             ("subagent.list", ["session_id": .string("runtime")]),
-            ("subagent.tail", ["session_id": .string("runtime"), "subagent_id": .string("worker")])
+            ("subagent.tail", ["session_id": .string("runtime"), "subagent_id": .string("worker")]),
+            ("session.active_list", [:])
         ]
         for (method, params) in calls {
             let started = expectation(description: "\(method) dispatched")
@@ -232,7 +233,7 @@ import XCTest
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [BotHTTPFixture.self]
         let socket = BotScriptedSocket()
-        socket.withholdReply = { $0["method"].text == "subagent.list" }
+        socket.withholdReply = { ["subagent.list", "session.active_list"].contains($0["method"].text) }
         let client = BotClient(connection: connection(), configuration: configuration,
                                rpcDeadline: .milliseconds(50)) { _, _ in socket }
         var disconnects = 0
@@ -240,11 +241,15 @@ import XCTest
         try await client.connect()
         defer { client.close() }
 
-        do {
-            _ = try await client.call("subagent.list", ["session_id": .string("runtime")])
-            XCTFail("Timed-out delegated read succeeded")
-        } catch {
-            XCTAssertEqual(error as? BotFailure, .transport)
+        // The inbox's live-status read is optional the same way: a stall fails only it.
+        let reads: [(String, [String: BotJSON])] = [("subagent.list", ["session_id": .string("runtime")]), ("session.active_list", [:])]
+        for (method, params) in reads {
+            do {
+                _ = try await client.call(method, params)
+                XCTFail("Timed-out \(method) succeeded")
+            } catch {
+                XCTAssertEqual(error as? BotFailure, .transport)
+            }
         }
 
         socket.withholdReply = nil
