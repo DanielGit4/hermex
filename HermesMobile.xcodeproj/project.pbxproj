@@ -489,6 +489,17 @@
 		DA5B000000000000000000B8 /* DashboardClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F8 /* DashboardClientTests.swift */; };
 		DA5B000000000000000000B9 /* SkillsHubDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000F9 /* SkillsHubDecodingTests.swift */; };
 		DA5B000000000000000000BA /* SkillsHubViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5B000000000000000000FA /* SkillsHubViewModelTests.swift */; };
+		DA5C00000000000000000B01 /* MCPModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F01 /* MCPModels.swift */; };
+		DA5C00000000000000000B02 /* MCPServersViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F02 /* MCPServersViewModel.swift */; };
+		DA5C00000000000000000B03 /* MCPCatalogViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F03 /* MCPCatalogViewModel.swift */; };
+		DA5C00000000000000000B04 /* MCPServersView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F04 /* MCPServersView.swift */; };
+		DA5C00000000000000000B05 /* MCPServerDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F05 /* MCPServerDetailView.swift */; };
+		DA5C00000000000000000B06 /* MCPCatalogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F06 /* MCPCatalogView.swift */; };
+		DA5C00000000000000000B07 /* MCPCatalogDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F07 /* MCPCatalogDetailView.swift */; };
+		DA5C00000000000000000B08 /* MCPDashboardClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F08 /* MCPDashboardClientTests.swift */; };
+		DA5C00000000000000000B09 /* MCPDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F09 /* MCPDecodingTests.swift */; };
+		DA5C00000000000000000B0A /* MCPServersViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F0A /* MCPServersViewModelTests.swift */; };
+		DA5C00000000000000000B0B /* MCPCatalogViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F0B /* MCPCatalogViewModelTests.swift */; };
 		A990ABE1D2654992AD262B77 /* BotProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5619C4EB852849D396C45F95 /* BotProtocol.swift */; };
 		9510188AE84E41D9BAE025F1 /* BotConversationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B077A87C9D846D7A9D27D76 /* BotConversationTests.swift */; };
 		9510188AE84E41D9BAE025FA /* BotPendingRequestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B077A87C9D846D7A9D27D7A /* BotPendingRequestTests.swift */; };
@@ -1079,6 +1090,17 @@
 		DA5B000000000000000000F8 /* DashboardClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardClientTests.swift; sourceTree = "<group>"; };
 		DA5B000000000000000000F9 /* SkillsHubDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsHubDecodingTests.swift; sourceTree = "<group>"; };
 		DA5B000000000000000000FA /* SkillsHubViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SkillsHubViewModelTests.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F01 /* MCPModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPModels.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F02 /* MCPServersViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServersViewModel.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F03 /* MCPCatalogViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPCatalogViewModel.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F04 /* MCPServersView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServersView.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F05 /* MCPServerDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServerDetailView.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F06 /* MCPCatalogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPCatalogView.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F07 /* MCPCatalogDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPCatalogDetailView.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F08 /* MCPDashboardClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPDashboardClientTests.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F09 /* MCPDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPDecodingTests.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F0A /* MCPServersViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServersViewModelTests.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F0B /* MCPCatalogViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPCatalogViewModelTests.swift; sourceTree = "<group>"; };
 		5619C4EB852849D396C45F95 /* BotProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bots/BotProtocol.swift"; sourceTree = "<group>"; };
 		0B077A87C9D846D7A9D27D76 /* BotConversationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BotConversationTests.swift"; sourceTree = "<group>"; };
 		0B077A87C9D846D7A9D27D7A /* BotPendingRequestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BotPendingRequestTests.swift"; sourceTree = "<group>"; };
@@ -1272,6 +1294,10 @@
 				DA5B000000000000000000F8 /* DashboardClientTests.swift */,
 				DA5B000000000000000000F9 /* SkillsHubDecodingTests.swift */,
 				DA5B000000000000000000FA /* SkillsHubViewModelTests.swift */,
+				DA5C00000000000000000F08 /* MCPDashboardClientTests.swift */,
+				DA5C00000000000000000F09 /* MCPDecodingTests.swift */,
+				DA5C00000000000000000F0A /* MCPServersViewModelTests.swift */,
+				DA5C00000000000000000F0B /* MCPCatalogViewModelTests.swift */,
 				A4730000000000000000A004 /* BotAvatarTests.swift */,
 				A4750000000000000000B006 /* BotActivityTests.swift */,
 				A4770000000000000000D006 /* BotDelegatedWorkTests.swift */,
@@ -1964,6 +1990,13 @@
 				DA5B000000000000000000F5 /* SkillsHubViewModel.swift */,
 				DA5B000000000000000000F6 /* SkillsHubView.swift */,
 				DA5B000000000000000000F7 /* SkillsHubDetailView.swift */,
+				DA5C00000000000000000F01 /* MCPModels.swift */,
+				DA5C00000000000000000F02 /* MCPServersViewModel.swift */,
+				DA5C00000000000000000F03 /* MCPCatalogViewModel.swift */,
+				DA5C00000000000000000F04 /* MCPServersView.swift */,
+				DA5C00000000000000000F05 /* MCPServerDetailView.swift */,
+				DA5C00000000000000000F06 /* MCPCatalogView.swift */,
+				DA5C00000000000000000F07 /* MCPCatalogDetailView.swift */,
 			);
 			path = Dashboard;
 			sourceTree = "<group>";
@@ -2551,6 +2584,13 @@
 				DA5B000000000000000000B5 /* SkillsHubViewModel.swift in Sources */,
 				DA5B000000000000000000B6 /* SkillsHubView.swift in Sources */,
 				DA5B000000000000000000B7 /* SkillsHubDetailView.swift in Sources */,
+				DA5C00000000000000000B01 /* MCPModels.swift in Sources */,
+				DA5C00000000000000000B02 /* MCPServersViewModel.swift in Sources */,
+				DA5C00000000000000000B03 /* MCPCatalogViewModel.swift in Sources */,
+				DA5C00000000000000000B04 /* MCPServersView.swift in Sources */,
+				DA5C00000000000000000B05 /* MCPServerDetailView.swift in Sources */,
+				DA5C00000000000000000B06 /* MCPCatalogView.swift in Sources */,
+				DA5C00000000000000000B07 /* MCPCatalogDetailView.swift in Sources */,
 				1A2B3C4D5E6F70000000214 /* SkillsViewModel.swift in Sources */,
 				36CD9EF0B0734E5F8C28BB92 /* SlashCommand.swift in Sources */,
 				941A67322EB54169A55D7A64 /* SlashCommandCatalog.swift in Sources */,
@@ -2602,6 +2642,10 @@
 				DA5B000000000000000000B8 /* DashboardClientTests.swift in Sources */,
 				DA5B000000000000000000B9 /* SkillsHubDecodingTests.swift in Sources */,
 				DA5B000000000000000000BA /* SkillsHubViewModelTests.swift in Sources */,
+				DA5C00000000000000000B08 /* MCPDashboardClientTests.swift in Sources */,
+				DA5C00000000000000000B09 /* MCPDecodingTests.swift in Sources */,
+				DA5C00000000000000000B0A /* MCPServersViewModelTests.swift in Sources */,
+				DA5C00000000000000000B0B /* MCPCatalogViewModelTests.swift in Sources */,
 				A4730000000000000000A003 /* BotAvatarTests.swift in Sources */,
 				A4750000000000000000B005 /* BotActivityTests.swift in Sources */,
 				A4770000000000000000D005 /* BotDelegatedWorkTests.swift in Sources */,

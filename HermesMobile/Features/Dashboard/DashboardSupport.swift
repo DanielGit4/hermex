@@ -45,6 +45,20 @@ struct DashboardProblem: Equatable {
     ]
 }
 
+/// One independently loaded dashboard section: each has its own spinner, failure and retry.
+enum DashboardLoadState: Equatable {
+    case idle, loading, loaded
+    case failed(DashboardProblem)
+}
+
+extension Optional where Wrapped == String {
+    /// The trimmed text, or nil when absent or blank. Dashboard models read host text with it.
+    var trimmedNonEmpty: String? {
+        guard let trimmed = self?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
+        return trimmed
+    }
+}
+
 /// Face ID or Touch ID, falling back to the device passcode, before a dashboard action the
 /// phone cannot undo. A device with no passcode cannot prove its owner, so the action is
 /// refused rather than waved through.

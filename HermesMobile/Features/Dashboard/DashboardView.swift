@@ -1,14 +1,16 @@
 import SwiftUI
 
 /// The Hermes host's dashboard, reached over the saved Bot connection for this server. The
-/// Skills Hub is live; the other sections are listed so the destination's shape is clear
-/// and stay inert until they are built.
+/// Skills Hub and MCP are live; the other sections are listed so the destination's shape is
+/// clear and stay inert until they are built.
 struct DashboardView: View {
     let server: URL
 
-    /// Built once per visit, so leaving the Skills Hub and coming back keeps a running
-    /// install on screen.
+    /// Built once per visit and sharing one signed-in client, so leaving a section and
+    /// coming back keeps a running install on screen.
     @State private var skillsHub: SkillsHubViewModel?
+    @State private var mcpServers: MCPServersViewModel?
+    @State private var mcpCatalog: MCPCatalogViewModel?
     @State private var didLoadConnection = false
 
     var body: some View {
@@ -17,7 +19,11 @@ struct DashboardView: View {
             .task {
                 guard !didLoadConnection else { return }
                 if let connection = try? BotConnectionStore().load(server: server) {
-                    skillsHub = SkillsHubViewModel(client: DashboardClient(connection: connection))
+                    let client = DashboardClient(connection: connection)
+                    let servers = MCPServersViewModel(client: client)
+                    skillsHub = SkillsHubViewModel(client: client)
+                    mcpServers = servers
+                    mcpCatalog = MCPCatalogViewModel(client: client, servers: servers)
                 }
                 didLoadConnection = true
             }
@@ -25,23 +31,20 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let skillsHub {
+        if let skillsHub, let mcpServers, let mcpCatalog {
             List {
                 Section {
                     NavigationLink {
                         SkillsHubView(model: skillsHub)
                     } label: {
-                        Label {
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Skills Hub")
-                                    .font(.body.weight(.semibold))
-                                Text("Search, install and update skills on your Hermes host.")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.secondary)
-                            }
-                        } icon: {
-                            Image(systemName: "hammer")
-                        }
+                        DashboardSectionLabel(title: "Skills Hub", systemImage: "hammer",
+                                              subtitle: "Search, install and update skills on your Hermes host.")
+                    }
+                    NavigationLink {
+                        MCPServersView(model: mcpServers, catalog: mcpCatalog)
+                    } label: {
+                        DashboardSectionLabel(title: "MCP", systemImage: "point.3.connected.trianglepath.dotted",
+                                              subtitle: "Test, enable and remove MCP servers, or install from the catalog.")
                     }
                 }
 
@@ -64,16 +67,35 @@ struct DashboardView: View {
     }
 }
 
+private struct DashboardSectionLabel: View {
+    let title: LocalizedStringKey
+    let systemImage: String
+    let subtitle: LocalizedStringKey
+
+    var body: some View {
+        Label {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.body.weight(.semibold))
+                Text(subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        } icon: {
+            Image(systemName: systemImage)
+        }
+    }
+}
+
 /// Dashboard sections that are planned but not built. Their rows are plain text, never
 /// buttons, so nothing here navigates.
 private enum UpcomingSection: CaseIterable, Identifiable {
-    case mcp, plugins, config, keys, logs, gateway
+    case plugins, config, keys, logs, gateway
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .mcp: return String(localized: "MCP")
         case .plugins: return String(localized: "Plugins")
         case .config: return String(localized: "Config")
         case .keys: return String(localized: "Keys")
@@ -84,7 +106,6 @@ private enum UpcomingSection: CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
-        case .mcp: return "point.3.connected.trianglepath.dotted"
         case .plugins: return "puzzlepiece.extension"
         case .config: return "slider.horizontal.3"
         case .keys: return "key"

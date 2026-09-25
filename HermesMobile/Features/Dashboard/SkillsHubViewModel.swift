@@ -6,10 +6,7 @@ import Observation
 /// update the host runs at a time. Install, uninstall and update only spawn a process, so
 /// success is reported after the action exits 0 and a fresh read shows the change.
 @MainActor @Observable final class SkillsHubViewModel {
-    enum LoadState: Equatable {
-        case idle, loading, loaded
-        case failed(DashboardProblem)
-    }
+    typealias LoadState = DashboardLoadState
 
     enum Operation: Hashable {
         case install(identifier: String, name: String)

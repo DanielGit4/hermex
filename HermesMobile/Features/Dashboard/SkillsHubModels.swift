@@ -205,11 +205,3 @@ struct DashboardActionStatus: Hashable {
         return Array(lines[lines.index(after: start)...])
     }
 }
-
-private extension Optional where Wrapped == String {
-    /// The trimmed text, or nil when absent or blank.
-    var trimmedNonEmpty: String? {
-        guard let trimmed = self?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return nil }
-        return trimmed
-    }
-}

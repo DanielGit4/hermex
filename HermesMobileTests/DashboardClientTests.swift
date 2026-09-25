@@ -227,6 +227,8 @@ final class DashboardHTTPFixture: URLProtocol {
 
     static var calls: [String] { lock.withLock { recorded.map(\.call) } }
     static func body(of call: String) -> BotJSON { lock.withLock { recorded.first { $0.call == call }?.body ?? .null } }
+    /// The body of the latest such call, which a `handler` reads for the request it answers.
+    static func lastBody(of call: String) -> BotJSON { lock.withLock { recorded.last { $0.call == call }?.body ?? .null } }
     static func calls(matching path: String) -> [String] { calls.filter { $0.contains(path) } }
     static func clearCalls() { lock.withLock { recorded = [] } }
     static func reset() {
