@@ -65,15 +65,14 @@ developed by Hermes Kanban cards worked by Claude Code. Read this file together 
 5. Config (structured read + raw editor behind Face ID), Keys (write-only), Logs
    (tail), Gateway status/start/stop/restart.
 
-## Live dashboard (read-only checks allowed)
+## Live dashboard (no credentials for lanes)
 
 - URL: `http://100.67.209.26:9119` today; after the HTTPS move
-  `https://macstudio-von-daniel.tailbcd47c.ts.net:9443`. Basic auth user
-  `danielhermes`; the password lives in the macOS Keychain (`hermex-bot`), never in
-  files, logs or prompts.
-- Allowed: `GET` requests. Mutations only against disposable objects you created
-  (e.g. a throwaway skill or MCP entry you remove afterwards) and never gateway
-  stop/restart, env writes, or config writes.
+  `https://macstudio-von-daniel.tailbcd47c.ts.net:9443`.
+- Lanes have **no dashboard credential**. Verify routes and shapes from the router
+  source in `~/.hermes/hermes-agent/hermes_cli/web_routers/` and build test fixtures
+  from those shapes. Unauthenticated `GET /api/status` is the only live call allowed.
+- Never add, log or commit a password, cookie or token.
 
 ## Definition of done for a card
 
