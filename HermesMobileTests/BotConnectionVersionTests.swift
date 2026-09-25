@@ -275,6 +275,7 @@ private struct ConnectionSetupFailingKeychain: KeychainStoring {
 
     override func tearDown() {
         BotStatusHTTPFixture.handler = nil
+        BotStatusHTTPFixture.redirect = nil
         super.tearDown()
     }
 
@@ -370,13 +371,29 @@ private struct ConnectionSetupFailingKeychain: KeychainStoring {
         }
         XCTAssertFalse(reason.isEmpty)
     }
+
+    /// A host behind an access gate redirects to another host's 200 HTML sign-in page;
+    /// that must read as blocked, not as "not Hermes".
+    func testRedirectToAnotherHostReadsAsBlocked() async {
+        BotStatusHTTPFixture.redirect = URL(string: "https://team.cloudflareaccess.com/cdn-cgi/access/login")!
+        let result = await check(200, "<html>Sign in</html>")
+        XCTAssertEqual(result, .failure(.blocked))
+    }
 }
 
 private final class BotStatusHTTPFixture: URLProtocol {
     static var handler: ((URLRequest) throws -> (Int, Data))?
+    /// When set, a request to any other host is answered with a 302 to this URL.
+    static var redirect: URL?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
+        if let target = Self.redirect, let url = request.url, url.host != target.host {
+            let response = HTTPURLResponse(url: url, statusCode: 302, httpVersion: nil,
+                                           headerFields: ["Location": target.absoluteString])!
+            client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: target), redirectResponse: response)
+            return
+        }
         do {
             guard let handler = Self.handler else { throw URLError(.cannotConnectToHost) }
             let (status, body) = try handler(request)
