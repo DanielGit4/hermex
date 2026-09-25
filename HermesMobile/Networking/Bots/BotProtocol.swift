@@ -66,7 +66,27 @@ enum BotEndpoint: String {
     case pluginInstall = "api/dashboard/agent-plugins/install"
     case gatewayRestart = "api/gateway/restart"
     case pushPairing = "api/plugins/hermex-push/pairing"
+    /// Skills Hub routes the Dashboard uses, verified against hermes-agent
+    /// `hermes_cli/web_routers/skills.py` on 2026-09-25. Each takes an optional `profile`
+    /// Hermex leaves unset so the host's launch profile answers. `GET api/skills` lists
+    /// `{name, description, category, enabled, usage, provenance}`; search, preview and scan
+    /// take `q` or `identifier`; `sources` carries the hub lock (`installed`, keyed by
+    /// identifier). Install `{identifier}`, uninstall `{name}` and update only spawn
+    /// `hermes skills …` and answer `{ok, pid, name}`: the outcome is `actionStatusURL`.
+    case skills = "api/skills"
+    case skillsHubSources = "api/skills/hub/sources"
+    case skillsHubSearch = "api/skills/hub/search"
+    case skillsHubPreview = "api/skills/hub/preview"
+    case skillsHubScan = "api/skills/hub/scan"
+    case skillsHubInstall = "api/skills/hub/install"
+    case skillsHubUninstall = "api/skills/hub/uninstall"
+    case skillsHubUpdate = "api/skills/hub/update"
     func url(base: URL) -> URL { base.appendingPathComponent(rawValue) }
+    /// `GET /api/actions/{name}/status` (`actions.py`): `{name, running, exit_code, pid,
+    /// lines}` for a spawned action. `name` is the one the spawning route answered.
+    static func actionStatusURL(base: URL, name: String) -> URL {
+        base.appendingPathComponent("api/actions").appendingPathComponent(name).appendingPathComponent("status")
+    }
     /// `POST /api/dashboard/agent-plugins/{name}/{action}` for `enable` and `disable`.
     static func pluginURL(base: URL, name: String, action: String) -> URL {
         base.appendingPathComponent("api/dashboard/agent-plugins")

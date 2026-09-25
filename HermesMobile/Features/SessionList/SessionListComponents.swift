@@ -168,6 +168,8 @@ struct SidebarSectionVisibility: Equatable {
     var tasks: Bool
     var kanban: Bool
     var skills: Bool
+    /// Follows whether this server has a saved Bot connection, like the Bots row follows its gate.
+    var dashboard: Bool
     var memory: Bool
     var insights: Bool
     var activeProfile: Bool
@@ -179,6 +181,7 @@ struct SidebarSectionVisibility: Equatable {
         tasks: true,
         kanban: true,
         skills: true,
+        dashboard: true,
         memory: true,
         insights: true,
         activeProfile: true,
@@ -188,7 +191,7 @@ struct SidebarSectionVisibility: Equatable {
     /// The plain links share one List row, so that row is dropped entirely
     /// once all of them are hidden rather than leaving an empty padded gap.
     var showsAnyUtilityLink: Bool {
-        bots || tasks || kanban || skills || memory || insights
+        bots || tasks || kanban || skills || dashboard || memory || insights
     }
 }
 
@@ -293,6 +296,13 @@ struct SessionSidebarUtilityRows: View {
             if sectionVisibility.skills {
                 SidebarNavButton(title: String(localized: "Skills"), assetImage: "LucideHammer") {
                     openDestination(.skills)
+                }
+            }
+
+            if sectionVisibility.dashboard {
+                // No Lucide dashboard glyph is in the asset catalog yet; the cog reads as host admin.
+                SidebarNavButton(title: String(localized: "Dashboard"), assetImage: "LucideUserRoundCog") {
+                    openDestination(.dashboard)
                 }
             }
 
