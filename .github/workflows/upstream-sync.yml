@@ -1,0 +1,51 @@
+# Fork-only: keep `master` equal to upstream and propose upstream changes to
+# `daniel/main` as a PR. Conflicts surface as a failed PR merge check, which the
+# Hermes Kanban board picks up as a card.
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "17 5 * * 1"   # Mondays 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync:
+    if: github.repository == 'DanielGit4/hermex'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: master
+
+      - name: Fast-forward master to upstream
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/uzairansaruzi/hermex.git
+          git fetch upstream master
+          git merge --ff-only upstream/master
+          git push origin master
+
+      - name: Open or refresh master -> daniel/main PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ahead=$(git rev-list --count origin/daniel/main..master || echo 0)
+          if [ "$ahead" = "0" ]; then
+            echo "daniel/main already contains upstream."
+            exit 0
+          fi
+          existing=$(gh pr list --base daniel/main --head master --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "Sync PR #$existing already open; it now includes the new upstream commits."
+          else
+            gh pr create --base daniel/main --head master \
+              --title "chore(sync): merge upstream master ($ahead commits)" \
+              --body "Automated weekly sync from uzairansaruzi/hermex. Merge with a merge commit (not squash) so future syncs stay clean. If CI fails or the PR conflicts, the Hermes board gets a card."
+          fi

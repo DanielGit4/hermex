@@ -1,0 +1,7 @@
+// Fork-only overrides for Daniel's "Hermex Dev" builds (DanielGit4/hermex).
+// Passed with `-xcconfig Config/ForkDev.xcconfig` so it outranks the project-level
+// APP_DISPLAY_NAME / APP_URL_SCHEME_SUFFIX, exactly like BranchTestFlight.xcconfig.
+// A separate display name and URL scheme keep deep links from colliding with the
+// App Store Hermex installed on the same phone.
+APP_DISPLAY_NAME = Hermex Dev
+APP_URL_SCHEME_SUFFIX = -dev
