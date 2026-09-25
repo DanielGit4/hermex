@@ -2,13 +2,13 @@
 # Fork-only: build "Hermex Dev" and install it on Daniel's iPhone with the free
 # Personal Team (Config/Local.xcconfig -> DEVELOPMENT_TEAM).
 #
-# Usage: scripts/fork-install-device [device-udid-or-name]
+# Usage: scripts/fork-install-device [hardware-udid]
 #
-# First run: plug the iPhone in by USB, unlock it, tap "Trust This Computer",
-# and enable Settings > Privacy & Security > Developer Mode (iOS asks after the
-# first install; the phone restarts). Personal Team builds expire after 7 days —
-# rerun this script to refresh. Push notifications are not available on this
-# build (Apple restriction for free teams); everything else works.
+# First run: plug the iPhone in by USB, unlock it, tap "Trust This Computer", and
+# turn on Settings > Privacy & Security > Developer Mode (the phone restarts; confirm
+# "Turn On" afterwards). Personal Team builds expire after 7 days: rerun this script
+# to refresh. Push notifications are not available on this build (Apple restriction
+# for free teams); everything else works.
 set -euo pipefail
 
 repo=${0:A:h:h}
@@ -19,27 +19,40 @@ if ! grep -qE '^DEVELOPMENT_TEAM *= *[A-Z0-9]{10}' Config/Local.xcconfig 2>/dev/
   exit 1
 fi
 
-device=${1:-}
-if [[ -z "$device" ]]; then
-  devices_json=$(mktemp -t hermex-devices)
-  xcrun devicectl list devices --quiet --json-output "$devices_json" >/dev/null 2>&1 || true
-  device=$(/usr/bin/python3 - "$devices_json" <<'PY'
+# Prints "<hardware-udid> <developer-mode-status> <name>" for the first connected
+# physical iPhone. xcodebuild needs the hardware UDID (not the CoreDevice identifier),
+# and building for that exact device is what registers it with the Personal Team.
+devices_json=$(mktemp -t hermex-devices)
+xcrun devicectl list devices --quiet --json-output "$devices_json" >/dev/null 2>&1 || true
+read -r udid dev_mode name <<<"$(/usr/bin/python3 - "$devices_json" "${1:-}" <<'PY'
 import json, sys
+wanted = sys.argv[2]
 try:
     devices = json.load(open(sys.argv[1]))["result"]["devices"]
 except Exception:
     devices = []
 for d in devices:
-    props = d.get("hardwareProperties", {})
-    if props.get("platform") == "iOS" and props.get("reality") == "physical":
-        print(d.get("identifier", ""))
-        break
+    hw, props = d.get("hardwareProperties", {}), d.get("deviceProperties", {})
+    if hw.get("platform") != "iOS" or hw.get("reality") != "physical":
+        continue
+    if wanted and wanted not in (hw.get("udid"), d.get("identifier")):
+        continue
+    print(hw.get("udid", ""), props.get("developerModeStatus", "unknown"), props.get("name", "iPhone"))
+    break
 PY
-)
-  rm -f "$devices_json"
-fi
-if [[ -z "$device" ]]; then
+)"
+rm -f "$devices_json"
+
+if [[ -z "${udid:-}" ]]; then
   echo "No iPhone found. Plug it in by USB, unlock it and trust this Mac, then rerun." >&2
+  exit 1
+fi
+if [[ "$dev_mode" == "disabled" ]]; then
+  cat >&2 <<EOF
+Developer Mode is off on "$name".
+On the iPhone: Settings > Privacy & Security > Developer Mode > On > Restart.
+After the restart, unlock it and tap "Turn On", enter the passcode, then rerun.
+EOF
   exit 1
 fi
 
@@ -49,7 +62,7 @@ rm -rf "$app"   # never install a stale build if this one fails
 
 build=(xcodebuild
   -project HermesMobile.xcodeproj -scheme HermesMobile -configuration Debug
-  -destination "generic/platform=iOS" -derivedDataPath "$dd"
+  -destination "platform=iOS,id=$udid" -derivedDataPath "$dd"
   -xcconfig Config/ForkPersonalTeam.xcconfig -allowProvisioningUpdates
   build)
 if command -v xcbeautify >/dev/null; then
@@ -60,6 +73,6 @@ fi
 
 [[ -d "$app" ]] || { echo "Build produced no app at $app" >&2; exit 1; }
 
-xcrun devicectl device install app --device "$device" "$app"
-echo "Installed Hermex Dev on $device. On first launch iOS may ask you to trust the"
+xcrun devicectl device install app --device "$udid" "$app"
+echo "Installed Hermex Dev on $name. On first launch iOS may ask you to trust the"
 echo "developer: Settings > General > VPN & Device Management > Apple Development."
