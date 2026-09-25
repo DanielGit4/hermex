@@ -11,7 +11,7 @@ developed by Hermes Kanban cards worked by Claude Code. Read this file together 
   (fetch only; push is disabled).
 - `master` mirrors `upstream/master` and is never edited by hand.
 - `daniel/main` is the fork's release branch and the base of every card branch.
-- Card branches: `card/<task-id>-<slug>`, one PR into `daniel/main` per card.
+- Card branches: `hermex/<task-id>-<slug>` (set by the Hermes project), one PR into `daniel/main` per card.
 - Upstream sync: `.github/workflows/upstream-sync.yml` fast-forwards `master` weekly;
   the Hermes cron job "hermex upstream sync" opens the `master → daniel/main` PR.
   A conflicting sync becomes a Kanban card.
