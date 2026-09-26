@@ -5,8 +5,16 @@ import Foundation
 /// cookie session — and adds what browsing screens need: every verb, tolerant `BotJSON`
 /// answers, and one fresh sign-in when the host has forgotten the session.
 @MainActor final class DashboardClient {
+    /// How long a plugin install or update may run. Each clones at a pinned commit, scans it
+    /// and installs Python dependencies inside one request, which can outlast the shared
+    /// limits while the host keeps working.
+    static let longRequestTimeout: TimeInterval = 300
+
     let connection: BotConnection
-    private let session: URLSession
+    let session: URLSession
+    /// The same cookie storage (and, in tests, the same protocol classes) with longer limits,
+    /// used only by requests that ask for it.
+    let longSession: URLSession
     /// The sign-in every request waits on, so requests that start together sign in once.
     private var signInTask: Task<Void, Error>?
 
@@ -17,6 +25,11 @@ import Foundation
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 90
         session = URLSession(configuration: configuration)
+        let long = configuration.copy() as! URLSessionConfiguration
+        long.httpCookieStorage = configuration.httpCookieStorage
+        long.timeoutIntervalForRequest = Self.longRequestTimeout
+        long.timeoutIntervalForResource = Self.longRequestTimeout
+        longSession = URLSession(configuration: long)
     }
 
     var address: URL { connection.address }
@@ -31,8 +44,10 @@ import Foundation
         try await send("GET", Self.url(url, query: query), body: nil)
     }
 
-    func post(_ url: URL, body: BotJSON = .object([:])) async throws -> BotJSON {
-        try await send("POST", url, body: body)
+    /// `long` waits up to `longRequestTimeout`; `readsRefusal` turns a 400 that says why
+    /// into `DashboardFailure.refused`.
+    func post(_ url: URL, body: BotJSON = .object([:]), long: Bool = false, readsRefusal: Bool = false) async throws -> BotJSON {
+        try await send("POST", url, body: body, long: long, readsRefusal: readsRefusal)
     }
 
     func put(_ url: URL, body: BotJSON) async throws -> BotJSON {
@@ -43,21 +58,24 @@ import Foundation
         try await send("PATCH", url, body: body)
     }
 
-    func delete(_ url: URL, query: [URLQueryItem] = []) async throws -> BotJSON {
-        try await send("DELETE", Self.url(url, query: query), body: nil)
+    func delete(_ url: URL, query: [URLQueryItem] = [], readsRefusal: Bool = false) async throws -> BotJSON {
+        try await send("DELETE", Self.url(url, query: query), body: nil, readsRefusal: readsRefusal)
     }
 
     /// A 401 means the host dropped this session (a restart or an expired cookie), and the
     /// auth gate refused the request before any handler ran, so it signs in once more and
     /// replays the request once. A second 401 is the saved credential's problem and surfaces.
-    private func send(_ method: String, _ url: URL, body: BotJSON?) async throws -> BotJSON {
+    private func send(_ method: String, _ url: URL, body: BotJSON?,
+                      long: Bool = false, readsRefusal: Bool = false) async throws -> BotJSON {
+        var urlRequest = request(url, method: method, body: body)
+        if long { urlRequest.timeoutInterval = Self.longRequestTimeout }
         let used = try await signedIn()
         do {
-            return try await perform(request(url, method: method, body: body))
+            return try await perform(urlRequest, long: long, readsRefusal: readsRefusal)
         } catch BotFailure.rejected(401) {
             if signInTask == used { signInTask = nil }
             _ = try await signedIn()
-            return try await perform(request(url, method: method, body: body))
+            return try await perform(urlRequest, long: long, readsRefusal: readsRefusal)
         }
     }
 
@@ -95,10 +113,19 @@ import Foundation
         return request
     }
 
-    private func perform(_ request: URLRequest) async throws -> BotJSON {
-        let (data, response) = try await session.data(for: request)
+    private func perform(_ request: URLRequest, long: Bool = false, readsRefusal: Bool = false) async throws -> BotJSON {
+        let (data, response) = try await (long ? longSession : session).data(for: request)
         guard let response = response as? HTTPURLResponse else { throw BotFailure.transport }
-        guard (200..<300).contains(response.statusCode) else { throw BotFailure.rejected(response.statusCode) }
+        guard (200..<300).contains(response.statusCode) else {
+            // FastAPI's `HTTPException(400, detail)` carries the host's reason; a 422's `detail`
+            // is a validation list, which stays a plain status.
+            if readsRefusal, response.statusCode == 400,
+               let detail = (try? JSONDecoder().decode(BotJSON.self, from: data))?["detail"],
+               DashboardFailure.refusalMessage(detail) != nil {
+                throw DashboardFailure.refused(detail)
+            }
+            throw BotFailure.rejected(response.statusCode)
+        }
         return (try? JSONDecoder().decode(BotJSON.self, from: data)) ?? .null
     }
 
@@ -117,9 +144,17 @@ import Foundation
     }
 }
 
-/// The host answered 2xx with a body this build cannot use.
 enum DashboardFailure: Error, Equatable {
+    /// The host answered 2xx with a body this build cannot use.
     case unreadableResponse
+    /// The host refused the request with a 400 and said why. `detail` is its `detail` as
+    /// sent: the reason's text, or an object from a newer host with the text in `error`.
+    case refused(BotJSON)
+
+    /// The host's own words for a refusal, shown as sent.
+    static func refusalMessage(_ detail: BotJSON) -> String? {
+        detail.text.trimmedNonEmpty ?? detail["error"].text.trimmedNonEmpty
+    }
 }
 
 /// The Skills Hub routes in `BotEndpoint`. No `profile` is sent, so the host's launch
@@ -235,5 +270,58 @@ extension DashboardClient {
         ]))
         guard let start = MCPInstallStart(json) else { throw DashboardFailure.unreadableResponse }
         return start
+    }
+}
+
+/// The plugin routes in `BotEndpoint`, none of which takes a `profile`. Every mutation reads
+/// the host's reason from a 400; install and update wait `longRequestTimeout`.
+extension DashboardClient {
+    func pluginsHub() async throws -> [AgentPlugin] {
+        guard let rows = try await get(BotEndpoint.pluginsHub.url(base: address))["plugins"].list else {
+            throw DashboardFailure.unreadableResponse
+        }
+        return rows.compactMap(AgentPlugin.init)
+    }
+
+    func pluginCatalog() async throws -> PluginCatalog {
+        guard let catalog = PluginCatalog(try await get(BotEndpoint.pluginsCatalog.url(base: address))) else {
+            throw DashboardFailure.unreadableResponse
+        }
+        return catalog
+    }
+
+    /// Installs a catalog entry at its pinned commit. `identifier` is required by the host's
+    /// body model, so it is sent empty; `force` stays false, so an installed entry is refused.
+    func installCatalogPlugin(_ catalogName: String, enable: Bool) async throws -> PluginInstallResult {
+        let json = try await post(BotEndpoint.pluginInstall.url(base: address), body: .object([
+            "identifier": .string(""), "catalog_name": .string(catalogName), "enable": .bool(enable), "force": .bool(false)
+        ]), long: true, readsRefusal: true)
+        guard let result = PluginInstallResult(json) else { throw DashboardFailure.unreadableResponse }
+        return result
+    }
+
+    func setPlugin(_ name: String, enabled: Bool) async throws -> PluginToggleResult {
+        let url = BotEndpoint.pluginURL(base: address, name: name, action: enabled ? "enable" : "disable")
+        guard let result = PluginToggleResult(try await post(url, readsRefusal: true)) else {
+            throw DashboardFailure.unreadableResponse
+        }
+        return result
+    }
+
+    /// `acceptCapabilities` is sent only after the user confirmed a `needsConsent` answer.
+    func updatePlugin(_ name: String, acceptCapabilities: Bool) async throws -> PluginUpdateAnswer {
+        let json = try await post(BotEndpoint.pluginURL(base: address, name: name, action: "update"),
+                                  body: .object(acceptCapabilities ? ["accept_capabilities": .bool(true)] : [:]),
+                                  long: true, readsRefusal: true)
+        guard let answer = PluginUpdateAnswer(json) else { throw DashboardFailure.unreadableResponse }
+        return answer
+    }
+
+    func removePlugin(_ name: String) async throws -> PluginRemoveResult {
+        guard let result = PluginRemoveResult(try await delete(BotEndpoint.pluginURL(base: address, name: name),
+                                                               readsRefusal: true)) else {
+            throw DashboardFailure.unreadableResponse
+        }
+        return result
     }
 }

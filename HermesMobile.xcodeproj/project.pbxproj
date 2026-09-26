@@ -500,6 +500,18 @@
 		DA5C00000000000000000B09 /* MCPDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F09 /* MCPDecodingTests.swift */; };
 		DA5C00000000000000000B0A /* MCPServersViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F0A /* MCPServersViewModelTests.swift */; };
 		DA5C00000000000000000B0B /* MCPCatalogViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F0B /* MCPCatalogViewModelTests.swift */; };
+		DA5D00000000000000000B01 /* PluginModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F01 /* PluginModels.swift */; };
+		DA5D00000000000000000B02 /* PluginsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F02 /* PluginsViewModel.swift */; };
+		DA5D00000000000000000B03 /* PluginCatalogViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F03 /* PluginCatalogViewModel.swift */; };
+		DA5D00000000000000000B04 /* PluginsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F04 /* PluginsView.swift */; };
+		DA5D00000000000000000B05 /* PluginDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F05 /* PluginDetailView.swift */; };
+		DA5D00000000000000000B06 /* PluginCatalogView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F06 /* PluginCatalogView.swift */; };
+		DA5D00000000000000000B07 /* PluginCatalogDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F07 /* PluginCatalogDetailView.swift */; };
+		DA5D00000000000000000B08 /* PluginInstallSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F08 /* PluginInstallSheet.swift */; };
+		DA5D00000000000000000B09 /* PluginsDashboardClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F09 /* PluginsDashboardClientTests.swift */; };
+		DA5D00000000000000000B0A /* PluginsDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F0A /* PluginsDecodingTests.swift */; };
+		DA5D00000000000000000B0B /* PluginsViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F0B /* PluginsViewModelTests.swift */; };
+		DA5D00000000000000000B0C /* PluginCatalogViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F0C /* PluginCatalogViewModelTests.swift */; };
 		A990ABE1D2654992AD262B77 /* BotProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5619C4EB852849D396C45F95 /* BotProtocol.swift */; };
 		9510188AE84E41D9BAE025F1 /* BotConversationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B077A87C9D846D7A9D27D76 /* BotConversationTests.swift */; };
 		9510188AE84E41D9BAE025FA /* BotPendingRequestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B077A87C9D846D7A9D27D7A /* BotPendingRequestTests.swift */; };
@@ -1101,6 +1113,18 @@
 		DA5C00000000000000000F09 /* MCPDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPDecodingTests.swift; sourceTree = "<group>"; };
 		DA5C00000000000000000F0A /* MCPServersViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServersViewModelTests.swift; sourceTree = "<group>"; };
 		DA5C00000000000000000F0B /* MCPCatalogViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPCatalogViewModelTests.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F01 /* PluginModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginModels.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F02 /* PluginsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginsViewModel.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F03 /* PluginCatalogViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginCatalogViewModel.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F04 /* PluginsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginsView.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F05 /* PluginDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginDetailView.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F06 /* PluginCatalogView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginCatalogView.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F07 /* PluginCatalogDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginCatalogDetailView.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F08 /* PluginInstallSheet.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginInstallSheet.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F09 /* PluginsDashboardClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginsDashboardClientTests.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F0A /* PluginsDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginsDecodingTests.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F0B /* PluginsViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginsViewModelTests.swift; sourceTree = "<group>"; };
+		DA5D00000000000000000F0C /* PluginCatalogViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginCatalogViewModelTests.swift; sourceTree = "<group>"; };
 		5619C4EB852849D396C45F95 /* BotProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bots/BotProtocol.swift"; sourceTree = "<group>"; };
 		0B077A87C9D846D7A9D27D76 /* BotConversationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BotConversationTests.swift"; sourceTree = "<group>"; };
 		0B077A87C9D846D7A9D27D7A /* BotPendingRequestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BotPendingRequestTests.swift"; sourceTree = "<group>"; };
@@ -1298,6 +1322,10 @@
 				DA5C00000000000000000F09 /* MCPDecodingTests.swift */,
 				DA5C00000000000000000F0A /* MCPServersViewModelTests.swift */,
 				DA5C00000000000000000F0B /* MCPCatalogViewModelTests.swift */,
+				DA5D00000000000000000F09 /* PluginsDashboardClientTests.swift */,
+				DA5D00000000000000000F0A /* PluginsDecodingTests.swift */,
+				DA5D00000000000000000F0B /* PluginsViewModelTests.swift */,
+				DA5D00000000000000000F0C /* PluginCatalogViewModelTests.swift */,
 				A4730000000000000000A004 /* BotAvatarTests.swift */,
 				A4750000000000000000B006 /* BotActivityTests.swift */,
 				A4770000000000000000D006 /* BotDelegatedWorkTests.swift */,
@@ -1997,6 +2025,14 @@
 				DA5C00000000000000000F05 /* MCPServerDetailView.swift */,
 				DA5C00000000000000000F06 /* MCPCatalogView.swift */,
 				DA5C00000000000000000F07 /* MCPCatalogDetailView.swift */,
+				DA5D00000000000000000F01 /* PluginModels.swift */,
+				DA5D00000000000000000F02 /* PluginsViewModel.swift */,
+				DA5D00000000000000000F03 /* PluginCatalogViewModel.swift */,
+				DA5D00000000000000000F04 /* PluginsView.swift */,
+				DA5D00000000000000000F05 /* PluginDetailView.swift */,
+				DA5D00000000000000000F06 /* PluginCatalogView.swift */,
+				DA5D00000000000000000F07 /* PluginCatalogDetailView.swift */,
+				DA5D00000000000000000F08 /* PluginInstallSheet.swift */,
 			);
 			path = Dashboard;
 			sourceTree = "<group>";
@@ -2591,6 +2627,14 @@
 				DA5C00000000000000000B05 /* MCPServerDetailView.swift in Sources */,
 				DA5C00000000000000000B06 /* MCPCatalogView.swift in Sources */,
 				DA5C00000000000000000B07 /* MCPCatalogDetailView.swift in Sources */,
+				DA5D00000000000000000B01 /* PluginModels.swift in Sources */,
+				DA5D00000000000000000B02 /* PluginsViewModel.swift in Sources */,
+				DA5D00000000000000000B03 /* PluginCatalogViewModel.swift in Sources */,
+				DA5D00000000000000000B04 /* PluginsView.swift in Sources */,
+				DA5D00000000000000000B05 /* PluginDetailView.swift in Sources */,
+				DA5D00000000000000000B06 /* PluginCatalogView.swift in Sources */,
+				DA5D00000000000000000B07 /* PluginCatalogDetailView.swift in Sources */,
+				DA5D00000000000000000B08 /* PluginInstallSheet.swift in Sources */,
 				1A2B3C4D5E6F70000000214 /* SkillsViewModel.swift in Sources */,
 				36CD9EF0B0734E5F8C28BB92 /* SlashCommand.swift in Sources */,
 				941A67322EB54169A55D7A64 /* SlashCommandCatalog.swift in Sources */,
@@ -2646,6 +2690,10 @@
 				DA5C00000000000000000B09 /* MCPDecodingTests.swift in Sources */,
 				DA5C00000000000000000B0A /* MCPServersViewModelTests.swift in Sources */,
 				DA5C00000000000000000B0B /* MCPCatalogViewModelTests.swift in Sources */,
+				DA5D00000000000000000B09 /* PluginsDashboardClientTests.swift in Sources */,
+				DA5D00000000000000000B0A /* PluginsDecodingTests.swift in Sources */,
+				DA5D00000000000000000B0B /* PluginsViewModelTests.swift in Sources */,
+				DA5D00000000000000000B0C /* PluginCatalogViewModelTests.swift in Sources */,
 				A4730000000000000000A003 /* BotAvatarTests.swift in Sources */,
 				A4750000000000000000B005 /* BotActivityTests.swift in Sources */,
 				A4770000000000000000D005 /* BotDelegatedWorkTests.swift in Sources */,

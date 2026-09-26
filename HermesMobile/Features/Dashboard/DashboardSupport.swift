@@ -30,6 +30,10 @@ struct DashboardProblem: Equatable {
             self.init(message: String(localized: "Your Hermes host signed in a different way than expected. Check the Hermes connection in Bots."))
         case DashboardFailure.unreadableResponse:
             self.init(message: String(localized: "Your Hermes host answered in a way this version of Hermex can’t read."))
+        case DashboardFailure.refused(let detail):
+            // The host's own reason, shown as sent.
+            self.init(message: DashboardFailure.refusalMessage(detail)
+                      ?? String(localized: "Your Hermes host couldn’t do this (HTTP \(400)). Try again, or check the host’s logs."))
         default:
             self.init(message: String(localized: "Something went wrong talking to your Hermes host. Try again."))
         }
