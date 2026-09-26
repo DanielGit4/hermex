@@ -1789,6 +1789,9 @@ private struct PendingNewChatView: View {
     let draftStore: ChatDraftStore
 
     @State private var createdSession: SessionSummary?
+    /// True once a composer profile pick replaced the first created session;
+    /// the one-shot inputs below belong to the first chat only.
+    @State private var didReplaceCreatedSession = false
     @State private var draftMessage = ""
     @State private var draftQuotes: [ComposerQuote] = []
     @State private var didStartCreation = false
@@ -1828,13 +1831,17 @@ private struct PendingNewChatView: View {
                     onAPIError: onAPIError,
                     initialDraft: draftMessage,
                     initialQuotes: draftQuotes,
-                    initialAttachments: initialAttachments,
+                    // The first chat uploaded these into its draft, which moved
+                    // to the replacement and re-uploads from there.
+                    initialAttachments: didReplaceCreatedSession ? [] : initialAttachments,
                     loadsInitialMessages: false,
-                    autoStartsVoiceInput: autoStartsVoiceInput,
+                    autoStartsVoiceInput: autoStartsVoiceInput && !didReplaceCreatedSession,
                     draftStore: draftStore,
                     restoresDraftSettings: true,
-                    onConversationStarted: markConversationStarted
+                    onConversationStarted: markConversationStarted,
+                    onReplaceEmptySession: replaceCreatedSession
                 )
+                .id(createdSession.id)
             } else {
                 pendingContent
             }
@@ -1965,6 +1972,18 @@ private struct PendingNewChatView: View {
             viewModel.clearActionError()
             didStartCreation = false
         }
+    }
+
+    /// Shows `session`, which the chat's profile picker created to replace the
+    /// empty created session, in place, and moves the unsent draft to it.
+    private func replaceCreatedSession(with session: SessionSummary) {
+        guard let createdSession else { return }
+        let movedDraft = draftStore.moveDraft(from: draftKey(for: createdSession), to: draftKey(for: session))
+        draftMessage = movedDraft.text
+        draftQuotes = movedDraft.quotes
+        didReplaceCreatedSession = true
+        onSessionCreated(session)
+        self.createdSession = session
     }
 
     private func retryCreateSession() async {

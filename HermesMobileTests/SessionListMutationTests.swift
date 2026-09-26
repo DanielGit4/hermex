@@ -411,6 +411,50 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertNil(viewModel.lastError)
     }
 
+    /// Plain New Chat sends the list's active profile instead of leaving the
+    /// session to the client's active-profile cookie; "New Chat in <Profile>"
+    /// sends its own profile even when the list is on another one.
+    @MainActor
+    func testCreateSessionSendsTheListsActiveProfileUnlessOneIsGiven() async throws {
+        var sentProfiles: [String?] = []
+        let viewModel = try makeViewModel { request in
+            switch request.url?.path {
+            case "/api/profiles":
+                return apiTestJSONResponse("""
+                {
+                  "active": "work",
+                  "profiles": [
+                    {"name": "default", "is_default": true},
+                    {"name": "work", "is_active": true},
+                    {"name": "dev"}
+                  ]
+                }
+                """, for: request)
+            case "/api/workspaces":
+                return apiTestJSONResponse(#"{"workspaces": [{"path": "/tmp/workspace"}], "last": "/tmp/workspace"}"#, for: request)
+            case "/api/session/new":
+                let profile = try XCTUnwrap(apiTestJSONBody(from: request))["profile"] as? String
+                sentProfiles.append(profile)
+                return apiTestJSONResponse("""
+                {"session": {"session_id": "new-\(sentProfiles.count)", "title": "Untitled", "profile": "\(profile ?? "")"}}
+                """, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.loadActiveProfile()
+        XCTAssertEqual(viewModel.activeProfileName, "work")
+
+        let plain = await viewModel.createSession()
+        let pinned = await viewModel.createSession(profile: "dev")
+
+        XCTAssertEqual(sentProfiles, ["work", "dev"])
+        XCTAssertEqual(plain?.profile, "work")
+        XCTAssertEqual(pinned?.profile, "dev")
+        XCTAssertNil(viewModel.lastError)
+    }
+
     @MainActor
     func testCreateSessionKeepsWorktreeBackedUntitledSessionWithoutCounts() async throws {
         let context = try makeContext()
