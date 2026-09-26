@@ -383,6 +383,7 @@ struct MessageComposerView: View {
     }
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.composer)
         AdaptiveGlassContainer(spacing: 6) {
             VStack(spacing: 6) {
                 if voiceNoteRecorder.isRecording {

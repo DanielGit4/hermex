@@ -1190,3 +1190,24 @@ struct PinnedLocalNoticeStack: View {
         .accessibilityLabel(notices.joined(separator: "\n"))
     }
 }
+
+/// Counts body passes of the chat screen's heavy views so a hosted test can
+/// pin which of them a keystroke re-runs. Call it as the first line of a
+/// `body`: `let _ = ViewBodyProbe.hit(.transcript)`. Counts only while a test
+/// has set `counts`, and only in Debug builds; Release compiles it to nothing.
+enum ViewBodyProbe {
+    enum Site: String, CaseIterable {
+        case chatView, chatViewport, transcript, transcriptBlock, transcriptRow, messageBubble, composer
+    }
+
+    #if DEBUG
+    @MainActor static var counts: [Site: Int]?
+    #endif
+
+    @MainActor @inline(__always)
+    static func hit(_ site: Site) {
+        #if DEBUG
+        counts?[site, default: 0] += 1
+        #endif
+    }
+}

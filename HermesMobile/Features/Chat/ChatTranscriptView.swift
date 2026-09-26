@@ -93,6 +93,7 @@ struct ChatTranscriptView: View {
     var onOpenTurnFileDiff: (GitFile) -> Void = { _ in }
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.transcript)
         if isLoading && messages.isEmpty {
             ChatTranscriptLoadingSkeletonView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -615,6 +616,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
     }
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.transcriptBlock)
         // Yield nothing when every part is folded away, so the outer stack adds
         // no spacing for an empty row.
         if hasVisibleContent {
@@ -793,6 +795,7 @@ private struct ChatTranscriptMessageRow: View {
     let onCopy: (MessageActionContext) -> Void
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.transcriptRow)
         // Compaction marker messages render as collapsible cards (matching the
         // web UI), never as user bubbles — and without bubble actions, which
         // don't apply to system-emitted markers.

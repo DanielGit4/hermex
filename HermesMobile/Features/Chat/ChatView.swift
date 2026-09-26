@@ -384,7 +384,9 @@ struct ChatView: View {
         draftStore: ChatDraftStore? = nil,
         draftAttachmentStore: (any ChatDraftAttachmentStoring)? = nil,
         restoresDraftSettings: Bool = false,
-        onConversationStarted: @escaping () -> Void = {}
+        onConversationStarted: @escaping () -> Void = {},
+        // Tests only: serves the chat from a mocked client. Nil uses the server's.
+        client: APIClient? = nil
     ) {
         self.session = session
         self.server = server
@@ -402,6 +404,7 @@ struct ChatView: View {
         _viewModel = State(initialValue: ChatViewModel(
             session: session,
             server: server,
+            client: client,
             showsLiveActivityResponseExcerpts: UserDefaults.standard.bool(
                 forKey: AgentRunLiveActivityPrivacy.showsResponseExcerptsKey
             ),
@@ -409,7 +412,8 @@ struct ChatView: View {
         ))
         _gitAvailabilityViewModel = State(initialValue: GitWorkspaceAvailabilityViewModel(
             session: session,
-            server: server
+            server: server,
+            apiClient: client
         ))
     }
 
@@ -717,6 +721,7 @@ struct ChatView: View {
     /// below stays inside the compiler's type-checking budget.
     private var chatContent: some View {
         GeometryReader { viewport in
+            let _ = ViewBodyProbe.hit(.chatViewport)
             let clarificationMaximumHeight = max(
                 0,
                 viewport.size.height - composerHeight - 16
@@ -928,6 +933,7 @@ struct ChatView: View {
     }
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.chatView)
         chatContent
             .alert(
                 "Discard Later Messages?",
@@ -1792,7 +1798,11 @@ struct ChatView: View {
     }
 
     private func loadInitialGitAvailability() async {
-        let availabilityViewModel = GitWorkspaceAvailabilityViewModel(session: session, server: server)
+        let availabilityViewModel = GitWorkspaceAvailabilityViewModel(
+            session: session,
+            server: server,
+            apiClient: viewModel.client
+        )
         gitAvailabilityViewModel = availabilityViewModel
         await availabilityViewModel.loadIfNeeded()
     }
