@@ -3,6 +3,7 @@ import AVFoundation
 import ImageIO
 import Observation
 import SwiftData
+import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 @testable import HermesMobile
@@ -6531,78 +6532,267 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(requestCount, 0)
     }
 
+    // MARK: - A new chat keeps the profile it was created on
+
+    /// Replaces the #298 test that expected a restore to switch to the saved
+    /// profile. A switch only moves the client's active profile, never the
+    /// session's, so every session-scoped request then failed with 409.
     @MainActor
-    func testDraftSettingsRestoreStopsWhenSavedProfileSwitchFails() async throws {
-        let requestPaths = LockedStrings()
+    func testDraftSettingsRestoreIgnoresSnapshotForAnotherProfile() async throws {
+        for savedProfile in ["opensource", "retired"] {
+            let server = ProfileScopedServerFake(activeProfile: "default", sessionProfiles: ["session-abc": "default"])
+            let viewModel = try makeViewModel(
+                sessionSummary: makeSession(model: "claude-opus-5-5", modelProvider: "anthropic", profile: "default"),
+                handler: server.handle
+            )
+            await viewModel.loadComposerConfiguration()
+            let requestsBeforeRestore = server.requests.count
+
+            let outcome = await viewModel.restoreDraftSettings(
+                ChatDraftSettings(
+                    modelID: "ornith-1.5-35b-a3b",
+                    modelProviderID: "local-ornith",
+                    reasoningEffort: "high",
+                    profileName: savedProfile,
+                    workspacePath: "/tmp/saved"
+                ),
+                expectedInteractionGeneration: viewModel.composerConfigurationInteractionGeneration
+            )
+
+            XCTAssertEqual(outcome, .discardedForOtherProfile, savedProfile)
+            XCTAssertEqual(server.requests.count, requestsBeforeRestore, "No switch, update, or reasoning save for \(savedProfile)")
+            XCTAssertEqual(server.activeProfile, "default")
+            XCTAssertEqual(viewModel.selectedProfileName, "default")
+            XCTAssertEqual(viewModel.selectedModelID, "claude-opus-5-5")
+            XCTAssertEqual(viewModel.selectedModelProviderID, "anthropic")
+            XCTAssertEqual(viewModel.selectedWorkspacePath, "/tmp/workspace")
+            XCTAssertEqual(viewModel.selectedReasoningEffort, "medium")
+            XCTAssertEqual(server.violations, [])
+        }
+    }
+
+    @MainActor
+    func testDraftSettingsRestoreAppliesSnapshotForTheSameProfileOrNoProfile() async throws {
+        for savedProfile in ["default", nil] as [String?] {
+            let server = ProfileScopedServerFake(activeProfile: "default", sessionProfiles: ["session-abc": "default"])
+            let viewModel = try makeViewModel(
+                sessionSummary: makeSession(model: "claude-opus-5-5", modelProvider: "anthropic", profile: "default"),
+                handler: server.handle
+            )
+            await viewModel.loadComposerConfiguration()
+
+            let outcome = await viewModel.restoreDraftSettings(
+                ChatDraftSettings(
+                    modelID: "claude-sonnet-4",
+                    modelProviderID: "anthropic",
+                    reasoningEffort: "high",
+                    profileName: savedProfile,
+                    workspacePath: "/tmp/saved"
+                ),
+                expectedInteractionGeneration: viewModel.composerConfigurationInteractionGeneration
+            )
+
+            let label = savedProfile ?? "no profile"
+            XCTAssertEqual(outcome, .restored, label)
+            XCTAssertEqual(viewModel.selectedModelID, "claude-sonnet-4", label)
+            XCTAssertEqual(viewModel.selectedModelProviderID, "anthropic", label)
+            XCTAssertEqual(viewModel.selectedWorkspacePath, "/tmp/saved", label)
+            XCTAssertEqual(viewModel.selectedReasoningEffort, "high", label)
+            XCTAssertEqual(viewModel.selectedProfileName, "default", label)
+            XCTAssertFalse(server.paths.contains("/api/profile/switch"), label)
+            XCTAssertEqual(server.violations, [], label)
+        }
+    }
+
+    /// A composer profile pick in an empty chat creates the replacement on the
+    /// chosen profile. The replacement then opens the way `ChatView` opens it,
+    /// with its session-scoped requests running alongside its configuration
+    /// load, and none of them may pair its session with another profile.
+    @MainActor
+    func testEmptyChatProfilePickCreatesTheReplacementOnTheChosenProfile() async throws {
+        let server = ProfileScopedServerFake(activeProfile: "default", sessionProfiles: ["session-abc": "default"])
         let viewModel = try makeViewModel(
-            sessionSummary: makeSession(model: "gpt-5.4", modelProvider: "openai", profile: "work")
-        ) { request in
-            let path = request.url?.path ?? ""
-            requestPaths.append(path)
-            switch path {
-            case "/api/profiles":
-                return apiTestJSONResponse("""
-                {
-                  "active": "work",
-                  "profiles": [
-                    {"name": "work", "model": "gpt-5.4", "provider": "openai", "is_active": true},
-                    {"name": "saved", "model": "claude-sonnet-4", "provider": "anthropic"}
-                  ]
-                }
-                """, for: request)
-            case "/api/models":
-                return apiTestJSONResponse("""
-                {
-                  "groups": [
-                    {
-                      "name": "Anthropic",
-                      "provider_id": "anthropic",
-                      "models": [{"id": "claude-sonnet-4", "name": "Claude Sonnet 4"}]
-                    }
-                  ]
-                }
-                """, for: request)
-            case "/api/reasoning":
-                return apiTestJSONResponse(#"{"reasoning_effort":"medium","supported_efforts":["medium","high"]}"#, for: request)
-            case "/api/workspaces":
-                return apiTestJSONResponse(#"{"workspaces":[{"path":"/tmp/workspace"},{"path":"/tmp/saved"}]}"#, for: request)
-            case "/api/commands":
-                return apiTestJSONResponse(#"{"commands":[]}"#, for: request)
-            case "/api/profile/switch":
-                let response = HTTPURLResponse(
-                    url: try XCTUnwrap(request.url),
-                    statusCode: 500,
-                    httpVersion: nil,
-                    headerFields: ["Content-Type": "application/json"]
-                )!
-                return (response, Data(#"{"error":"profile unavailable"}"#.utf8))
-            case "/api/session/update":
-                XCTFail("Dependent model or workspace settings must not apply after profile failure.")
-                throw URLError(.badURL)
-            default:
-                XCTFail("Unexpected request path: \(path)")
-                throw URLError(.badURL)
+            sessionSummary: makeSession(model: "claude-opus-5-5", modelProvider: "anthropic", profile: "default"),
+            handler: server.handle
+        )
+        await viewModel.loadComposerConfiguration()
+        let opensource = try XCTUnwrap(viewModel.profileOptions.first { $0.normalizedName == "opensource" })
+
+        let createdSession = await viewModel.createEmptySession(onProfile: opensource)
+        let replacement = try XCTUnwrap(createdSession)
+        let replacementID = try XCTUnwrap(replacement.sessionId)
+
+        XCTAssertEqual(server.newSessionProfiles, ["opensource"])
+        XCTAssertEqual(replacement.profile, "opensource")
+        XCTAssertEqual(server.activeProfile, "opensource")
+        // The discarded chat keeps its state and does not reload its catalog.
+        XCTAssertEqual(viewModel.selectedProfileName, "default")
+        XCTAssertEqual(server.paths.filter { $0 == "/api/models" }.count, 1)
+        XCTAssertNil(viewModel.composerConfigurationErrorMessage)
+
+        let replacementViewModel = try makeViewModel(sessionSummary: replacement, handler: server.handle)
+        async let approvalState: Void = replacementViewModel.refreshApprovalBypassState()
+        async let gitInfo = replacementViewModel.client.gitInfo(sessionID: replacementID)
+        await replacementViewModel.loadComposerConfiguration()
+        await approvalState
+        _ = try await gitInfo
+
+        XCTAssertEqual(replacementViewModel.selectedProfileName, "opensource")
+        XCTAssertEqual(replacementViewModel.selectedModelID, "ornith-1.5-35b-a3b")
+        let replacementPaths = server.requests.filter { $0.sessionID == replacementID }.map(\.path)
+        XCTAssertTrue(replacementPaths.contains("/api/session/yolo"))
+        XCTAssertTrue(replacementPaths.contains("/api/approval/pending"))
+        XCTAssertTrue(replacementPaths.contains("/api/git-info"))
+        XCTAssertEqual(server.paths.filter { $0 == "/api/profile/switch" }.count, 1, "Only the pick itself moves the active profile")
+        XCTAssertEqual(server.violations, [])
+    }
+
+    @MainActor
+    func testEmptyChatProfilePickKeepsTheChatWhenCreationFails() async throws {
+        let server = ProfileScopedServerFake(
+            activeProfile: "default",
+            sessionProfiles: ["session-abc": "default"],
+            failsSessionCreation: true
+        )
+        let viewModel = try makeViewModel(
+            sessionSummary: makeSession(model: "claude-opus-5-5", modelProvider: "anthropic", profile: "default"),
+            handler: server.handle
+        )
+        await viewModel.loadComposerConfiguration()
+        let opensource = try XCTUnwrap(viewModel.profileOptions.first { $0.normalizedName == "opensource" })
+
+        let replacement = await viewModel.createEmptySession(onProfile: opensource)
+
+        XCTAssertNil(replacement)
+        XCTAssertNotNil(viewModel.lastError)
+        XCTAssertNotNil(viewModel.composerConfigurationErrorMessage)
+        XCTAssertFalse(viewModel.isUpdatingComposerConfiguration)
+        XCTAssertEqual(server.activeProfile, "default")
+        XCTAssertFalse(server.paths.contains("/api/profile/switch"))
+    }
+
+    /// Mirrors `PendingNewChatView` leaving an unsent chat on one profile and
+    /// the list then starting the next new chat on another.
+    @MainActor
+    func testUnsentNewChatDraftDoesNotCarryItsProfileIntoTheNextNewChat() async throws {
+        let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
+        let server = ProfileScopedServerFake(activeProfile: "default")
+        let list = SessionListViewModel(server: serverURL, client: try makeMockClient(handler: server.handle))
+        let drafts = ChatDraftStore(persistence: BotMemoryDrafts())
+        let newChatKey = ChatDraftKey.newChat(server: serverURL)
+        let abandonedKey = ChatDraftKey.session(server: serverURL, sessionID: "abandoned")
+        drafts.setDraft("Check the release notes", for: abandonedKey)
+        drafts.setSettings(
+            ChatDraftSettings(modelID: "gpt-5.4", modelProviderID: "openai", profileName: "hermex-dev", workspacePath: "/tmp/saved"),
+            for: abandonedKey
+        )
+        drafts.restoreAbandonedNewChatDraft(from: abandonedKey, to: newChatKey, didStartConversation: false)
+
+        await list.loadActiveProfile()
+        let createdSession = await list.createSession()
+        let session = try XCTUnwrap(createdSession)
+        let sessionKey = ChatDraftKey.session(server: serverURL, sessionID: try XCTUnwrap(session.sessionId))
+        let movedDraft = drafts.moveDraft(from: newChatKey, to: sessionKey)
+
+        XCTAssertEqual(server.newSessionProfiles, ["default"])
+        XCTAssertEqual(session.profile, "default")
+        XCTAssertEqual(movedDraft.text, "Check the release notes")
+
+        let viewModel = try makeViewModel(sessionSummary: session, handler: server.handle)
+        await viewModel.loadComposerConfiguration()
+        let outcome = await viewModel.restoreDraftSettings(
+            try XCTUnwrap(movedDraft.settings),
+            expectedInteractionGeneration: viewModel.composerConfigurationInteractionGeneration
+        )
+
+        XCTAssertEqual(outcome, .discardedForOtherProfile)
+        XCTAssertEqual(viewModel.selectedProfileName, "default")
+        XCTAssertEqual(viewModel.selectedModelID, "claude-opus-5-5")
+        XCTAssertEqual(server.activeProfile, "default")
+        XCTAssertFalse(server.paths.contains("/api/profile/switch"))
+        XCTAssertEqual(server.violations, [])
+    }
+
+    /// Hosts the replacement chat the way `PendingNewChatView` shows it after a
+    /// composer profile pick: the moved draft carries the old profile's
+    /// snapshot, and the real view runs git, approval, and YOLO requests
+    /// alongside its configuration load.
+    @MainActor
+    func testHostedReplacementChatStaysOnItsProfileAndReplacesTheStaleSnapshot() async throws {
+        let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
+        let server = ProfileScopedServerFake(activeProfile: "default", sessionProfiles: ["session-abc": "default"])
+        let viewModel = try makeViewModel(
+            sessionSummary: makeSession(model: "claude-opus-5-5", modelProvider: "anthropic", profile: "default"),
+            handler: server.handle
+        )
+        await viewModel.loadComposerConfiguration()
+        let opensource = try XCTUnwrap(viewModel.profileOptions.first { $0.normalizedName == "opensource" })
+        let createdSession = await viewModel.createEmptySession(onProfile: opensource)
+        let replacement = try XCTUnwrap(createdSession)
+        let replacementID = try XCTUnwrap(replacement.sessionId)
+
+        let drafts = ChatDraftStore(persistence: BotMemoryDrafts())
+        let oldKey = ChatDraftKey.session(server: serverURL, sessionID: "session-abc")
+        let newKey = ChatDraftKey.session(server: serverURL, sessionID: replacementID)
+        let quote = ComposerQuote(text: "README")
+        drafts.setContent(ComposerDraftContent(text: "Summarize the repo", quotes: [quote]), for: oldKey)
+        drafts.setSettings(
+            ChatDraftSettings(modelID: "claude-opus-5-5", modelProviderID: "anthropic", profileName: "default", workspacePath: "/tmp/saved"),
+            for: oldKey
+        )
+        let movedDraft = drafts.moveDraft(from: oldKey, to: newKey)
+        let oldDraft = await drafts.draft(for: oldKey)
+        XCTAssertNil(oldDraft)
+        XCTAssertEqual(movedDraft.quotes, [quote])
+        let requestsBeforeOpen = server.requests.count
+
+        let client = try makeMockClient(handler: server.handle)
+        let container = try ModelContainer(
+            for: CachedSession.self, CachedMessage.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true)
+        )
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        window.rootViewController = UIHostingController(rootView: NavigationStack {
+            ChatView(
+                session: replacement,
+                server: serverURL,
+                onAPIError: { _ in },
+                initialDraft: movedDraft.text,
+                initialQuotes: movedDraft.quotes,
+                loadsInitialMessages: false,
+                draftStore: drafts,
+                draftAttachmentStore: BotAttachmentCopies(),
+                restoresDraftSettings: true,
+                client: client
+            )
+        }
+        .modelContainer(container))
+        window.makeKeyAndVisible()
+        defer {
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+
+        var storedDraft: ChatDraft?
+        for _ in 0..<150 {
+            await renderFrames(4)
+            storedDraft = await drafts.draft(for: newKey)
+            let servedPaths = Set(server.requests.dropFirst(requestsBeforeOpen).map(\.path))
+            if storedDraft?.settings?.profileName == "opensource",
+               servedPaths.isSuperset(of: ["/api/commands", "/api/reasoning", "/api/git-info", "/api/approval/pending"]) {
+                break
             }
         }
 
-        await viewModel.loadComposerConfiguration()
-        let expectedGeneration = viewModel.composerConfigurationInteractionGeneration
-        await viewModel.restoreDraftSettings(
-            ChatDraftSettings(
-                modelID: "claude-sonnet-4",
-                modelProviderID: "anthropic",
-                reasoningEffort: "high",
-                profileName: "saved",
-                workspacePath: "/tmp/saved"
-            ),
-            expectedInteractionGeneration: expectedGeneration
-        )
-
-        XCTAssertEqual(viewModel.selectedProfileName, "work")
-        XCTAssertEqual(viewModel.selectedModelID, "gpt-5.4")
-        XCTAssertEqual(viewModel.selectedWorkspacePath, "/tmp/workspace")
-        XCTAssertEqual(requestPaths.values.last, "/api/profile/switch")
-        XCTAssertFalse(requestPaths.values.contains("/api/session/update"))
+        XCTAssertEqual(storedDraft?.settings?.profileName, "opensource", "The old profile's snapshot must not survive")
+        XCTAssertEqual(storedDraft?.settings?.modelID, "ornith-1.5-35b-a3b")
+        XCTAssertEqual(storedDraft?.text, "Summarize the repo")
+        XCTAssertEqual(storedDraft?.quotes, [quote])
+        XCTAssertFalse(server.requests.dropFirst(requestsBeforeOpen).contains { $0.path == "/api/profile/switch" })
+        XCTAssertEqual(server.activeProfile, "opensource")
+        XCTAssertEqual(server.violations, [])
     }
 
     @MainActor
@@ -9920,6 +10110,25 @@ final class ChatViewModelSendTests: XCTestCase {
         return viewModel
     }
 
+    private func makeMockClient(
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    ) throws -> APIClient {
+        MockURLProtocol.requestHandler = handler
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        return APIClient(baseURL: server, session: URLSession(configuration: configuration))
+    }
+
+    @MainActor
+    private func renderFrames(_ target: Int) async {
+        let rendered = expectation(description: "Frames rendered")
+        let driver = BotRenderFrameDriver(target: target) { rendered.fulfill() }
+        driver.start()
+        await fulfillment(of: [rendered], timeout: 10)
+        driver.stop()
+    }
+
     @MainActor
     private func waitUntil(_ condition: @MainActor () -> Bool) async throws {
         for _ in 0..<40 {
@@ -10056,6 +10265,163 @@ final class ChatViewModelSendTests: XCTestCase {
             file: file,
             line: line
         )
+    }
+}
+
+/// A scripted hermes-webui that enforces its profile rule: a session keeps the
+/// profile it was created on, only `/api/profile/switch` moves the client's
+/// active profile, and a session-scoped request for a session on another
+/// profile gets the server's 409, recorded as a violation. Handlers run off
+/// the test's thread, so the state needs its own lock.
+private final class ProfileScopedServerFake: @unchecked Sendable {
+    struct Request: Equatable {
+        let method: String
+        let path: String
+        let sessionID: String?
+    }
+
+    private static let profileDefaults: [String: (model: String, provider: String)] = [
+        "default": ("claude-opus-5-5", "anthropic"),
+        "opensource": ("ornith-1.5-35b-a3b", "local-ornith"),
+        "hermex-dev": ("gpt-5.4", "openai")
+    ]
+
+    private let lock = NSLock()
+    private let failsSessionCreation: Bool
+    private var active: String
+    private var sessionProfiles: [String: String]
+    private var recorded: [Request] = []
+    private var mismatches: [String] = []
+    private var requestedNewSessionProfiles: [String?] = []
+
+    init(activeProfile: String, sessionProfiles: [String: String] = [:], failsSessionCreation: Bool = false) {
+        active = activeProfile
+        self.sessionProfiles = sessionProfiles
+        self.failsSessionCreation = failsSessionCreation
+    }
+
+    var activeProfile: String { lock.withLock { active } }
+    var requests: [Request] { lock.withLock { recorded } }
+    var paths: [String] { requests.map(\.path) }
+    var violations: [String] { lock.withLock { mismatches } }
+    /// The `profile` each `/api/session/new` body carried, nil when absent.
+    var newSessionProfiles: [String?] { lock.withLock { requestedNewSessionProfiles } }
+
+    func handle(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        let url = try XCTUnwrap(request.url)
+        let method = request.httpMethod ?? "GET"
+        let body = apiTestBodyData(from: request)
+            .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
+        let sessionID = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?.first { $0.name == "session_id" }?.value
+            ?? body["session_id"] as? String
+
+        return try lock.withLock {
+            recorded.append(Request(method: method, path: url.path, sessionID: sessionID))
+            let isExempt = url.path == "/api/session" || url.path == "/api/chat/start"
+            if let sessionID, let owner = sessionProfiles[sessionID], owner != active, !isExempt {
+                mismatches.append("\(method) \(url.path) \(sessionID) owner=\(owner) active=\(active)")
+                return try respond([
+                    "error": "Session belongs to a different profile",
+                    "code": "session_profile_mismatch",
+                    "session_id": sessionID,
+                    "profile": owner
+                ], to: request, status: 409)
+            }
+
+            switch (method, url.path) {
+            case ("GET", "/api/profiles"):
+                return try respond(["active": active, "profiles": profilesJSON()], to: request)
+            case ("POST", "/api/profile/switch"):
+                let name = try XCTUnwrap(body["name"] as? String)
+                active = name
+                return try respond([
+                    "active": name,
+                    "profiles": profilesJSON(),
+                    "default_model": Self.profileDefaults[name]?.model ?? NSNull(),
+                    "default_workspace": "/tmp/workspace"
+                ], to: request)
+            case ("POST", "/api/session/new"):
+                let requestedProfile = body["profile"] as? String
+                requestedNewSessionProfiles.append(requestedProfile)
+                guard !failsSessionCreation else {
+                    return try respond(["error": "boom"], to: request, status: 500)
+                }
+                let profile = requestedProfile ?? active
+                let newSessionID = "new-\(requestedNewSessionProfiles.count)"
+                sessionProfiles[newSessionID] = profile
+                return try respond(["session": [
+                    "session_id": newSessionID,
+                    "title": "Untitled",
+                    "workspace": body["workspace"] as? String ?? "/tmp/workspace",
+                    "model": body["model"] as? String ?? Self.profileDefaults[profile]?.model ?? NSNull(),
+                    "model_provider": body["model_provider"] as? String ?? Self.profileDefaults[profile]?.provider ?? NSNull(),
+                    "profile": profile,
+                    "message_count": 0
+                ] as [String: Any]], to: request)
+            case ("POST", "/api/session/update"):
+                return try respond(["session": [
+                    "session_id": sessionID ?? NSNull(),
+                    "workspace": body["workspace"] ?? NSNull(),
+                    "model": body["model"] ?? NSNull(),
+                    "model_provider": body["model_provider"] ?? NSNull(),
+                    "profile": sessionID.flatMap { sessionProfiles[$0] } ?? NSNull()
+                ] as [String: Any]], to: request)
+            case ("GET", "/api/models"):
+                return try respond([
+                    "default_model": Self.profileDefaults[active]?.model ?? NSNull(),
+                    "groups": [
+                        ["name": "Anthropic", "provider_id": "anthropic", "models": [
+                            ["id": "claude-opus-5-5", "name": "Claude Opus 5.5"],
+                            ["id": "claude-sonnet-4", "name": "Claude Sonnet 4"]
+                        ]],
+                        ["name": "Ornith", "provider_id": "local-ornith", "models": [
+                            ["id": "ornith-1.5-35b-a3b", "name": "Ornith 1.5"]
+                        ]],
+                        ["name": "OpenAI", "provider_id": "openai", "models": [
+                            ["id": "gpt-5.4", "name": "GPT 5.4"]
+                        ]]
+                    ]
+                ] as [String: Any], to: request)
+            case ("GET", "/api/reasoning"):
+                return try respond(["reasoning_effort": "medium", "supported_efforts": ["low", "medium", "high"]], to: request)
+            case ("POST", "/api/reasoning"):
+                return try respond(["reasoning_effort": body["effort"] ?? NSNull()], to: request)
+            case ("GET", "/api/workspaces"):
+                return try respond([
+                    "workspaces": [["path": "/tmp/workspace"], ["path": "/tmp/saved"]],
+                    "last": "/tmp/workspace"
+                ] as [String: Any], to: request)
+            case ("GET", "/api/commands"):
+                return try respond(["commands": [Any]()], to: request)
+            case ("GET", "/api/session/yolo"):
+                return try respond(["yolo_enabled": false], to: request)
+            default:
+                // Approval pending, git info, and the rest: an empty answer.
+                return try respond([String: Any](), to: request)
+            }
+        }
+    }
+
+    private func profilesJSON() -> [[String: Any]] {
+        Self.profileDefaults.keys.sorted().map { name in
+            [
+                "name": name,
+                "model": Self.profileDefaults[name]?.model ?? "",
+                "provider": Self.profileDefaults[name]?.provider ?? "",
+                "is_active": name == active
+            ]
+        }
+    }
+
+    private func respond(_ object: [String: Any], to request: URLRequest, status: Int = 200) throws -> (HTTPURLResponse, Data) {
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: try XCTUnwrap(request.url),
+            statusCode: status,
+            httpVersion: nil,
+            headerFields: ["Content-Type": "application/json"]
+        ))
+        return (response, try JSONSerialization.data(withJSONObject: object))
     }
 }
 

@@ -177,6 +177,16 @@ struct ProfileSwitchOutcome: Equatable {
     let session: SessionSummary?
 }
 
+/// What `restoreDraftSettings` did with a new-chat settings snapshot.
+enum DraftSettingsRestoreOutcome: Equatable {
+    case restored
+    /// A newer composer interaction or a started conversation fenced it off.
+    case skipped
+    /// The snapshot names a different profile than the chat's; the caller
+    /// replaces it so it can't come back.
+    case discardedForOtherProfile
+}
+
 struct ChatPollingIntervals: Equatable {
     let approvalNanoseconds: UInt64
     let clarificationNanoseconds: UInt64
@@ -1250,6 +1260,58 @@ final class ChatViewModel {
         }
     }
 
+    /// Creates the empty session that replaces this empty chat when the user
+    /// picks another profile. A session keeps the profile it was created on,
+    /// so the new one is created directly on `profile`. The client's active
+    /// profile then moves to it before the replacement chat opens, because
+    /// that chat's session-scoped requests start alongside its configuration
+    /// load and would otherwise be rejected. This chat's configuration is not
+    /// reloaded: the replacement loads the profile's catalog itself.
+    func createEmptySession(onProfile profile: ProfileSummary) async -> SessionSummary? {
+        guard !isViewingCachedData else {
+            composerConfigurationErrorMessage = String(localized: "Reconnect to the server to change profiles.")
+            return nil
+        }
+
+        guard activeStreamID == nil else {
+            composerConfigurationErrorMessage = String(localized: "Wait for the current response to finish before changing profiles.")
+            return nil
+        }
+
+        guard !isUpdatingComposerConfiguration else { return nil }
+
+        guard let profileName = profile.normalizedName else {
+            composerConfigurationErrorMessage = String(localized: "The server did not provide a profile name.")
+            return nil
+        }
+
+        isUpdatingComposerConfiguration = true
+        composerConfigurationErrorMessage = nil
+        lastError = nil
+        defer { isUpdatingComposerConfiguration = false }
+
+        do {
+            let response = try await client.createSession(
+                workspace: nil,
+                model: nil,
+                modelProvider: nil,
+                profile: profileName
+            )
+
+            guard let session = response.session else {
+                composerConfigurationErrorMessage = String(localized: "The server did not return the new profile session.")
+                return nil
+            }
+
+            _ = try await client.switchProfile(name: Self.nonEmpty(session.profile) ?? profileName)
+            return SessionSummary(from: session)
+        } catch {
+            lastError = error
+            composerConfigurationErrorMessage = error.localizedDescription
+            return nil
+        }
+    }
+
     @discardableResult
     func selectReasoningEffort(
         _ effort: String,
@@ -1301,50 +1363,41 @@ final class ChatViewModel {
     }
 
     /// Restores one new-chat settings snapshot only while the configuration
-    /// remains untouched. Profile owns the defaults for the remaining fields,
-    /// so a missing or rejected profile stops the whole replay rather than
-    /// projecting its model/workspace/reasoning choices onto another profile.
+    /// remains untouched. A new chat keeps the profile it was created on, and
+    /// that profile owns the defaults for the remaining fields: a snapshot
+    /// saved under another profile (or one the server no longer lists) is
+    /// discarded whole, never switching the profile or projecting its
+    /// model/workspace/reasoning choices onto this one.
+    @discardableResult
     func restoreDraftSettings(
         _ rawSettings: ChatDraftSettings,
         expectedInteractionGeneration: Int
-    ) async {
-        guard canContinueDraftSettingsRestore(expectedInteractionGeneration) else { return }
-        guard messages.isEmpty, activeStreamID == nil else { return }
+    ) async -> DraftSettingsRestoreOutcome {
+        guard canContinueDraftSettingsRestore(expectedInteractionGeneration) else { return .skipped }
+        guard messages.isEmpty, activeStreamID == nil else { return .skipped }
         let settings = rawSettings.normalized()
 
         if let profileName = settings.profileName {
-            guard let option = profileOptions.first(where: { $0.normalizedName == profileName }) else {
-                return
-            }
-            if !isSelectedProfile(option) {
-                let outcome = await switchProfile(
-                    option,
-                    startNewSession: false,
-                    recordsInteraction: false
-                )
-                guard outcome != nil,
-                      canContinueDraftSettingsRestore(expectedInteractionGeneration),
-                      isSelectedProfile(option) else {
-                    return
-                }
+            guard let option = profileOptions.first(where: { $0.normalizedName == profileName }),
+                  isSelectedProfile(option) else {
+                return .discardedForOtherProfile
             }
         }
 
-        guard canContinueDraftSettingsRestore(expectedInteractionGeneration) else { return }
         if let modelID = settings.modelID,
            let option = modelCatalogGroups
                .flatMap(\.allModels)
                .firstMatchingSelection(modelID: modelID, providerID: settings.modelProviderID),
            !option.matchesSelection(modelID: currentModel, providerID: currentModelProvider) {
             _ = await selectComposerModel(option, recordsInteraction: false)
-            guard canContinueDraftSettingsRestore(expectedInteractionGeneration) else { return }
+            guard canContinueDraftSettingsRestore(expectedInteractionGeneration) else { return .restored }
         }
 
         if let workspace = settings.workspacePath,
            workspace != currentWorkspace,
            workspaceRoots.contains(where: { $0.path == workspace }) {
             _ = await selectWorkspacePath(workspace, recordsInteraction: false)
-            guard canContinueDraftSettingsRestore(expectedInteractionGeneration) else { return }
+            guard canContinueDraftSettingsRestore(expectedInteractionGeneration) else { return .restored }
         }
 
         if let effort = settings.reasoningEffort,
@@ -1355,6 +1408,7 @@ final class ChatViewModel {
                 _ = await selectReasoningEffort(effort, recordsInteraction: false)
             }
         }
+        return .restored
     }
 
     func markComposerConfigurationInteraction() {

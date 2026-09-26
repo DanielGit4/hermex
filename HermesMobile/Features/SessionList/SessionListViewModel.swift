@@ -1299,9 +1299,11 @@ final class SessionListViewModel {
         }
     }
 
-    /// Creates a new session. `profile` pins it to a specific server profile (the "New Chat
-    /// in <Profile>" App Intent, #339); nil keeps the legacy behavior of letting the server
-    /// use its active profile (the "+" button / plain New Chat).
+    /// Creates a new session on `profile` (the "New Chat in <Profile>" App Intent, #339),
+    /// or on the list's active profile for the "+" button / plain New Chat. The profile is
+    /// sent explicitly so the session never depends on the client's active-profile cookie,
+    /// which an opened chat may have moved; only a list that never loaded its profile
+    /// leaves the choice to the server.
     func createSession(modelContext: ModelContext? = nil, profile: String? = nil) async -> SessionSummary? {
         isCreatingSession = true
         actionErrorMessage = nil
@@ -1315,7 +1317,7 @@ final class SessionListViewModel {
                 workspace: workspace,
                 model: nil,
                 modelProvider: nil,
-                profile: Self.nonEmpty(profile)
+                profile: Self.nonEmpty(profile) ?? activeProfileName
             )
 
             guard let sessionDetail = response.session else {

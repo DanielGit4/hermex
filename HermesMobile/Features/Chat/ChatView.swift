@@ -289,6 +289,9 @@ struct ChatView: View {
     /// load their configuration from the server and never re-apply a snapshot.
     let restoresDraftSettings: Bool
     let onConversationStarted: () -> Void
+    /// Receives the session that replaces this empty chat after a profile pick;
+    /// the owner moves the draft to it and shows it in place. Nil pushes it.
+    let onReplaceEmptySession: ((SessionSummary) -> Void)?
 
     /// The composer's draft and its edit count. Never read `draftMessage` in
     /// `body` or build a binding to it there (a binding reads its value when it
@@ -374,6 +377,9 @@ struct ChatView: View {
     @State private var lastSyncedDraftAttachments: [ChatDraftAttachment] = []
     @State private var restoredDraftSettings: ChatDraftSettings?
     @State private var didApplyRestoredDraftSettings = false
+    /// Set once this chat handed its draft to a replacement session, so a
+    /// late attachment or settings sync can't write it back under this key.
+    @State private var didHandOffDraft = false
     @State private var didCompleteInitialAppearance = false
     @State private var isInitialComposerFocusContentReady = false
     @State private var didApplyInitialComposerFocusPolicy = false
@@ -398,6 +404,7 @@ struct ChatView: View {
         draftAttachmentStore: (any ChatDraftAttachmentStoring)? = nil,
         restoresDraftSettings: Bool = false,
         onConversationStarted: @escaping () -> Void = {},
+        onReplaceEmptySession: ((SessionSummary) -> Void)? = nil,
         // Tests only: serves the chat from a mocked client. Nil uses the server's.
         client: APIClient? = nil
     ) {
@@ -411,6 +418,7 @@ struct ChatView: View {
         self.draftAttachmentStore = resolvedDraftAttachmentStore
         self.restoresDraftSettings = restoresDraftSettings
         self.onConversationStarted = onConversationStarted
+        self.onReplaceEmptySession = onReplaceEmptySession
         _composerDraft = State(initialValue: ChatComposerDraft(text: initialDraft))
         _draftQuotes = State(initialValue: initialQuotes)
         _initialAttachments = State(initialValue: initialAttachments)
@@ -883,7 +891,7 @@ struct ChatView: View {
                 }
             }
             .navigationDestination(item: $forkedSession) { session in
-                ChatView(session: session, server: server, onAPIError: onAPIError)
+                ChatView(session: session, server: server, onAPIError: onAPIError, draftStore: draftStore)
             }
             .sheet(item: $attachmentPreviewItem) { item in
                 ChatAttachmentPreviewView(
@@ -2130,6 +2138,10 @@ struct ChatView: View {
     }
 
     private var draftKey: ChatDraftKey {
+        draftKey(for: session)
+    }
+
+    private func draftKey(for session: SessionSummary) -> ChatDraftKey {
         let normalizedSessionID = session.sessionId?.trimmingCharacters(in: .whitespacesAndNewlines)
         let sessionID = normalizedSessionID.flatMap { $0.isEmpty ? nil : $0 } ?? session.id
         return .session(
@@ -2291,7 +2303,7 @@ struct ChatView: View {
     /// hydration/restore so an empty or partial composer never overwrites the
     /// persisted set.
     private func syncDraftAttachments() {
-        guard didHydrateDraft, !isRestoringDraftAttachments else { return }
+        guard didHydrateDraft, !isRestoringDraftAttachments, !didHandOffDraft else { return }
         // Only records backed by a durable copy are persisted. Without one the
         // record could never be restored, and keeping it would hold the draft
         // alive just to report the attachment as lost on the next open.
@@ -2311,9 +2323,9 @@ struct ChatView: View {
     /// configuration is owned by the server and is never re-applied from a
     /// draft, so persisting it would just store choices at rest that nothing
     /// reads. Snapshotting here is what lets an abandoned new chat carry its
-    /// model/workspace/profile/reasoning picks to the next new chat.
+    /// model/workspace/reasoning picks to the next new chat on the same profile.
     private func syncDraftSettings(_ settings: ChatDraftSettings) {
-        guard didHydrateDraft, restoresDraftSettings else { return }
+        guard didHydrateDraft, restoresDraftSettings, !didHandOffDraft else { return }
         draftStore.setSettings(settings, for: draftKey)
     }
 
@@ -2330,17 +2342,22 @@ struct ChatView: View {
     }
 
     /// New-chat only. The view owns the one-shot restore trigger while the
-    /// model owns validation, interaction fencing, and profile ordering.
+    /// model owns validation, interaction fencing, and the profile rule. A
+    /// snapshot for another profile is overwritten with this chat's settings
+    /// so it can't come back with the next new chat.
     private func applyRestoredDraftSettingsIfNeeded(
         expectedInteractionGeneration: Int
     ) async {
         guard restoresDraftSettings, !didApplyRestoredDraftSettings else { return }
         didApplyRestoredDraftSettings = true
         guard let settings = restoredDraftSettings, !Task.isCancelled else { return }
-        await viewModel.restoreDraftSettings(
+        let outcome = await viewModel.restoreDraftSettings(
             settings,
             expectedInteractionGeneration: expectedInteractionGeneration
         )
+        guard outcome == .discardedForOtherProfile, !didHandOffDraft else { return }
+        restoredDraftSettings = nil
+        draftStore.setSettings(currentComposerSettings, for: draftKey)
     }
 
     private func reconcileConsumedDraft(
@@ -2399,10 +2416,36 @@ struct ChatView: View {
         }
 
         if viewModel.messages.isEmpty {
-            Task { await switchProfile(profile, startNewSession: false) }
+            Task { await replaceEmptySession(onProfile: profile) }
         } else {
             pendingProfileSelection = profile
             showProfileNewSessionConfirmation = true
+        }
+    }
+
+    /// A profile pick in an empty chat has nothing to lose, so it replaces the
+    /// chat, without asking, with a new session created on that profile; the
+    /// unsent draft moves along. The abandoned session is empty, so the server
+    /// never lists or keeps it.
+    private func replaceEmptySession(onProfile profile: ProfileSummary) async {
+        let session = await viewModel.createEmptySession(onProfile: profile)
+
+        if let lastError = viewModel.lastError {
+            onAPIError(lastError)
+        }
+
+        guard let session else { return }
+        ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled)
+
+        if let onReplaceEmptySession {
+            didHandOffDraft = true
+            onReplaceEmptySession(session)
+        } else {
+            draftStore.moveDraft(from: draftKey, to: draftKey(for: session))
+            draftMessage = ""
+            draftQuotes = []
+            viewModel.clearPendingAttachments()
+            forkedSession = session
         }
     }
 
