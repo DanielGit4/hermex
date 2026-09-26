@@ -42,8 +42,11 @@ struct ChatTranscriptView: View {
     let transcriptRelayoutScrollToken: Int
     let bottomAnchorID: String
     let transcriptSpacing: CGFloat
-    let transcriptBottomInsetHeight: CGFloat
-    let scrollToBottomButtonBottomPadding: CGFloat
+    /// Read only by the bottom inset and the scroll-to-bottom button, so a
+    /// composer that grows a line re-runs those two and not the transcript.
+    let composerHeight: ChatComposerHeight
+    /// What stacks on top of the composer: accessory rows, a clarification bar.
+    let composerChromeHeight: CGFloat
     let localAttachmentPreviews: [String: [String: Data]]
     let listeningMessageID: String?
     let isViewingCachedData: Bool
@@ -93,6 +96,7 @@ struct ChatTranscriptView: View {
     var onOpenTurnFileDiff: (GitFile) -> Void = { _ in }
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.transcript)
         if isLoading && messages.isEmpty {
             ChatTranscriptLoadingSkeletonView()
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -156,9 +160,11 @@ struct ChatTranscriptView: View {
                     }
                     .scrollDismissesKeyboard(.interactively)
                     .safeAreaInset(edge: .bottom, spacing: 0) {
-                        Color.clear
-                            .frame(height: transcriptBottomInsetHeight)
-                            .accessibilityHidden(true)
+                        ComposerHeightReader(height: composerHeight) { composerHeight in
+                            Color.clear
+                                .frame(height: max(96, composerHeight + 44 + composerChromeHeight))
+                                .accessibilityHidden(true)
+                        }
                     }
                     .adaptiveSoftScrollEdges()
                     .simultaneousGesture(
@@ -168,12 +174,14 @@ struct ChatTranscriptView: View {
                     )
 
                     if showsScrollToBottomButton {
-                        ChatScrollToBottomButton(
-                            bottomPadding: scrollToBottomButtonBottomPadding,
-                            onTap: {
-                                releasingHold { onScrollToBottom(proxy) }
-                            }
-                        )
+                        ComposerHeightReader(height: composerHeight) { composerHeight in
+                            ChatScrollToBottomButton(
+                                bottomPadding: composerHeight + 12 + composerChromeHeight,
+                                onTap: {
+                                    releasingHold { onScrollToBottom(proxy) }
+                                }
+                            )
+                        }
                         .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
                     }
                 }
@@ -615,6 +623,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
     }
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.transcriptBlock)
         // Yield nothing when every part is folded away, so the outer stack adds
         // no spacing for an empty row.
         if hasVisibleContent {
@@ -793,6 +802,7 @@ private struct ChatTranscriptMessageRow: View {
     let onCopy: (MessageActionContext) -> Void
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.transcriptRow)
         // Compaction marker messages render as collapsible cards (matching the
         // web UI), never as user bubbles — and without bubble actions, which
         // don't apply to system-emitted markers.

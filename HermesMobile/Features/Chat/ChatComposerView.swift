@@ -96,10 +96,10 @@ struct MessageComposerView: View {
     private let circleSize = ChatComposerMetrics.actionSize
     private let pillInset = ChatComposerMetrics.pillInset
 
-    /// The draft. Pass the owner's plain `$state`, not a get/set binding:
-    /// SwiftUI re-runs the owner of a get/set binding on every keystroke. The
-    /// owner hears about edits through `onDraftEdit` instead.
-    @Binding var draftMessage: String
+    /// The owner's draft. The composer is the only view that reads its text,
+    /// so a keystroke re-runs the composer and nothing above it. The owner
+    /// hears about edits through `onDraftEdit`.
+    let draft: ChatComposerDraft
     @Binding var quotes: [ComposerQuote]
     @Binding var isFocused: Bool
     let isSending: Bool
@@ -223,6 +223,11 @@ struct MessageComposerView: View {
     @State private var didAutoStartVoiceInput = false
     @AppStorage(ComposerSTTProviderPreference.storageKey) private var sttProviderPreferenceRawValue = ComposerSTTProviderPreference.defaultValue.rawValue
     @AppStorage(SectionVisibilitySettings.chatGitKey) private var showsGitControls = true
+
+    private var draftMessage: String {
+        get { draft.text }
+        nonmutating set { draft.text = newValue }
+    }
 
     private var isReadOnly: Bool {
         readOnlyMessage != nil
@@ -383,6 +388,7 @@ struct MessageComposerView: View {
     }
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.composer)
         AdaptiveGlassContainer(spacing: 6) {
             VStack(spacing: 6) {
                 if voiceNoteRecorder.isRecording {

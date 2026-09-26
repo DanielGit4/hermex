@@ -290,13 +290,23 @@ struct ChatView: View {
     let restoresDraftSettings: Bool
     let onConversationStarted: () -> Void
 
-    /// The composer's draft. Never read it in `body` or wrap it in a get/set
-    /// binding for the composer: either re-runs this whole screen on every
-    /// keystroke. The composer gets `$draftMessage` and reports its edits to
-    /// `persistDraftEdit`.
-    @State private var draftMessage = ""
+    /// The composer's draft and its edit count. Never read `draftMessage` in
+    /// `body` or build a binding to it there (a binding reads its value when it
+    /// is made): either re-runs this whole screen on every keystroke. The
+    /// composer gets `composerDraft` and reports its edits to `persistDraftEdit`.
+    @State private var composerDraft: ChatComposerDraft
     @State private var draftQuotes: [ComposerQuote] = []
-    @State private var draftRevision = 0
+
+    private var draftMessage: String {
+        get { composerDraft.text }
+        nonmutating set { composerDraft.text = newValue }
+    }
+
+    private var draftRevision: Int {
+        get { composerDraft.revision }
+        nonmutating set { composerDraft.revision = newValue }
+    }
+
     @State private var isScrolledNearBottom = true
     @State private var followLatch = ChatScrollPolicy.FollowLatch()
     @State private var followScrollGeneration = 0
@@ -337,7 +347,10 @@ struct ChatView: View {
     @State private var gitAvailabilityViewModel: GitWorkspaceAvailabilityViewModel
     @State private var gitToastState = GitActionToastState()
     @State private var gitAlert: GitChatAlert?
-    @State private var composerHeight: CGFloat = 52
+    /// Never read `composerHeight.value` in `body`: hand it to the views that
+    /// need it (`ComposerHeightReader`), so a composer that grows a line
+    /// re-runs those and not this screen and its transcript.
+    @State private var composerHeight = ChatComposerHeight()
     /// Measured height of the collapsed clarification bar, the request's only
     /// layout footprint; the expanded card overlays the transcript instead.
     @State private var clarificationBarHeight: CGFloat = 0
@@ -384,7 +397,9 @@ struct ChatView: View {
         draftStore: ChatDraftStore? = nil,
         draftAttachmentStore: (any ChatDraftAttachmentStoring)? = nil,
         restoresDraftSettings: Bool = false,
-        onConversationStarted: @escaping () -> Void = {}
+        onConversationStarted: @escaping () -> Void = {},
+        // Tests only: serves the chat from a mocked client. Nil uses the server's.
+        client: APIClient? = nil
     ) {
         self.session = session
         self.server = server
@@ -396,12 +411,13 @@ struct ChatView: View {
         self.draftAttachmentStore = resolvedDraftAttachmentStore
         self.restoresDraftSettings = restoresDraftSettings
         self.onConversationStarted = onConversationStarted
-        _draftMessage = State(initialValue: initialDraft)
+        _composerDraft = State(initialValue: ChatComposerDraft(text: initialDraft))
         _draftQuotes = State(initialValue: initialQuotes)
         _initialAttachments = State(initialValue: initialAttachments)
         _viewModel = State(initialValue: ChatViewModel(
             session: session,
             server: server,
+            client: client,
             showsLiveActivityResponseExcerpts: UserDefaults.standard.bool(
                 forKey: AgentRunLiveActivityPrivacy.showsResponseExcerptsKey
             ),
@@ -409,7 +425,8 @@ struct ChatView: View {
         ))
         _gitAvailabilityViewModel = State(initialValue: GitWorkspaceAvailabilityViewModel(
             session: session,
-            server: server
+            server: server,
+            apiClient: client
         ))
     }
 
@@ -418,7 +435,7 @@ struct ChatView: View {
     // "unable to type-check in reasonable time" limit).
     private var messageComposer: some View {
         MessageComposerView(
-            draftMessage: $draftMessage,
+            draft: composerDraft,
             quotes: persistedQuotesBinding,
             isFocused: $composerIsFocused,
             isSending: viewModel.isStartingChat || viewModel.isSendingVoiceNote,
@@ -515,7 +532,7 @@ struct ChatView: View {
                 handleProfileSelection(profile)
             },
             onHeightChange: { height in
-                composerHeight = height
+                composerHeight.value = height
             },
             onPhotoMediaSelected: { media in
                 Task { await handlePhotoSelection(media) }
@@ -717,10 +734,7 @@ struct ChatView: View {
     /// below stays inside the compiler's type-checking budget.
     private var chatContent: some View {
         GeometryReader { viewport in
-            let clarificationMaximumHeight = max(
-                0,
-                viewport.size.height - composerHeight - 16
-            )
+            let _ = ViewBodyProbe.hit(.chatViewport)
 
             ZStack(alignment: .bottom) {
                 VStack(spacing: 0) {
@@ -737,14 +751,22 @@ struct ChatView: View {
                 }
                 .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: viewModel.showsListenPlaybackBar)
 
-                BottomComposerMaterialFade(composerHeight: composerHeight)
+                ComposerHeightReader(height: composerHeight) { composerHeight in
+                    BottomComposerMaterialFade(composerHeight: composerHeight)
+                }
 
                 composerAccessoryStack
 
-                clarificationInset(maximumExpandedHeight: clarificationMaximumHeight)
-
+                clarificationInset(viewportHeight: viewport.size.height)
+            }
+            // The composer re-measures itself on every keystroke. As an overlay
+            // its layout never feeds back into the stack below; as a sibling in
+            // the ZStack it did, and each keystroke made the transcript re-check
+            // the geometry of every row.
+            .overlay(alignment: .bottom) {
                 messageComposer
-
+            }
+            .overlay {
                 approvalOverlay
             }
         }
@@ -928,6 +950,7 @@ struct ChatView: View {
     }
 
     var body: some View {
+        let _ = ViewBodyProbe.hit(.chatView)
         chatContent
             .alert(
                 "Discard Later Messages?",
@@ -1296,37 +1319,39 @@ struct ChatView: View {
         }
     }
 
-    /// The pending clarification, pinned above the composer. Sits in the same
-    /// bottom stack as the composer so it rides the keyboard with it.
-    private func clarificationInset(maximumExpandedHeight: CGFloat) -> some View {
+    /// The pending clarification, pinned above the composer. Sits in the stack
+    /// the composer overlays, so it rides the keyboard with it.
+    private func clarificationInset(viewportHeight: CGFloat) -> some View {
         ZStack(alignment: .bottom) {
             if let clarificationPrompt = viewModel.clarificationPrompt {
-                ClarificationRequestInset(
-                    prompt: clarificationPrompt,
-                    maximumExpandedHeight: maximumExpandedHeight,
-                    isResponding: viewModel.isRespondingToClarification,
-                    isStopping: viewModel.isCancellingStream,
-                    errorMessage: viewModel.clarificationErrorMessage,
-                    isHapticsEnabled: isHapticsEnabled,
-                    onSubmit: { response in
-                        Task {
-                            let didRespond = await viewModel.respondToClarification(response)
-                            if didRespond {
-                                ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled)
+                ComposerHeightReader(height: composerHeight) { composerHeight in
+                    ClarificationRequestInset(
+                        prompt: clarificationPrompt,
+                        maximumExpandedHeight: max(0, viewportHeight - composerHeight - 16),
+                        isResponding: viewModel.isRespondingToClarification,
+                        isStopping: viewModel.isCancellingStream,
+                        errorMessage: viewModel.clarificationErrorMessage,
+                        isHapticsEnabled: isHapticsEnabled,
+                        onSubmit: { response in
+                            Task {
+                                let didRespond = await viewModel.respondToClarification(response)
+                                if didRespond {
+                                    ChatHaptics.clarificationSubmitted(isEnabled: isHapticsEnabled)
+                                }
                             }
+                        },
+                        onStop: {
+                            Task { await cancelStream() }
+                        },
+                        onDismissKeyboard: dismissKeyboard,
+                        onFootprintChange: { height in
+                            clarificationBarHeight = height
                         }
-                    },
-                    onStop: {
-                        Task { await cancelStream() }
-                    },
-                    onDismissKeyboard: dismissKeyboard,
-                    onFootprintChange: { height in
-                        clarificationBarHeight = height
-                    }
-                )
+                    )
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, composerHeight + 8)
+                }
                 .id(clarificationPrompt.id)
-                .padding(.horizontal, 16)
-                .padding(.bottom, composerHeight + 8)
                 .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
             }
         }
@@ -1337,24 +1362,26 @@ struct ChatView: View {
     @ViewBuilder
     private var composerAccessoryStack: some View {
         if composerAccessoryVisibleItemCount > 0 {
-            VStack(spacing: composerAccessoryVerticalSpacing) {
-                if !composerLocalNotices.isEmpty {
-                    PinnedLocalNoticeStack(notices: composerLocalNotices)
-                        .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
-                }
+            ComposerHeightReader(height: composerHeight) { composerHeight in
+                VStack(spacing: composerAccessoryVerticalSpacing) {
+                    if !composerLocalNotices.isEmpty {
+                        PinnedLocalNoticeStack(notices: composerLocalNotices)
+                            .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+                    }
 
-                if let activeRunStatusPresentation {
-                    ChatActiveRunStatusView(presentation: activeRunStatusPresentation)
-                        .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
-                }
+                    if let activeRunStatusPresentation {
+                        ChatActiveRunStatusView(presentation: activeRunStatusPresentation)
+                            .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+                    }
 
-                if showsApprovalBypassStatus {
-                    ApprovalBypassStatusPill()
-                        .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+                    if showsApprovalBypassStatus {
+                        ApprovalBypassStatusPill()
+                            .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+                    }
                 }
+                .padding(.horizontal)
+                .padding(.bottom, composerHeight + 8 + clarificationFootprintHeight)
             }
-            .padding(.horizontal)
-            .padding(.bottom, composerHeight + 8 + clarificationFootprintHeight)
             .allowsHitTesting(false)
             .zIndex(8)
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: composerAccessoryVisibleItemCount)
@@ -1397,8 +1424,8 @@ struct ChatView: View {
             transcriptRelayoutScrollToken: viewModel.transcriptRelayoutScrollToken,
             bottomAnchorID: bottomAnchorID,
             transcriptSpacing: transcriptSpacing,
-            transcriptBottomInsetHeight: transcriptBottomInsetHeight,
-            scrollToBottomButtonBottomPadding: scrollToBottomButtonBottomPadding,
+            composerHeight: composerHeight,
+            composerChromeHeight: composerChromeHeight,
             localAttachmentPreviews: viewModel.localAttachmentPreviews,
             listeningMessageID: viewModel.listeningMessageID,
             isViewingCachedData: viewModel.isViewingCachedData,
@@ -1578,12 +1605,10 @@ struct ChatView: View {
         )
     }
 
-    private var transcriptBottomInsetHeight: CGFloat {
-        max(96, composerHeight + 44 + composerAccessorySpacerHeight + clarificationFootprintHeight)
-    }
-
-    private var scrollToBottomButtonBottomPadding: CGFloat {
-        composerHeight + 12 + composerAccessorySpacerHeight + clarificationFootprintHeight
+    /// What stacks on top of the composer: the accessory rows and a pending
+    /// clarification bar.
+    private var composerChromeHeight: CGFloat {
+        composerAccessorySpacerHeight + clarificationFootprintHeight
     }
 
     /// Bar height plus its gap above the composer while a clarification is
@@ -1792,7 +1817,11 @@ struct ChatView: View {
     }
 
     private func loadInitialGitAvailability() async {
-        let availabilityViewModel = GitWorkspaceAvailabilityViewModel(session: session, server: server)
+        let availabilityViewModel = GitWorkspaceAvailabilityViewModel(
+            session: session,
+            server: server,
+            apiClient: viewModel.client
+        )
         gitAvailabilityViewModel = availabilityViewModel
         await availabilityViewModel.loadIfNeeded()
     }
@@ -3165,6 +3194,43 @@ enum ChatToolbarSubtitleResolver {
         guard let value else { return nil }
         let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+/// The chat composer's draft text and how many edits the user has made to it.
+/// A reference rather than `ChatView` state because the composer writes it on
+/// every keystroke, and a write to a screen's own `@State` dirties everything
+/// under that screen, every transcript row included, even when `body` never
+/// read it. Here only the views that read `text`, the composer, are touched.
+@MainActor @Observable
+final class ChatComposerDraft {
+    var text: String
+    /// Bumped on every edit the user makes; a failed send restores its draft
+    /// only while this still matches the revision it submitted. No view reads it.
+    @ObservationIgnored var revision = 0
+
+    init(text: String) {
+        self.text = text
+    }
+}
+
+/// The chat composer's measured height, which the chrome above it and the
+/// transcript's bottom inset follow. A reference for the same reason as
+/// `ChatComposerDraft`: read in `ChatView.body`, a composer that grows a line
+/// would re-run the whole screen and re-measure every transcript row.
+@MainActor @Observable
+final class ChatComposerHeight {
+    var value: CGFloat = 52
+}
+
+/// Hands `content` the composer's current height, so only this view re-runs
+/// when the composer grows or shrinks, not the screen that built it.
+struct ComposerHeightReader<Content: View>: View {
+    let height: ChatComposerHeight
+    @ViewBuilder let content: (CGFloat) -> Content
+
+    var body: some View {
+        content(height.value)
     }
 }
 

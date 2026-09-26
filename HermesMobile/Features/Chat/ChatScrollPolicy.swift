@@ -201,8 +201,12 @@ extension EnvironmentValues {
     }
 }
 
-/// Routes transcript link taps through one `OpenURLAction` that outlives body
-/// passes, for the same reason as `ChatDisclosureToggleAction`.
+/// Routes transcript link taps to the latest handler through one
+/// `OpenURLAction` that outlives body passes. Rewriting that same action on
+/// each pass is not enough: once SwiftUI has compared a few `OpenURLAction`s,
+/// it treats every write of one as a change, even of an identical value, and
+/// re-runs every `\.openURL` reader. So `transcriptLinks(perform:)` writes it
+/// from `TranscriptLinkWriter`, which owner passes never re-run.
 final class TranscriptLinkRouter {
     var handler: (URL) -> OpenURLAction.Result = { _ in .systemAction }
 
@@ -245,7 +249,17 @@ private struct TranscriptLinksModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         router.handler = handler
-        return content.environment(\.openURL, router.openURL)
+        return content.modifier(TranscriptLinkWriter(router: router))
+    }
+}
+
+/// Its only input is the router, which SwiftUI compares by identity, so an
+/// owner pass that refreshes the handler skips this write.
+private struct TranscriptLinkWriter: ViewModifier {
+    let router: TranscriptLinkRouter
+
+    func body(content: Content) -> some View {
+        content.environment(\.openURL, router.openURL)
     }
 }
 
