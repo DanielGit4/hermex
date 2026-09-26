@@ -11,10 +11,18 @@ import XCTest
 /// until SwiftUI and every deferred hop the keystroke scheduled have settled.
 ///
 /// The timing tests only report, as one `TYPING-PERF` line per scenario in the
-/// test log: simulator wall-clock time is too noisy to assert on in CI.
+/// test log: simulator wall-clock time is too noisy to assert on in CI. The
+/// regression test asserts on body passes only.
 @MainActor final class ChatViewTypingPerformanceTests: XCTestCase {
     /// Exactly 60 characters.
     static let typedText = "Please refactor the parser and add tests for the edge cases."
+    /// About 300 characters: the draft wraps past the composer's minimum height
+    /// and grows it a line at a time.
+    static let wrappingText = "Please refactor the parser and add tests for the edge cases. "
+        + "Keep the public API stable, move the lexer helpers into their own file, "
+        + "and make sure unterminated strings, empty input and nested comments all "
+        + "report a precise line and column. When you are done, run the whole suite "
+        + "and summarize what changed."
 
     func testReportsTypingCostInALongChat() async throws {
         let run = try await typeIntoHostedChat(messageCount: 500)
@@ -24,6 +32,33 @@ import XCTest
     func testReportsTypingCostInAShortChat() async throws {
         let run = try await typeIntoHostedChat(messageCount: 10)
         report(run, scenario: "short10")
+    }
+
+    func testReportsTypingCostWhileTheDraftWrapsInALongChat() async throws {
+        let run = try await typeIntoHostedChat(messageCount: 500, keystrokes: Self.wrappingText.map(String.init))
+        XCTAssertGreaterThan(run.growKeys.count, 2, "The draft must grow the composer several times")
+        report(run, scenario: "long500-wrap")
+    }
+
+    /// A keystroke re-runs the composer and nothing else: not `ChatView`, not
+    /// the transcript, not a row. That includes a keystroke that wraps the
+    /// draft onto a new line and grows the composer, which used to re-run the
+    /// screen and re-measure every row (about 400 ms in a 500-message chat).
+    ///
+    /// Typed a word at a time to stay quick. Two grown lines stay well inside
+    /// the near-bottom band; pushing the reader past it does re-run the screen,
+    /// on purpose, to show the scroll-to-bottom button.
+    func testTypingAndWrappingReRunOnlyTheComposer() async throws {
+        let words = Self.wrappingText.prefix(215).split(separator: " ").map { String($0) + " " }
+        let run = try await typeIntoHostedChat(messageCount: 40, keystrokes: words)
+        report(run, scenario: "regression40")
+
+        XCTAssertGreaterThanOrEqual(run.growKeys.count, 2, "The draft must wrap and grow the composer")
+        for site in [ViewBodyProbe.Site.chatView, .chatViewport, .transcript, .transcriptBlock, .transcriptRow, .messageBubble] {
+            XCTAssertEqual(run.total(site), 0, "Typing re-ran \(site.rawValue)")
+        }
+        XCTAssertGreaterThanOrEqual(run.total(.composer), words.count, "Every keystroke must reach the composer")
+        XCTAssertLessThanOrEqual(run.total(.composer), 2 * words.count, "At most two composer passes per keystroke")
     }
 
     // MARK: - Harness
@@ -36,20 +71,27 @@ import XCTest
         var insertMs: [Double] = []
         /// Body passes per keystroke, by view.
         var passes: [[ViewBodyProbe.Site: Int]] = []
+        /// The editor's height after each keystroke.
+        var editorHeights: [CGFloat] = []
 
         func total(_ site: ViewBodyProbe.Site) -> Int {
             passes.reduce(0) { $0 + ($1[site] ?? 0) }
         }
+
+        /// Keystrokes after which the editor had grown a line.
+        var growKeys: [Int] {
+            editorHeights.indices.dropFirst().filter { editorHeights[$0] != editorHeights[$0 - 1] }
+        }
     }
 
     /// Hosts `ChatView` over a transcript of `messageCount` messages, waits for
-    /// it to settle, focuses the composer and types `typedText` one character
-    /// at a time, with a couple of idle frames between keystrokes the way a
-    /// person types. Passes during those idle frames count toward the keystroke
-    /// that caused them.
+    /// it to settle, focuses the composer and types `keystrokes` (by default
+    /// `typedText`, one character each), with a couple of idle frames between
+    /// them the way a person types. Passes during those idle frames count
+    /// toward the keystroke that caused them.
     func typeIntoHostedChat(
         messageCount: Int,
-        text: String = ChatViewTypingPerformanceTests.typedText
+        keystrokes: [String] = ChatViewTypingPerformanceTests.typedText.map(String.init)
     ) async throws -> TypingRun {
         XCTAssertEqual(Self.typedText.count, 60)
         let fixture = try ChatTypingFixture(messageCount: messageCount)
@@ -78,10 +120,10 @@ import XCTest
         try await settle(window, fixture: fixture) { editor.sourceText.isEmpty }
 
         var run = TypingRun()
-        for character in text {
+        for keystroke in keystrokes {
             let before = ViewBodyProbe.counts ?? [:]
             let start = CACurrentMediaTime()
-            editor.insertText(String(character))
+            editor.insertText(keystroke)
             let inserted = CACurrentMediaTime()
             await drainKeystroke(in: window)
             let end = CACurrentMediaTime()
@@ -91,8 +133,9 @@ import XCTest
             run.totalMs.append((end - start) * 1000)
             let after = ViewBodyProbe.counts ?? [:]
             run.passes.append(after.merging(before) { $0 - $1 })
+            run.editorHeights.append(editor.bounds.height)
         }
-        XCTAssertEqual(editor.sourceText, text)
+        XCTAssertEqual(editor.sourceText, keystrokes.joined())
         return run
     }
 
@@ -154,9 +197,26 @@ import XCTest
             fields.append("\(site.rawValue)=\(run.total(site))(\(perKey(site))/key)")
         }
         fields.append("rowBodiesTotal=\(rows)")
-        fields.append("chatViewPerKey=\(run.passes.map { String($0[.chatView] ?? 0) }.joined(separator: ","))")
+        if let worst = run.totalMs.indices.max(by: { run.totalMs[$0] < run.totalMs[$1] }) {
+            fields.append("worst_key=\(describeKey(worst, in: run))")
+        }
+        fields.append("grow_keys=\(run.growKeys.map { describeKey($0, in: run) }.joined(separator: ","))")
+        // Keystrokes that re-ran the screen, the transcript or a row.
+        let screenKeys = run.passes.indices.filter { index in
+            [.chatView, .transcript, .transcriptBlock, .transcriptRow, .messageBubble]
+                .contains { (run.passes[index][$0] ?? 0) > 0 }
+        }
+        fields.append("screen_keys=\(screenKeys.map { describeKey($0, in: run) }.joined(separator: ","))")
         fields.append("msPerKey=\(run.totalMs.map(format).joined(separator: ","))")
         print(fields.joined(separator: " "))
+    }
+
+    /// `index:ms:chatView/transcript/rows/composer`, one keystroke.
+    private func describeKey(_ index: Int, in run: TypingRun) -> String {
+        let passes = run.passes[index]
+        let rows = (passes[.transcriptBlock] ?? 0) + (passes[.transcriptRow] ?? 0) + (passes[.messageBubble] ?? 0)
+        let counts = [passes[.chatView] ?? 0, passes[.transcript] ?? 0, rows, passes[.composer] ?? 0]
+        return "\(index):\(format(run.totalMs[index])):" + counts.map(String.init).joined(separator: "/")
     }
 
     private func percentile(_ values: [Double], _ fraction: Double) -> Double {

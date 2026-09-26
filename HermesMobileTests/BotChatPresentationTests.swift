@@ -1052,8 +1052,10 @@ import XCTest
     /// ChatView keeps the draft out of its own body so a keystroke never re-runs
     /// the transcript derivations. The composer reports each edit for
     /// persistence, and scans the draft for `@path` references only when a
-    /// finished one comes or goes. A get/set draft binding (the old wiring)
-    /// re-runs the owner on every keystroke and fails the pass count.
+    /// finished one comes or goes. Reading the draft in the owner's body, or
+    /// building a binding to it there, re-runs the owner on every keystroke
+    /// and fails the pass count. `ChatViewTypingPerformanceTests` pins the same
+    /// on the real `ChatView`.
     func testSessionsComposerScansFileReferencesWithoutReRunningItsOwnerPerKeystroke() async throws {
         let focus = ComposerFixtureFocus()
         let probe = SessionFixtureProbe()
@@ -1472,7 +1474,7 @@ private struct BotComposerFixture: View {
 private struct SessionChatPresentationFixture: View {
     @Bindable var focus: ComposerFixtureFocus
     var probe = SessionFixtureProbe()
-    @State private var draft = ""
+    @State private var draft = ChatComposerDraft(text: "")
     @State private var quotes: [ComposerQuote] = []
     @State private var paths = ComposerFilePathSearch()
     @State private var git = GitWorkspaceAvailabilityViewModel(
@@ -1487,14 +1489,14 @@ private struct SessionChatPresentationFixture: View {
         }
         // ChatView reads the draft outside body (tasks, actions); that must not
         // make it depend on the draft either.
-        .task { probe.draftSeenOnAppear = draft }
+        .task { probe.draftSeenOnAppear = draft.text }
     }
 
     private var composer: some View {
-        // Wired like ChatView: a plain `$state` draft the body never reads,
+        // Wired like ChatView: a draft object whose text the body never reads,
         // with edits reported for persistence.
         MessageComposerView(
-            draftMessage: $draft, quotes: $quotes, isFocused: $focus.isFocused,
+            draft: draft, quotes: $quotes, isFocused: $focus.isFocused,
             isSending: false, isCompressingSession: false, isWaitingForStream: false,
             isCancellingStream: false, readOnlyMessage: nil, errorMessage: nil,
             configurationErrorMessage: nil, contextWindowSnapshot: nil, gitViewModel: git,
