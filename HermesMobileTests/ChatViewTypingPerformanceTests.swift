@@ -11,30 +11,35 @@ import XCTest
 /// until SwiftUI and every deferred hop the keystroke scheduled have settled.
 ///
 /// The timing tests only report, as one `TYPING-PERF` line per scenario in the
-/// test log: simulator wall-clock time is too noisy to assert on in CI. The
-/// regression test asserts on body passes only.
+/// test log: simulator wall-clock time is too noisy to assert on in CI. They
+/// take half a minute together, so they run only on request:
+/// `TEST_RUNNER_HERMEX_TYPING_PERF=1 scripts/test-sim <udid> --only HermesMobileTests/ChatViewTypingPerformanceTests`.
+/// The regression test always runs and asserts on body passes only.
 @MainActor final class ChatViewTypingPerformanceTests: XCTestCase {
     /// Exactly 60 characters.
-    static let typedText = "Please refactor the parser and add tests for the edge cases."
+    nonisolated static let typedText = "Please refactor the parser and add tests for the edge cases."
     /// About 300 characters: the draft wraps past the composer's minimum height
     /// and grows it a line at a time.
-    static let wrappingText = "Please refactor the parser and add tests for the edge cases. "
+    nonisolated static let wrappingText = "Please refactor the parser and add tests for the edge cases. "
         + "Keep the public API stable, move the lexer helpers into their own file, "
         + "and make sure unterminated strings, empty input and nested comments all "
         + "report a precise line and column. When you are done, run the whole suite "
         + "and summarize what changed."
 
     func testReportsTypingCostInALongChat() async throws {
+        try requireReportOptIn()
         let run = try await typeIntoHostedChat(messageCount: 500)
         report(run, scenario: "long500")
     }
 
     func testReportsTypingCostInAShortChat() async throws {
+        try requireReportOptIn()
         let run = try await typeIntoHostedChat(messageCount: 10)
         report(run, scenario: "short10")
     }
 
     func testReportsTypingCostWhileTheDraftWrapsInALongChat() async throws {
+        try requireReportOptIn()
         let run = try await typeIntoHostedChat(messageCount: 500, keystrokes: Self.wrappingText.map(String.init))
         XCTAssertGreaterThan(run.growKeys.count, 2, "The draft must grow the composer several times")
         report(run, scenario: "long500-wrap")
@@ -62,6 +67,12 @@ import XCTest
     }
 
     // MARK: - Harness
+
+    private func requireReportOptIn() throws {
+        guard ProcessInfo.processInfo.environment["HERMEX_TYPING_PERF"] == "1" else {
+            throw XCTSkip("Set HERMEX_TYPING_PERF=1 to report typing cost.")
+        }
+    }
 
     struct TypingRun {
         /// Main-thread milliseconds per keystroke, from `insertText` until the
