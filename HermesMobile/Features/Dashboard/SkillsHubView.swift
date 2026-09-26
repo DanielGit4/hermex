@@ -264,6 +264,8 @@ struct HubSkillRow: View {
 struct SkillsHubBadge: View {
     let text: String
     var systemImage: String?
+    /// A warning's color; plain badges stay secondary.
+    var tint: Color?
 
     var body: some View {
         HStack(spacing: 3) {
@@ -276,8 +278,8 @@ struct SkillsHubBadge: View {
         .lineLimit(1)
         .padding(.horizontal, 7)
         .padding(.vertical, 3)
-        .foregroundStyle(.secondary)
-        .background(Color(.tertiarySystemFill), in: Capsule())
+        .foregroundStyle(tint.map(AnyShapeStyle.init) ?? AnyShapeStyle(.secondary))
+        .background(tint.map { $0.opacity(0.15) } ?? Color(.tertiarySystemFill), in: Capsule())
     }
 }
 
@@ -334,7 +336,8 @@ struct SkillsHubOperationBanner: View {
 /// A dashboard action's progress, pinned to the bottom of the screens that start it: a
 /// spinner and the host's latest log line while it runs, then the outcome, dismissible.
 struct DashboardOperationBanner: View {
-    enum Status { case running, succeeded, failed }
+    /// `uncertain`: the host may still be working and the outcome isn't known.
+    enum Status { case running, succeeded, failed, uncertain }
 
     let status: Status
     let title: String
@@ -389,6 +392,8 @@ struct DashboardOperationBanner: View {
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
         case .failed:
             Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+        case .uncertain:
+            Image(systemName: "questionmark.circle.fill").foregroundStyle(.secondary)
         }
     }
 }

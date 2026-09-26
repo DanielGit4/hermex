@@ -142,6 +142,15 @@ enum BotEndpoint: String {
     case mcpServers = "api/mcp/servers"
     case mcpCatalog = "api/mcp/catalog"
     case mcpCatalogInstall = "api/mcp/catalog/install"
+    /// Plugin routes the Dashboard uses, verified against hermes-agent 0.21.5
+    /// `hermes_cli/web_routers/dashboard_ui.py` on 2026-09-26; none takes a `profile`. `hub`
+    /// answers `{plugins: [row]}` and `catalog` the live curated catalog `{entries, removed}`.
+    /// Installs go through `pluginInstall` with `{identifier: "", catalog_name, enable,
+    /// force: false}`; `pluginURL` addresses enable, disable, update and `DELETE`. A refused
+    /// mutation is a 400 whose `detail` is the host's reason, except an update's
+    /// `consent_required`, which answers 200.
+    case pluginsHub = "api/dashboard/plugins/hub"
+    case pluginsCatalog = "api/dashboard/plugins/catalog"
     func url(base: URL) -> URL { base.appendingPathComponent(rawValue) }
     /// `GET /api/actions/{name}/status` (`actions.py`): `{name, running, exit_code, pid,
     /// lines}` for a spawned action. `name` is the one the spawning route answered.
@@ -154,10 +163,12 @@ enum BotEndpoint: String {
         let server = BotEndpoint.mcpServers.url(base: base).appendingPathComponent(name)
         return action.map { server.appendingPathComponent($0) } ?? server
     }
-    /// `POST /api/dashboard/agent-plugins/{name}/{action}` for `enable` and `disable`.
-    static func pluginURL(base: URL, name: String, action: String) -> URL {
-        base.appendingPathComponent("api/dashboard/agent-plugins")
-            .appendingPathComponent(name).appendingPathComponent(action)
+    /// `POST /api/dashboard/agent-plugins/{name}/{action}` for `enable`, `disable` and
+    /// `update`, or without an action `DELETE …/{name}`. The host reads `{name:path}`, so a
+    /// `/` in a plugin key stays a separator; everything else is percent-encoded.
+    static func pluginURL(base: URL, name: String, action: String? = nil) -> URL {
+        let plugin = base.appendingPathComponent("api/dashboard/agent-plugins").appendingPathComponent(name)
+        return action.map { plugin.appendingPathComponent($0) } ?? plugin
     }
     /// `DELETE /api/profiles/{name}`, the only Profile removal the host exposes; the
     /// gateway has no `profiles.delete` RPC. `name` is a validated Profile slug.

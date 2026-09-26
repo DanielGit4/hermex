@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// The Hermes host's dashboard, reached over the saved Bot connection for this server. The
-/// Skills Hub and MCP are live; the other sections are listed so the destination's shape is
-/// clear and stay inert until they are built.
+/// Skills Hub, MCP and Plugins are live; the other sections are listed so the destination's
+/// shape is clear and stay inert until they are built.
 struct DashboardView: View {
     let server: URL
 
@@ -11,6 +11,8 @@ struct DashboardView: View {
     @State private var skillsHub: SkillsHubViewModel?
     @State private var mcpServers: MCPServersViewModel?
     @State private var mcpCatalog: MCPCatalogViewModel?
+    @State private var plugins: PluginsViewModel?
+    @State private var pluginCatalog: PluginCatalogViewModel?
     @State private var didLoadConnection = false
 
     var body: some View {
@@ -21,9 +23,12 @@ struct DashboardView: View {
                 if let connection = try? BotConnectionStore().load(server: server) {
                     let client = DashboardClient(connection: connection)
                     let servers = MCPServersViewModel(client: client)
+                    let installed = PluginsViewModel(client: client)
                     skillsHub = SkillsHubViewModel(client: client)
                     mcpServers = servers
                     mcpCatalog = MCPCatalogViewModel(client: client, servers: servers)
+                    plugins = installed
+                    pluginCatalog = PluginCatalogViewModel(client: client, plugins: installed)
                 }
                 didLoadConnection = true
             }
@@ -31,7 +36,7 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let skillsHub, let mcpServers, let mcpCatalog {
+        if let skillsHub, let mcpServers, let mcpCatalog, let plugins, let pluginCatalog {
             List {
                 Section {
                     NavigationLink {
@@ -45,6 +50,12 @@ struct DashboardView: View {
                     } label: {
                         DashboardSectionLabel(title: "MCP", systemImage: "point.3.connected.trianglepath.dotted",
                                               subtitle: "Test, enable and remove MCP servers, or install from the catalog.")
+                    }
+                    NavigationLink {
+                        PluginsView(model: plugins, catalog: pluginCatalog)
+                    } label: {
+                        DashboardSectionLabel(title: "Plugins", systemImage: "puzzlepiece.extension",
+                                              subtitle: "Enable, update and remove plugins, or install from the catalog.")
                     }
                 }
 
@@ -90,13 +101,12 @@ private struct DashboardSectionLabel: View {
 /// Dashboard sections that are planned but not built. Their rows are plain text, never
 /// buttons, so nothing here navigates.
 private enum UpcomingSection: CaseIterable, Identifiable {
-    case plugins, config, keys, logs, gateway
+    case config, keys, logs, gateway
 
     var id: Self { self }
 
     var title: String {
         switch self {
-        case .plugins: return String(localized: "Plugins")
         case .config: return String(localized: "Config")
         case .keys: return String(localized: "Keys")
         case .logs: return String(localized: "Logs")
@@ -106,7 +116,6 @@ private enum UpcomingSection: CaseIterable, Identifiable {
 
     var systemImage: String {
         switch self {
-        case .plugins: return "puzzlepiece.extension"
         case .config: return "slider.horizontal.3"
         case .keys: return "key"
         case .logs: return "doc.plaintext"
