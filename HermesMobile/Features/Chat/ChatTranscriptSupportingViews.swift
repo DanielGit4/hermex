@@ -1279,6 +1279,8 @@ enum ViewBodyProbe {
         /// Not bodies: a full walk of the transcript deriving the settled-turn
         /// folds or the terminal replies' meta rows.
         case turnFoldsDerive, terminalRepliesDerive
+        /// Not a body: the chat screen playing one enabled streaming pulse.
+        case streamingHapticPulse
     }
 
     #if DEBUG

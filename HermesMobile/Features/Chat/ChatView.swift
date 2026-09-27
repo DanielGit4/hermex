@@ -2966,7 +2966,11 @@ struct ChatView: View {
 
     /// One tick per view-model bump; the view model already throttles and skips replay.
     private func handleStreamingHapticPulse() {
-        ChatHaptics.streamingPulse(isEnabled: isHapticsEnabled && isStreamingPulseEnabled)
+        let isEnabled = isHapticsEnabled && isStreamingPulseEnabled
+        if isEnabled {
+            ViewBodyProbe.hit(.streamingHapticPulse)
+        }
+        ChatHaptics.streamingPulse(isEnabled: isEnabled)
     }
 
     private func suspendBottomAnchorForDisclosure() {
