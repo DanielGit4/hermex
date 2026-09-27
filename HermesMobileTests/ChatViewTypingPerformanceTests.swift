@@ -684,6 +684,29 @@ import XCTest
         report(run, scenario: "long500")
     }
 
+    /// A streamed word that only grows the reply walks the transcript for
+    /// neither the settled-turn folds nor the terminal replies, and re-runs
+    /// no row but the reply's own. Both walks used to run over every message
+    /// on each of the screen's passes per word.
+    func testStreamedWordsReuseTurnFoldsAndTerminalReplies() async throws {
+        let foldsKey = ChatTranscriptDisplaySettings.foldsSettledTurnsKey
+        let savedFolds = UserDefaults.standard.object(forKey: foldsKey)
+        defer { UserDefaults.standard.set(savedFolds, forKey: foldsKey) }
+        UserDefaults.standard.set(true, forKey: foldsKey)
+
+        let run = try await streamIntoHostedChat(messageCount: 40, ticks: 8)
+        report(run, scenario: "regression40")
+
+        XCTAssertEqual(run.passes.count, 8)
+        for (word, passes) in run.passes.enumerated() {
+            XCTAssertGreaterThanOrEqual(passes[.chatViewport] ?? 0, 1, "Word \(word) must reach the screen")
+            XCTAssertEqual(passes[.turnFoldsDerive] ?? 0, 0, "Word \(word) walked the transcript for turn folds")
+            XCTAssertEqual(passes[.terminalRepliesDerive] ?? 0, 0, "Word \(word) walked the transcript for terminal replies")
+            XCTAssertLessThanOrEqual(passes[.transcriptBlock] ?? 0, 1, "Word \(word) re-ran a row other than the reply's")
+            XCTAssertLessThanOrEqual(passes[.messageBubble] ?? 0, 1, "Word \(word) re-ran a bubble other than the reply's")
+        }
+    }
+
     struct StreamRun {
         /// Main-thread milliseconds per streamed word: the flush and its update
         /// drained, plus the coalesced follow scroll it scheduled, drained.
@@ -716,27 +739,10 @@ import XCTest
     func streamIntoHostedChat(messageCount: Int, ticks: Int) async throws -> StreamRun {
         let fixture = try ChatTypingFixture(messageCount: messageCount, answersChatStart: true)
         defer { fixture.tearDown() }
-        defer { ChatViewModel.resetActiveStreamSnapshotsForTesting() }
         let stream = ScriptedSSEStreamingClient()
-        let viewModel = ChatViewModel(
-            session: fixture.session,
-            server: fixture.server,
-            client: fixture.client,
-            streamClient: stream,
-            approvalStreamClient: ScriptedSSEStreamingClient(),
-            clarifyStreamClient: ScriptedSSEStreamingClient(),
-            btwStreamClient: ScriptedSSEStreamingClient(),
-            streamingScrollCoalescingDelayNanoseconds: 1_000_000,
-            streamingWordRevealCadenceNanoseconds: 60_000_000_000,
-            streamingMaxRevealLagNanoseconds: 3_600_000_000_000,
-            draftAttachmentStore: fixture.draftAttachmentStore
-        )
-        stream.flushPendingStreamingContent = { [weak viewModel] in viewModel?.flushPendingStreamingContent() }
+        let viewModel = fixture.makeStreamingViewModel(stream: stream)
         fixture.viewModel = viewModel
-        defer {
-            stream.flushPendingStreamingContent = nil
-            fixture.viewModel = nil
-        }
+        defer { fixture.viewModel = nil }
 
         return try await withHostedWindow(fixture) { window in
             try await settle(window, fixture: fixture) {
@@ -788,30 +794,9 @@ import XCTest
     /// replies over `viewModel`'s transcript, the way a `ChatView` pass did
     /// them before they were memoized.
     private func timeFullWalks(over viewModel: ChatViewModel) -> Double {
-        let rendersBubble: (ChatMessage) -> Bool = { message in
-            message.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-                || (message.role == "user" && message.attachments?.isEmpty == false)
-        }
         let start = CACurrentMediaTime()
-        let folds = TranscriptTurnFolds.derive(
-            transcriptMessages: viewModel.displayedTranscriptMessages,
-            messages: viewModel.messages,
-            messageOffset: viewModel.messagesOffset,
-            activityAnchorIDs: Set(viewModel.displayedReasoningGroups.compactMap(\.anchorMessageID))
-                .union(viewModel.completedToolCallGroups.compactMap(\.anchorMessageID)),
-            rendersBubble: rendersBubble,
-            isStreamActive: viewModel.activeStreamID != nil,
-            streamingAssistantMessageID: viewModel.streamingAssistantMessageID,
-            latestRunOutcome: viewModel.latestRunOutcome
-        )
-        let replies = TranscriptMessageMetaPolicy.terminalReplyRenderIDs(
-            transcriptMessages: viewModel.displayedTranscriptMessages,
-            messages: viewModel.messages,
-            messageOffset: viewModel.messagesOffset,
-            rendersBubble: rendersBubble,
-            isStreamActive: viewModel.activeStreamID != nil,
-            streamingAssistantMessageID: viewModel.streamingAssistantMessageID
-        )
+        let folds = FreshTurnDerivations.turnFolds(viewModel)
+        let replies = FreshTurnDerivations.terminalReplyRenderIDs(viewModel)
         let ms = (CACurrentMediaTime() - start) * 1000
         XCTAssertFalse(folds.folds.isEmpty || replies.isEmpty, "The walks must have settled turns to find")
         return ms
@@ -919,6 +904,29 @@ import XCTest
     func tearDown() {
         sessionGate.release()
         MockURLProtocol.requestHandler = nil
+        ChatViewModel.resetActiveStreamSnapshotsForTesting()
+    }
+
+    /// A view model over this chat whose streams are scripted. `stream` flushes
+    /// the view model after every event it delivers, and the cadences are long
+    /// enough that nothing else flushes: only the follow scroll a flush
+    /// schedules fires on its own.
+    func makeStreamingViewModel(stream: ScriptedSSEStreamingClient) -> ChatViewModel {
+        let viewModel = ChatViewModel(
+            session: session,
+            server: server,
+            client: client,
+            streamClient: stream,
+            approvalStreamClient: ScriptedSSEStreamingClient(),
+            clarifyStreamClient: ScriptedSSEStreamingClient(),
+            btwStreamClient: ScriptedSSEStreamingClient(),
+            streamingScrollCoalescingDelayNanoseconds: 1_000_000,
+            streamingWordRevealCadenceNanoseconds: 60_000_000_000,
+            streamingMaxRevealLagNanoseconds: 3_600_000_000_000,
+            draftAttachmentStore: draftAttachmentStore
+        )
+        stream.flushPendingStreamingContent = { [weak viewModel] in viewModel?.flushPendingStreamingContent() }
+        return viewModel
     }
 
     /// Where hermes-webui's cold-open window starts: the smallest suffix that

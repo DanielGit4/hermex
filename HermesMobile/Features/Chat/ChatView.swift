@@ -1470,8 +1470,11 @@ struct ChatView: View {
             onUpdateScrollMetrics: updateScrollMetrics,
             onFollowEvent: handleFollowEvent,
             onDisclosureToggle: handleDisclosureToggle,
-            turnFolds: turnFolds(reasoningGroups: viewModel.displayedReasoningGroups),
-            terminalReplyRenderIDs: terminalReplyRenderIDs,
+            turnFolds: viewModel.turnFolds(
+                foldsSettledTurns: foldsSettledTurns,
+                showsThinkingAndToolCards: showsThinkingAndToolCards
+            ),
+            terminalReplyRenderIDs: viewModel.terminalReplyRenderIDs(),
             expandedTurnKeys: expandedTurnKeys,
             onToggleTurnFold: toggleTurnFold,
             onDismissKeyboard: dismissKeyboard,
@@ -1693,11 +1696,7 @@ struct ChatView: View {
     }
 
     private func shouldRenderMessageRow(_ message: ChatMessage) -> Bool {
-        if message.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
-            return true
-        }
-
-        return message.role == "user" && message.attachments?.isEmpty == false
+        ChatViewModel.hasTranscriptMessageRowContent(message)
     }
 
     private var transcriptMessages: [TranscriptMessage] {
@@ -1706,43 +1705,6 @@ struct ChatView: View {
 
     private var displayedTranscriptMessages: [TranscriptMessage] {
         transcriptMessages
-    }
-
-    /// Settled-turn folds for the current transcript. Activity anchors count
-    /// only while thinking and tool cards are shown, so a turn with nothing
-    /// visible to hide gets no row.
-    private func turnFolds(reasoningGroups: [ReasoningGroup]) -> TranscriptTurnFolds {
-        guard foldsSettledTurns else { return .none }
-
-        ViewBodyProbe.hit(.turnFoldsDerive)
-        let activityAnchorIDs: Set<String> = showsThinkingAndToolCards
-            ? Set(reasoningGroups.compactMap(\.anchorMessageID))
-                .union(viewModel.completedToolCallGroups.compactMap(\.anchorMessageID))
-            : []
-
-        return TranscriptTurnFolds.derive(
-            transcriptMessages: transcriptMessages,
-            messages: viewModel.messages,
-            messageOffset: viewModel.messagesOffset,
-            activityAnchorIDs: activityAnchorIDs,
-            rendersBubble: shouldRenderMessageRow,
-            isStreamActive: viewModel.activeStreamID != nil,
-            streamingAssistantMessageID: viewModel.streamingAssistantMessageID,
-            latestRunOutcome: viewModel.latestRunOutcome
-        )
-    }
-
-    /// Rows that get the time + copy row as the reply closing a settled turn.
-    private var terminalReplyRenderIDs: Set<String> {
-        ViewBodyProbe.hit(.terminalRepliesDerive)
-        return TranscriptMessageMetaPolicy.terminalReplyRenderIDs(
-            transcriptMessages: transcriptMessages,
-            messages: viewModel.messages,
-            messageOffset: viewModel.messagesOffset,
-            rendersBubble: shouldRenderMessageRow,
-            isStreamActive: viewModel.activeStreamID != nil,
-            streamingAssistantMessageID: viewModel.streamingAssistantMessageID
-        )
     }
 
     private func toggleTurnFold(_ turnKey: String) {

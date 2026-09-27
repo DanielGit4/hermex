@@ -247,7 +247,172 @@ final class TranscriptTurnFoldingTests: XCTestCase {
         XCTAssertEqual(folds.folds.first?.hostRenderID, "transcript:41")
     }
 
+    // MARK: - Memoized by the chat view model
+
+    /// After every step of a streamed turn, the chat view model's folds and
+    /// terminal replies equal a fresh derive over the same state, and a word
+    /// that only grows the reply walks the transcript for neither.
+    @MainActor
+    func testChatViewModelReusesFoldsAndTerminalRepliesOnlyWhileTheReplyGrows() async throws {
+        let fixture = try ChatTypingFixture(messageCount: 12, answersChatStart: true)
+        defer { fixture.tearDown() }
+        let stream = ScriptedSSEStreamingClient()
+        let viewModel = fixture.makeStreamingViewModel(stream: stream)
+        ViewBodyProbe.counts = [:]
+        defer { ViewBodyProbe.counts = nil }
+
+        await viewModel.loadMessages()
+        assertMemoizedDerivationsMatchFresh(viewModel, "loading", walks: true)
+        XCTAssertFalse(FreshTurnDerivations.turnFolds(viewModel).folds.isEmpty, "The chat must have settled turns to fold")
+
+        let didStart = await viewModel.sendMessage("One more question")
+        XCTAssertTrue(didStart)
+        assertMemoizedDerivationsMatchFresh(viewModel, "sending", walks: true)
+
+        stream.emit(.token("First "))
+        assertMemoizedDerivationsMatchFresh(viewModel, "the first word")
+        for word in ["second ", "third.\n\n", "fourth "] {
+            stream.emit(.token(word))
+            assertMemoizedDerivationsMatchFresh(viewModel, "streaming \(word.debugDescription)", walks: false)
+        }
+        stream.emit(.reasoning("Checking the lexer."))
+        assertMemoizedDerivationsMatchFresh(viewModel, "reasoning", walks: false)
+        stream.emit(.toolStarted(Self.toolEvent(duration: nil)))
+        assertMemoizedDerivationsMatchFresh(viewModel, "a tool starting")
+        stream.emit(.toolCompleted(Self.toolEvent(duration: 0.4)))
+        assertMemoizedDerivationsMatchFresh(viewModel, "a tool completing")
+        stream.emit(.interimAssistant(InterimAssistantStreamEvent(text: "Found it.", alreadyStreamed: false)))
+        assertMemoizedDerivationsMatchFresh(viewModel, "an interim reply")
+        stream.emit(.token("Final "))
+        assertMemoizedDerivationsMatchFresh(viewModel, "the first word after the interim reply")
+        stream.emit(.token("answer."))
+        assertMemoizedDerivationsMatchFresh(viewModel, "a word after the interim reply", walks: false)
+        stream.emit(.done(DoneStreamEvent()))
+        XCTAssertNil(viewModel.activeStreamID)
+        assertMemoizedDerivationsMatchFresh(viewModel, "done", walks: true)
+    }
+
+    @MainActor
+    func testChatViewModelFoldsMatchAFreshDeriveWhenAReplyIsStoppedOrFails() async throws {
+        for ending in [SSEEvent.cancelled, .error("The model is unavailable.")] {
+            let fixture = try ChatTypingFixture(messageCount: 12, answersChatStart: true)
+            defer { fixture.tearDown() }
+            let stream = ScriptedSSEStreamingClient()
+            let viewModel = fixture.makeStreamingViewModel(stream: stream)
+            ViewBodyProbe.counts = [:]
+            defer { ViewBodyProbe.counts = nil }
+
+            await viewModel.loadMessages()
+            let didStart = await viewModel.sendMessage("One more question")
+            XCTAssertTrue(didStart)
+            stream.emit(.token("Partial "))
+            stream.emit(.token("reply"))
+            assertMemoizedDerivationsMatchFresh(viewModel, "streaming before \(ending)")
+            stream.emit(ending)
+            assertMemoizedDerivationsMatchFresh(viewModel, "\(ending)")
+        }
+    }
+
+    /// Hiding thinking and tool cards changes what a fold can hide, and a page
+    /// of older messages shifts every turn: each walks the transcript again.
+    @MainActor
+    func testChatViewModelDerivesFoldsAgainForASettingOrAnOlderPage() async throws {
+        let fixture = try ChatTypingFixture(messageCount: 12)
+        defer { fixture.tearDown() }
+        let messages = ChatTypingFixture.messages(count: 12)
+        MockURLProtocol.requestHandler = { request in
+            let response = HTTPURLResponse(
+                url: request.url!, statusCode: 200, httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )!
+            guard request.url?.path == "/api/session" else { return (response, Data("{}".utf8)) }
+            let isOlderPage = request.url?.query?.contains("msg_before=4") == true
+            let session: [String: Any] = isOlderPage
+                ? ["session_id": "typing-perf", "messages": Array(messages[..<4]), "_messages_offset": 0]
+                : ["session_id": "typing-perf", "messages": Array(messages[4...]),
+                   "_messages_offset": 4, "_messages_truncated": true]
+            return (response, try JSONSerialization.data(withJSONObject: ["session": session]))
+        }
+        let viewModel = fixture.makeStreamingViewModel(stream: ScriptedSSEStreamingClient())
+        ViewBodyProbe.counts = [:]
+        defer { ViewBodyProbe.counts = nil }
+
+        await viewModel.loadMessages()
+        XCTAssertEqual(viewModel.messagesOffset, 4)
+        assertMemoizedDerivationsMatchFresh(viewModel, "the newest page", walks: true)
+        assertMemoizedDerivationsMatchFresh(viewModel, "nothing changing", walks: false)
+        XCTAssertNotEqual(
+            FreshTurnDerivations.turnFolds(viewModel, showsThinkingAndToolCards: false),
+            FreshTurnDerivations.turnFolds(viewModel),
+            "Hiding the cards must change the folds"
+        )
+
+        XCTAssertEqual(walks(.turnFoldsDerive) {
+            _ = viewModel.turnFolds(foldsSettledTurns: true, showsThinkingAndToolCards: false)
+        }, 1, "Hiding the cards must derive the folds again")
+        assertMemoizedDerivationsMatchFresh(viewModel, "hiding the cards", walks: false, showsThinkingAndToolCards: false)
+        XCTAssertEqual(walks(.turnFoldsDerive) {
+            XCTAssertEqual(viewModel.turnFolds(foldsSettledTurns: false, showsThinkingAndToolCards: true), .none)
+        }, 0, "Turning folding off needs no walk")
+        XCTAssertEqual(walks(.turnFoldsDerive) {
+            _ = viewModel.turnFolds(foldsSettledTurns: true, showsThinkingAndToolCards: true)
+        }, 1, "Showing the cards again must derive the folds again")
+
+        let didLoadOlder = await viewModel.loadOlderMessages()
+        XCTAssertTrue(didLoadOlder)
+        XCTAssertEqual(viewModel.messagesOffset, 0)
+        assertMemoizedDerivationsMatchFresh(viewModel, "an older page", walks: true)
+    }
+
     // MARK: - Helpers
+
+    /// Asserts both memoized values equal a fresh derive, asking twice so the
+    /// second answer must come from the memo. `walks` pins whether this step
+    /// walked the transcript at all; nil leaves that open.
+    @MainActor
+    private func assertMemoizedDerivationsMatchFresh(
+        _ viewModel: ChatViewModel,
+        _ step: String,
+        walks expectsWalk: Bool? = nil,
+        showsThinkingAndToolCards: Bool = true,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        let before = ViewBodyProbe.counts ?? [:]
+        for _ in 0..<2 {
+            XCTAssertEqual(
+                viewModel.turnFolds(foldsSettledTurns: true, showsThinkingAndToolCards: showsThinkingAndToolCards),
+                FreshTurnDerivations.turnFolds(viewModel, showsThinkingAndToolCards: showsThinkingAndToolCards),
+                "Turn folds after \(step)", file: file, line: line
+            )
+            XCTAssertEqual(
+                viewModel.terminalReplyRenderIDs(), FreshTurnDerivations.terminalReplyRenderIDs(viewModel),
+                "Terminal replies after \(step)", file: file, line: line
+            )
+        }
+        let after = ViewBodyProbe.counts ?? [:]
+        for site in [ViewBodyProbe.Site.turnFoldsDerive, .terminalRepliesDerive] {
+            let walks = (after[site] ?? 0) - (before[site] ?? 0)
+            XCTAssertLessThanOrEqual(walks, 1, "\(site.rawValue) walked twice after \(step)", file: file, line: line)
+            if let expectsWalk {
+                XCTAssertEqual(walks, expectsWalk ? 1 : 0, "\(site.rawValue) after \(step)", file: file, line: line)
+            }
+        }
+    }
+
+    @MainActor
+    private func walks(_ site: ViewBodyProbe.Site, during body: () -> Void) -> Int {
+        let before = ViewBodyProbe.counts?[site] ?? 0
+        body()
+        return (ViewBodyProbe.counts?[site] ?? 0) - before
+    }
+
+    private static func toolEvent(duration: Double?) -> ToolStreamEvent {
+        ToolStreamEvent(
+            eventType: nil, name: "terminal", preview: "swift test", args: nil,
+            duration: duration, isError: nil, stableID: "tool-memo"
+        )
+    }
 
     private func derive(
         _ messages: [ChatMessage],
@@ -303,5 +468,45 @@ final class TranscriptTurnFoldingTests: XCTestCase {
             messageId: id,
             toolCalls: [.object(["id": .string("call-\(id)"), "function": .object(["name": .string("terminal")])])]
         )
+    }
+}
+
+/// The turn folds and terminal replies derived afresh from a chat view model's
+/// state, the way `ChatView` derived them on every pass before the view model
+/// memoized them: the reference the memoized values must equal.
+@MainActor enum FreshTurnDerivations {
+    static func turnFolds(_ viewModel: ChatViewModel, showsThinkingAndToolCards: Bool = true) -> TranscriptTurnFolds {
+        TranscriptTurnFolds.derive(
+            transcriptMessages: viewModel.displayedTranscriptMessages,
+            messages: viewModel.messages,
+            messageOffset: viewModel.messagesOffset,
+            activityAnchorIDs: showsThinkingAndToolCards
+                ? Set(viewModel.displayedReasoningGroups.compactMap(\.anchorMessageID))
+                    .union(viewModel.completedToolCallGroups.compactMap(\.anchorMessageID))
+                : [],
+            rendersBubble: rendersBubble,
+            isStreamActive: viewModel.activeStreamID != nil,
+            streamingAssistantMessageID: viewModel.streamingAssistantMessageID,
+            latestRunOutcome: viewModel.latestRunOutcome
+        )
+    }
+
+    static func terminalReplyRenderIDs(_ viewModel: ChatViewModel) -> Set<String> {
+        TranscriptMessageMetaPolicy.terminalReplyRenderIDs(
+            transcriptMessages: viewModel.displayedTranscriptMessages,
+            messages: viewModel.messages,
+            messageOffset: viewModel.messagesOffset,
+            rendersBubble: rendersBubble,
+            isStreamActive: viewModel.activeStreamID != nil,
+            streamingAssistantMessageID: viewModel.streamingAssistantMessageID
+        )
+    }
+
+    private static func rendersBubble(_ message: ChatMessage) -> Bool {
+        if message.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
+            return true
+        }
+
+        return message.role == "user" && message.attachments?.isEmpty == false
     }
 }
