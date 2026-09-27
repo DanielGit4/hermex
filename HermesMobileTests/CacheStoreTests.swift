@@ -1103,3 +1103,48 @@ final class CacheStoreTests: XCTestCase {
         try context.fetch(FetchDescriptor<CachedMessage>())
     }
 }
+
+@MainActor
+extension CacheStoreTests {
+    /// The build on the phone before this change cached each session's window
+    /// with indexes relative to the window (0, 1, 2, ...). The first open after
+    /// the update must still paint every one of those rows, in order, and the
+    /// next successful load must leave only absolute rows, with no duplicates,
+    /// including messages without an ID (keyed by index and timestamp).
+    func testRowsCachedWithWindowRelativeIndexesUpgradeOnTheNextLoad() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        var messages = (450..<500).map { index in
+            ChatMessage(
+                role: index.isMultiple(of: 2) ? "user" : "assistant",
+                content: "Message \(index)",
+                timestamp: Double(1_770_000_000 + index),
+                messageId: "m\(index)"
+            )
+        }
+        messages[10] = ChatMessage(role: "user", content: "No ID 460", timestamp: 1_770_000_460, messageId: nil)
+        messages[11] = ChatMessage(role: "assistant", content: "No ID 461", timestamp: 1_770_000_461, messageId: nil)
+
+        // What the previous build wrote: the same window at indexes 0..<50.
+        try CacheStore.cacheMessages(messages, serverURL: serverURL, sessionID: "abc123", in: context, messagesOffset: 0)
+        XCTAssertEqual(try fetchCachedMessages(in: context).map(\.sortIndex).sorted(), Array(0..<50))
+
+        // First open after the update: the whole window paints, in order.
+        let legacy = try CacheStore.cachedMessageWindow(
+            serverURL: serverURL, sessionID: "abc123", in: context, renderableLimit: 50
+        )
+        XCTAssertEqual(legacy.messagesOffset, 0)
+        XCTAssertEqual(legacy.messages.map(\.content), messages.map(\.content))
+
+        // The next successful load rewrites the window at its absolute offset.
+        try CacheStore.cacheMessages(messages, serverURL: serverURL, sessionID: "abc123", in: context, messagesOffset: 450)
+        let rows = try fetchCachedMessages(in: context)
+        XCTAssertEqual(rows.count, 50, "Rows from the previous build must not survive next to the rewritten ones")
+        XCTAssertEqual(rows.map(\.sortIndex).sorted(), Array(450..<500))
+        let upgraded = try CacheStore.cachedMessageWindow(
+            serverURL: serverURL, sessionID: "abc123", in: context, renderableLimit: 50
+        )
+        XCTAssertEqual(upgraded.messagesOffset, 450)
+        XCTAssertEqual(upgraded.messages.map(\.content), messages.map(\.content))
+    }
+}
