@@ -2040,7 +2040,8 @@ final class SessionListMutationTests: XCTestCase {
     func testLoadStoresArchivedCountFromResponseForArchivedEntry() async throws {
         let viewModel = try makeViewModel { request in
             XCTAssertEqual(request.url?.path, "/api/sessions")
-            XCTAssertNil(request.url?.query)
+            // The list asks for every profile's rows, and nothing else.
+            XCTAssertEqual(request.url?.query, "all_profiles=1")
             return apiTestJSONResponse("""
             {
               "sessions": [
@@ -2962,7 +2963,7 @@ final class SessionListMutationTests: XCTestCase {
         }
 
         await viewModel.load()
-        let groups = viewModel.scheduledSessionGroups(searchText: "", selectedProjectID: nil)
+        let groups = viewModel.sessionListGroups(searchText: "", selectedProjectID: nil)
 
         XCTAssertEqual(groups.ordinary.compactMap(\.sessionId), ["ordinary"])
         XCTAssertEqual(groups.totalScheduledCount, 7)
@@ -2998,20 +2999,20 @@ final class SessionListMutationTests: XCTestCase {
         }
 
         await viewModel.load()
-        let matches = viewModel.scheduledSessionGroups(searchText: "needle", selectedProjectID: nil)
+        let matches = viewModel.sessionListGroups(searchText: "needle", selectedProjectID: nil)
         XCTAssertEqual(matches.ordinary.compactMap(\.sessionId), ["ordinary"])
         XCTAssertEqual(matches.scheduled.count, 6)
         XCTAssertEqual(matches.totalScheduledCount, 6)
         XCTAssertTrue(matches.showsDisclosure(isSearchActive: true))
 
-        let noScheduledMatches = viewModel.scheduledSessionGroups(
+        let noScheduledMatches = viewModel.sessionListGroups(
             searchText: "ordinary",
             selectedProjectID: nil
         )
         XCTAssertFalse(noScheduledMatches.showsDisclosure(isSearchActive: true))
         XCTAssertTrue(noScheduledMatches.showsDisclosure(isSearchActive: false))
 
-        let hidden = viewModel.scheduledSessionGroups(
+        let hidden = viewModel.sessionListGroups(
             searchText: "",
             selectedProjectID: nil,
             automatedVisibility: AutomatedSessionVisibility(showsCron: false, showsCli: true)
@@ -3039,7 +3040,7 @@ final class SessionListMutationTests: XCTestCase {
         }
 
         await viewModel.load()
-        let groups = viewModel.scheduledSessionGroups(
+        let groups = viewModel.sessionListGroups(
             searchText: "",
             selectedProjectID: "project-1"
         )
@@ -3052,7 +3053,7 @@ final class SessionListMutationTests: XCTestCase {
     }
 
     func testScheduledSessionGroupsPartitionVisibleRowsInOrderAndDropArchivedCron() {
-        let groups = ScheduledSessionGroups(
+        let groups = SessionListGroups(
             partitioning: [
                 SessionSummary(sessionId: "cron_new"),
                 SessionSummary(sessionId: "ordinary-1"),

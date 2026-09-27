@@ -18,25 +18,65 @@ struct SessionListSection: Identifiable {
     var id: String { kind.rawValue }
 }
 
-struct ScheduledSessionGroups: Equatable {
+/// One messaging platform's rows, shown as a disclosure below Scheduled.
+struct MessagingSessionGroup: Identifiable, Equatable {
+    let platform: String
+    let sessions: [SessionSummary]
+    /// The platform's rows without the search query, for the disclosure badge.
+    let totalCount: Int
+
+    var id: String { platform }
+    var title: String { SessionSource.label(for: platform) }
+}
+
+/// The list's rows split into its sections: Scheduled, one disclosure per
+/// messaging platform, and the ordinary Sessions rows.
+struct SessionListGroups: Equatable {
     let ordinary: [SessionSummary]
     let scheduled: [SessionSummary]
+    /// Platforms with at least one visible row, in label order so a new
+    /// message never moves a disclosure.
+    let messaging: [MessagingSessionGroup]
     let totalScheduledCount: Int
 
     /// Splits the visible rows in one pass, keeping their order: cron rows go
-    /// to `scheduled` unless archived, everything else to `ordinary`.
-    init(partitioning visible: [SessionSummary], totalScheduledCount: Int) {
+    /// to `scheduled` unless archived, messaging rows to their platform, and
+    /// everything else to `ordinary`. `messagingTotals` defaults to the group
+    /// sizes, which is right whenever no search narrows the rows.
+    init(
+        partitioning visible: [SessionSummary],
+        totalScheduledCount: Int,
+        messagingTotals: [String: Int]? = nil
+    ) {
         var ordinary: [SessionSummary] = []
         var scheduled: [SessionSummary] = []
+        var messagingRows: [String: [SessionSummary]] = [:]
         for session in visible {
             if session.isCronSession {
                 if session.archived != true { scheduled.append(session) }
+            } else if let platform = session.messagingPlatform {
+                messagingRows[platform, default: []].append(session)
             } else {
                 ordinary.append(session)
             }
         }
         self.ordinary = ordinary
         self.scheduled = scheduled
+        self.messaging = messagingRows
+            .map { platform, rows in
+                MessagingSessionGroup(
+                    platform: platform,
+                    sessions: rows,
+                    totalCount: messagingTotals?[platform] ?? rows.count
+                )
+            }
+            .sorted { left, right in
+                switch left.title.localizedStandardCompare(right.title) {
+                case .orderedAscending: return true
+                case .orderedDescending: return false
+                case .orderedSame: return left.platform < right.platform
+                }
+            }
         self.totalScheduledCount = totalScheduledCount
     }
 
@@ -85,6 +125,14 @@ final class SessionListViewModel {
     private(set) var activeProfileModel: String?
     private(set) var activeProfileProvider: String?
     private(set) var profileOptions: [ProfileSummary] = []
+    /// The profile this client's server cookie (`hermes_profile`) selects, as
+    /// last reported. `activeProfileName` is the user's pick, which New Chat
+    /// uses; the two differ after a row from another profile was opened.
+    private(set) var serverProfileName: String?
+    /// False when the last live load listed only the active profile (an
+    /// isolated-profile server, or one older than `all_profiles`); nil before
+    /// any live load, so cached rows still show their profiles.
+    private(set) var listsAllProfiles: Bool?
     private(set) var isSingleProfileMode = false
     private(set) var isLoadingActiveProfile = false
     private(set) var isSwitchingActiveProfile = false
@@ -109,6 +157,12 @@ final class SessionListViewModel {
     private(set) var remoteContentSearchExcerpts: [String: String] = [:]
     private var activeRemoteSearchQuery: String?
     private var sessionOpenGeneration = 0
+    /// The profile the list moved the server to, away from the pick, to reach
+    /// a row. A profile reload that still finds the server there keeps the pick.
+    private var profileMovedForRow: String?
+    /// Set while a switch is in flight or after one ended without an answer,
+    /// so the next row re-sends it instead of trusting `serverProfileName`.
+    private var serverProfileIsUncertain = false
 
     private let client: APIClient
     private let sessionMutator: SessionMutator
@@ -180,18 +234,21 @@ final class SessionListViewModel {
         .filter { !$0.sessions.isEmpty }
     }
 
-    /// The rows the list shows for this search, project filter, and automated
-    /// visibility: local matches sorted, then loaded remote content matches.
+    /// The rows the list shows for this search, project filter, automated
+    /// visibility, and profile filter (nil shows every profile): local matches
+    /// sorted, then loaded remote content matches.
     func visibleSessions(
         searchText: String,
         selectedProjectID: String?,
-        automatedVisibility: AutomatedSessionVisibility = .showAll
+        automatedVisibility: AutomatedSessionVisibility = .showAll,
+        profileFilter: String? = nil
     ) -> [SessionSummary] {
         visibleSessions(
             among: sessions,
             searchText: searchText,
             selectedProjectID: selectedProjectID,
-            automatedVisibility: automatedVisibility
+            automatedVisibility: automatedVisibility,
+            profileFilter: profileFilter
         )
     }
 
@@ -201,7 +258,8 @@ final class SessionListViewModel {
     func visibleActiveSessions(
         searchText: String,
         selectedProjectID: String?,
-        automatedVisibility: AutomatedSessionVisibility = .showAll
+        automatedVisibility: AutomatedSessionVisibility = .showAll,
+        profileFilter: String? = nil
     ) -> [SessionSummary] {
         let activeSessions = sessions.filter(SessionRowView.isActiveStreaming)
         guard !activeSessions.isEmpty else { return [] }
@@ -209,7 +267,8 @@ final class SessionListViewModel {
             among: activeSessions,
             searchText: searchText,
             selectedProjectID: selectedProjectID,
-            automatedVisibility: automatedVisibility
+            automatedVisibility: automatedVisibility,
+            profileFilter: profileFilter
         )
     }
 
@@ -219,14 +278,16 @@ final class SessionListViewModel {
         among candidates: [SessionSummary],
         searchText rawSearchText: String,
         selectedProjectID: String?,
-        automatedVisibility: AutomatedSessionVisibility
+        automatedVisibility: AutomatedSessionVisibility,
+        profileFilter: String?
     ) -> [SessionSummary] {
         let query = Self.normalizedSearchQuery(rawSearchText)
-        let baseSessions = candidates.filter { automatedVisibility.shows($0) }
-        let projectFilteredSessions = baseSessions.filter { session in
-            guard let selectedProjectID else { return true }
-            return session.projectId == selectedProjectID
-        }
+        let projectFilteredSessions = filteredSessions(
+            among: candidates,
+            selectedProjectID: selectedProjectID,
+            automatedVisibility: automatedVisibility,
+            profileFilter: profileFilter
+        )
         let localMatches = projectFilteredSessions.filter { session in
             guard !query.isEmpty else { return true }
             return Self.searchableText(for: session).contains(query)
@@ -253,21 +314,144 @@ final class SessionListViewModel {
         return sortedLocalMatches + Self.sortedSessions(remoteMatches)
     }
 
-    func scheduledSessionGroups(
+    /// Every filter but the search query, in one pass.
+    private func filteredSessions(
+        among candidates: [SessionSummary],
+        selectedProjectID: String?,
+        automatedVisibility: AutomatedSessionVisibility,
+        profileFilter: String?
+    ) -> [SessionSummary] {
+        candidates.filter { session in
+            automatedVisibility.shows(session)
+                && (selectedProjectID == nil || session.projectId == selectedProjectID)
+                && matchesProfileFilter(session, profileFilter)
+        }
+    }
+
+    /// The visible rows split into Scheduled, per-platform messaging, and
+    /// ordinary rows. The Scheduled badge counts every non-archived cron row
+    /// of the filtered profiles (#125: not narrowed by project or search); a
+    /// messaging badge counts its platform's rows without the search query.
+    func sessionListGroups(
         searchText: String,
         selectedProjectID: String?,
-        automatedVisibility: AutomatedSessionVisibility = .showAll
-    ) -> ScheduledSessionGroups {
-        ScheduledSessionGroups(
-            partitioning: visibleSessions(
-                searchText: searchText,
-                selectedProjectID: selectedProjectID,
-                automatedVisibility: automatedVisibility
-            ),
-            totalScheduledCount: automatedVisibility.showsCron
-                ? sessions.filter { $0.isCronSession && $0.archived != true }.count
-                : 0
+        automatedVisibility: AutomatedSessionVisibility = .showAll,
+        profileFilter: String? = nil
+    ) -> SessionListGroups {
+        let visible = visibleSessions(
+            searchText: searchText,
+            selectedProjectID: selectedProjectID,
+            automatedVisibility: automatedVisibility,
+            profileFilter: profileFilter
         )
+        var messagingTotals: [String: Int]?
+        if !Self.normalizedSearchQuery(searchText).isEmpty {
+            var totals: [String: Int] = [:]
+            for session in filteredSessions(
+                among: sessions,
+                selectedProjectID: selectedProjectID,
+                automatedVisibility: automatedVisibility,
+                profileFilter: profileFilter
+            ) where !session.isCronSession {
+                if let platform = session.messagingPlatform { totals[platform, default: 0] += 1 }
+            }
+            messagingTotals = totals
+        }
+
+        return SessionListGroups(
+            partitioning: visible,
+            totalScheduledCount: automatedVisibility.showsCron
+                ? sessions.filter {
+                    $0.isCronSession && $0.archived != true && matchesProfileFilter($0, profileFilter)
+                }.count
+                : 0,
+            messagingTotals: messagingTotals
+        )
+    }
+
+    // MARK: - Profiles in the list
+
+    /// The server's default profile: the one flagged `is_default`, else `default`.
+    var defaultProfileName: String {
+        profileOptions.first { $0.isDefault == true }?.normalizedName ?? "default"
+    }
+
+    /// Whether rows may come from more than one profile, so they name theirs.
+    /// False in single-profile mode and when the server listed only the
+    /// active profile.
+    var showsRowProfiles: Bool {
+        !isSingleProfileMode && listsAllProfiles != false
+    }
+
+    /// The profile a row belongs to; rows that name none belong to the default.
+    func profileName(of session: SessionSummary) -> String {
+        Self.nonEmpty(session.profile) ?? defaultProfileName
+    }
+
+    /// How the profile filter names a profile: `default` reads "Default".
+    func profileDisplayName(_ name: String) -> String {
+        profileOptions.first { $0.normalizedName == name }?.displayName
+            ?? (name == "default" ? String(localized: "Default") : name)
+    }
+
+    /// The row's profile chip: its profile's name, only for a profile other
+    /// than the default while rows can come from several profiles.
+    func profileChipLabel(for session: SessionSummary) -> String? {
+        guard showsRowProfiles,
+              let profile = Self.nonEmpty(session.profile),
+              profile != defaultProfileName
+        else { return nil }
+        return profile
+    }
+
+    /// The profiles the list can be narrowed to, empty when there is nothing
+    /// to choose between. Offline, before the profile list loads, the cached
+    /// rows' own profiles stand in.
+    var profileFilterOptions: [String] {
+        guard showsRowProfiles else { return [] }
+        var names = profileOptions.compactMap(\.normalizedName)
+        if names.isEmpty {
+            var seen = Set<String>()
+            names = sessions.map(profileName(of:)).filter { seen.insert($0).inserted }.sorted()
+        }
+        return names.count > 1 ? names : []
+    }
+
+    /// `stored` when it still names a filterable profile, else nil (all
+    /// profiles), so a filter for a removed profile never empties the list.
+    func effectiveProfileFilter(_ stored: String?) -> String? {
+        guard let stored = Self.nonEmpty(stored), profileFilterOptions.contains(stored) else { return nil }
+        return stored
+    }
+
+    /// The projects the Projects section lists under `profileFilter`.
+    func visibleProjects(profileFilter: String?) -> [ProjectSummary] {
+        guard let profileFilter else { return projects }
+        return projects.filter { (Self.nonEmpty($0.profile) ?? defaultProfileName) == profileFilter }
+    }
+
+    /// The count a Projects row shows: its sessions the list would show.
+    func sessionCount(
+        inProject project: ProjectSummary,
+        automatedVisibility: AutomatedSessionVisibility,
+        profileFilter: String?
+    ) -> Int {
+        guard let projectID = project.projectId else { return 0 }
+        return sessions.filter { session in
+            session.projectId == projectID
+                && automatedVisibility.shows(session)
+                && matchesProfileFilter(session, profileFilter)
+        }.count
+    }
+
+    /// The projects `session` can move into: its own profile's.
+    func moveTargets(for session: SessionSummary) -> [ProjectSummary] {
+        visibleProjects(profileFilter: showsRowProfiles ? profileName(of: session) : nil)
+    }
+
+    private func matchesProfileFilter(_ session: SessionSummary, _ profileFilter: String?) -> Bool {
+        guard let profileFilter else { return true }
+        return profileName(of: session) == profileFilter
     }
 
     @discardableResult
@@ -297,8 +481,13 @@ final class SessionListViewModel {
         }
 
         do {
-            let response = try await client.sessions()
+            let response = try await client.sessions(allProfiles: true)
             guard revision == returnRevision else { return false }
+            listsAllProfiles = response.allProfiles ?? false
+            if let serverProfile = Self.nonEmpty(response.activeProfile) {
+                serverProfileName = serverProfile
+                serverProfileIsUncertain = false
+            }
             let allSessions = response.sessions ?? []
             let visibleSessions = allSessions
                 .filter {
@@ -403,6 +592,8 @@ final class SessionListViewModel {
             }
 
             let resolvedName = Self.nonEmpty(response.active) ?? profileName
+            // A pick is never a move for a row, even onto the profile a row moved to.
+            profileMovedForRow = nil
             // The switch response has no `single_profile_mode` field; carry the
             // last known value forward so the switcher visibility doesn't flap.
             let profileResponse = ProfilesResponse(
@@ -450,7 +641,12 @@ final class SessionListViewModel {
             guard !Task.isCancelled, activeRemoteSearchQuery == query else { return }
 
             isSearchingRemoteSessions = true
-            let response = try await client.searchSessions(query: query, content: content, depth: depth)
+            let response = try await client.searchSessions(
+                query: query,
+                content: content,
+                depth: depth,
+                allProfiles: true
+            )
 
             guard !Task.isCancelled, activeRemoteSearchQuery == query else { return }
 
@@ -724,8 +920,10 @@ final class SessionListViewModel {
         let sessionID = rawSessionID.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !sessionID.isEmpty else { return nil }
 
+        // A linked row on another profile opens like a tapped one: the server
+        // moves to its profile first.
         if !isPush, let loadedSession = sessions.first(where: { $0.sessionId == sessionID }) {
-            return loadedSession
+            return await moveServerProfile(toProfileOf: loadedSession) ? loadedSession : nil
         }
 
         actionErrorMessage = nil
@@ -735,15 +933,29 @@ final class SessionListViewModel {
             do {
                 if let cachedSession = try CacheStore.cachedSessions(serverURL: server, in: modelContext)
                     .first(where: { $0.sessionId == sessionID }) {
-                    return cachedSession
+                    return await moveServerProfile(toProfileOf: cachedSession) ? cachedSession : nil
                 }
             } catch {
                 cacheErrorMessage = error.localizedDescription
             }
         }
 
+        // A push still reads the session live, but a listed row already says
+        // which profile the server must be on.
+        if let listedSession = sessions.first(where: { $0.sessionId == sessionID }) {
+            guard await moveServerProfile(toProfileOf: listedSession) else { return nil }
+        }
+
         do {
-            let response = try await client.session(id: sessionID, includeMessages: false, messageLimit: nil)
+            let response: SessionResponse
+            do {
+                response = try await client.session(id: sessionID, includeMessages: false, messageLimit: nil)
+            } catch let error as APIError {
+                // The session lives on another profile: move there, then ask again once.
+                guard let owner = error.mismatchedSessionProfile, !Task.isCancelled else { throw error }
+                guard await moveServerProfile(to: owner, force: true) else { return nil }
+                response = try await client.session(id: sessionID, includeMessages: false, messageLimit: nil)
+            }
             guard !Task.isCancelled else { return nil }
             guard let sessionDetail = response.session else {
                 if isPush { return nil }
@@ -777,9 +989,12 @@ final class SessionListViewModel {
         }
     }
 
-    /// Imports external sessions before navigation, matching hermes-webui's
-    /// `_openSidebarSession`. A newer tap invalidates any older response so a
-    /// slow import cannot replace the user's current destination.
+    /// Moves the server to a row's profile, then imports external sessions
+    /// before navigation, matching hermes-webui's `_openSidebarSession`. The
+    /// server refuses every request for another profile's session, so the
+    /// chat must not open until the move succeeds. A newer tap invalidates any
+    /// older response so a slow import cannot replace the user's current
+    /// destination.
     func sessionForOpening(
         _ session: SessionSummary,
         modelContext: ModelContext? = nil
@@ -789,9 +1004,12 @@ final class SessionListViewModel {
         actionErrorMessage = nil
         lastError = nil
 
-        guard !isViewingCachedData, session.requiresExternalImport else {
-            return session
-        }
+        guard !isViewingCachedData else { return session }
+
+        guard await moveServerProfile(toProfileOf: session) else { return nil }
+        guard !Task.isCancelled, generation == sessionOpenGeneration else { return nil }
+
+        guard session.requiresExternalImport else { return session }
 
         guard let sessionID = Self.nonEmpty(session.sessionId) else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
@@ -891,6 +1109,51 @@ final class SessionListViewModel {
         actionErrorMessage = (error as? APIError)?.serverMessage ?? error.localizedDescription
     }
 
+    /// Moves the server to `session`'s profile before a session-scoped
+    /// request; see `moveServerProfile(to:)`.
+    private func moveServerProfile(toProfileOf session: SessionSummary) async -> Bool {
+        guard let profile = Self.nonEmpty(session.profile) else { return true }
+        return await moveServerProfile(to: profile)
+    }
+
+    /// Switches this client's server profile (the `hermes_profile` cookie) to
+    /// `profile` when it is elsewhere, because the server answers any
+    /// session-scoped request for another profile's session with 409. The pick
+    /// stays: New Chat moves the server back to it. Returns false after
+    /// surfacing a failed switch. Nothing to do in single-profile mode,
+    /// offline, or before the server's profile is known, unless the server
+    /// has just said the profile is elsewhere (`force`).
+    private func moveServerProfile(to profile: String, force: Bool = false) async -> Bool {
+        if !force {
+            guard !isSingleProfileMode, !isViewingCachedData,
+                  let current = serverProfileName ?? activeProfileName,
+                  current != profile || serverProfileIsUncertain
+            else { return true }
+        }
+
+        serverProfileIsUncertain = true
+        do {
+            let response = try await client.switchProfile(name: profile)
+            if let message = Self.nonEmpty(response.error) {
+                actionErrorMessage = String(localized: "Could not switch to the “\(profile)” profile: \(message)")
+                return false
+            }
+
+            let serverProfile = Self.nonEmpty(response.active) ?? profile
+            serverProfileName = serverProfile
+            serverProfileIsUncertain = false
+            profileMovedForRow = serverProfile == activeProfileName ? nil : serverProfile
+            return true
+        } catch {
+            guard !isCancellationError(error) else { return false }
+
+            lastError = error
+            let detail = (error as? APIError)?.serverMessage ?? error.localizedDescription
+            actionErrorMessage = String(localized: "Could not switch to the “\(profile)” profile: \(detail)")
+            return false
+        }
+    }
+
     func invalidateSessionOpening() {
         sessionOpenGeneration &+= 1
     }
@@ -908,6 +1171,7 @@ final class SessionListViewModel {
 
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
+        guard await moveServerProfile(toProfileOf: session) else { return false }
 
         return await mutate(modelContext: modelContext, animation: animation) {
             try await sessionMutator.setPinned(pinned, sessionID: sessionId)
@@ -926,6 +1190,7 @@ final class SessionListViewModel {
 
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
+        guard await moveServerProfile(toProfileOf: session) else { return false }
 
         return await mutate(modelContext: modelContext, animation: animation) {
             try await sessionMutator.archive(sessionID: sessionId)
@@ -944,6 +1209,7 @@ final class SessionListViewModel {
 
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
+        guard await moveServerProfile(toProfileOf: session) else { return false }
 
         return await mutate(modelContext: modelContext, animation: animation) {
             try await sessionMutator.delete(sessionID: sessionId)
@@ -975,6 +1241,7 @@ final class SessionListViewModel {
         actionErrorMessage = nil
         lastError = nil
         defer { isRenamingSession = false }
+        guard await moveServerProfile(toProfileOf: session) else { return false }
 
         do {
             let response = try await sessionMutator.rename(sessionID: sessionId, title: title)
@@ -1024,6 +1291,7 @@ final class SessionListViewModel {
 
         actionErrorMessage = nil
         lastError = nil
+        guard await moveServerProfile(toProfileOf: session) else { return nil }
 
         do {
             let result = try await sessionMutator.duplicate(sessionID: sessionId)
@@ -1077,6 +1345,7 @@ final class SessionListViewModel {
 
         actionErrorMessage = nil
         lastError = nil
+        guard await moveServerProfile(toProfileOf: session) else { return nil }
 
         do {
             let file = try await client.exportSession(
@@ -1108,7 +1377,7 @@ final class SessionListViewModel {
         defer { isLoadingProjects = false }
 
         do {
-            let response = try await client.projects()
+            let response = try await client.projects(allProfiles: true)
             projects = response.projects ?? []
         } catch {
             guard !isCancellationError(error) else { return }
@@ -1129,6 +1398,7 @@ final class SessionListViewModel {
 
         isMovingSession = true
         defer { isMovingSession = false }
+        guard await moveServerProfile(toProfileOf: session) else { return }
 
         _ = await mutate(modelContext: modelContext) {
             try await sessionMutator.move(sessionID: sessionId, to: projectID)
@@ -1303,12 +1573,19 @@ final class SessionListViewModel {
     /// or on the list's active profile for the "+" button / plain New Chat. The profile is
     /// sent explicitly so the session never depends on the client's active-profile cookie,
     /// which an opened chat may have moved; only a list that never loaded its profile
-    /// leaves the choice to the server.
+    /// leaves the choice to the server. Plain New Chat also moves the server back to
+    /// the list's profile first when opening a row left it elsewhere: the new chat's
+    /// own requests would otherwise be refused, and its workspace comes from the
+    /// server's profile.
     func createSession(modelContext: ModelContext? = nil, profile: String? = nil) async -> SessionSummary? {
         isCreatingSession = true
         actionErrorMessage = nil
         lastError = nil
         defer { isCreatingSession = false }
+
+        if Self.nonEmpty(profile) == nil, let activeProfileName {
+            guard await moveServerProfile(to: activeProfileName) else { return nil }
+        }
 
         do {
             let workspaces = try await client.workspaces()
@@ -1526,8 +1803,23 @@ final class SessionListViewModel {
             ProfileEntityProvider.refreshAppShortcuts(changed: changed)
         }
 
-        let profileName = response.effectiveDefaultProfileName
-        let profile = response.profile(matching: profileName) ?? fallbackProfile
+        // The server's profile becomes the pick unless it is only where the
+        // list moved it to reach a row. Any other move (Settings, a chat's
+        // profile picker) is the user choosing a profile.
+        let serverProfile = response.effectiveDefaultProfileName
+        let keepsPick = activeProfileName != nil
+            && serverProfile != nil
+            && serverProfile == profileMovedForRow
+        if let serverProfile {
+            serverProfileName = serverProfile
+            serverProfileIsUncertain = false
+        }
+        if !keepsPick {
+            profileMovedForRow = nil
+        }
+
+        let profileName = keepsPick ? activeProfileName : serverProfile
+        let profile = response.profile(matching: profileName) ?? (keepsPick ? nil : fallbackProfile)
 
         activeProfileName = profileName
         activeProfileDisplayName = response.displayName(for: profileName)

@@ -5,8 +5,9 @@ enum Endpoint {
     case authStatus
     case login
     case logout
-    case sessions(includeArchived: Bool = false, archivedLimit: Int? = nil)
-    case sessionsSearch(query: String, content: Bool, depth: Int)
+    /// `allProfiles` asks for every profile's rows (`all_profiles=1`).
+    case sessions(includeArchived: Bool = false, archivedLimit: Int? = nil, allProfiles: Bool = false)
+    case sessionsSearch(query: String, content: Bool, depth: Int, allProfiles: Bool = false)
     case session(id: String, includeMessages: Bool, messageLimit: Int?, messageBefore: Int?, expandRenderable: Bool = false)
     case sessionStatus(id: String)
     case importCLISession
@@ -30,7 +31,7 @@ enum Endpoint {
     case moveSession
     case sessionYolo(sessionID: String?)
     case exportSession(sessionID: String, format: SessionExportFormat)
-    case projects
+    case projects(allProfiles: Bool = false)
     case createProject
     case renameProject
     case deleteProject
@@ -407,24 +408,34 @@ enum Endpoint {
 
     var queryItems: [URLQueryItem] {
         switch self {
-        case let .sessions(includeArchived, archivedLimit):
+        case let .sessions(includeArchived, archivedLimit, allProfiles):
             // Opt-in (issue #17): the server's default response excludes archived
             // rows, so the main list request stays byte-identical when off.
             // `archived_limit` only means something alongside `include_archived=1`
             // (`_query_positive_int` in upstream routes.py), so it is only sent then.
-            guard includeArchived else { return [] }
-
-            var items = [URLQueryItem(name: "include_archived", value: "1")]
-            if let archivedLimit {
-                items.append(URLQueryItem(name: "archived_limit", value: "\(archivedLimit)"))
+            var items: [URLQueryItem] = []
+            if includeArchived {
+                items.append(URLQueryItem(name: "include_archived", value: "1"))
+                if let archivedLimit {
+                    items.append(URLQueryItem(name: "archived_limit", value: "\(archivedLimit)"))
+                }
+            }
+            if allProfiles {
+                items.append(URLQueryItem(name: "all_profiles", value: "1"))
             }
             return items
-        case let .sessionsSearch(query, content, depth):
-            return [
+        case let .sessionsSearch(query, content, depth, allProfiles):
+            var items = [
                 URLQueryItem(name: "q", value: query),
                 URLQueryItem(name: "content", value: content ? "1" : "0"),
                 URLQueryItem(name: "depth", value: "\(depth)")
             ]
+            if allProfiles {
+                items.append(URLQueryItem(name: "all_profiles", value: "1"))
+            }
+            return items
+        case let .projects(allProfiles):
+            return allProfiles ? [URLQueryItem(name: "all_profiles", value: "1")] : []
         case let .session(id, includeMessages, messageLimit, messageBefore, expandRenderable):
             var items = [
                 URLQueryItem(name: "session_id", value: id),

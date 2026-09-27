@@ -84,6 +84,16 @@ enum APIError: LocalizedError {
         return Self.serverErrorMessage(from: body)
     }
 
+    /// The owning profile of a 409 `session_profile_mismatch`: the session
+    /// belongs to another profile than the one this client's cookie selects.
+    var mismatchedSessionProfile: String? {
+        guard case .http(let statusCode, let body) = self, statusCode == 409,
+              let payload = Self.serverErrorPayload(from: body),
+              payload.code == "session_profile_mismatch"
+        else { return nil }
+        return payload.profile?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+    }
+
     var activeStreamID: String? {
         guard case .http(let statusCode, let body) = self, statusCode == 409 else { return nil }
         return Self.serverErrorPayload(from: body)?.activeStreamId?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
@@ -127,9 +137,10 @@ private extension APIError {
         let code: String?
         let stale: Bool?
         let activeStreamId: String?
+        let profile: String?
 
         enum CodingKeys: String, CodingKey {
-            case error, message, detail, code, stale
+            case error, message, detail, code, stale, profile
             case activeStreamId = "active_stream_id"
         }
     }

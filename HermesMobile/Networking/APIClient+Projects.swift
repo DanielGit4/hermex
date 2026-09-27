@@ -1,8 +1,9 @@
 import Foundation
 
 extension APIClient {
-    func projects() async throws -> ProjectsResponse {
-        try await send(endpoint: .projects, method: "GET")
+    /// `allProfiles` asks for every profile's projects, each carrying its `profile`.
+    func projects(allProfiles: Bool = false) async throws -> ProjectsResponse {
+        try await send(endpoint: .projects(allProfiles: allProfiles), method: "GET")
     }
 
     func createProject(name: String, color: String?) async throws -> ProjectMutationResponse {

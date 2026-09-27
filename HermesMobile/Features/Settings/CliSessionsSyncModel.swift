@@ -14,42 +14,58 @@ import Observation
 /// Storage is per-server (`SessionRowDisplaySettings.showCliSessionsKey(for:)`)
 /// so an adopted value on server A can never leak into server B
 /// (docs/agents/multi-server-state-isolation.md).
+///
+/// "Show previous messaging sessions" mirrors `show_previous_messaging_sessions`
+/// the same way, with one difference: the server alone applies it, so a server
+/// that never reports the key has no toggle to offer (`serverSyncsPreviousMessagingSessions`).
 @MainActor
 @Observable
 final class CliSessionsSyncModel {
     private(set) var showsCliSessions: Bool
     private(set) var showsClaudeCodeSessions: Bool
+    private(set) var showsPreviousMessagingSessions: Bool
     /// True once the active server has reported `show_cli_sessions` — only then
     /// do toggle changes write back. Older servers stay local-only.
     private(set) var serverSyncsCliSessions = false
     private(set) var serverSyncsClaudeCodeSessions = false
+    private(set) var serverSyncsPreviousMessagingSessions = false
     private(set) var syncErrorMessage: String?
     private(set) var claudeCodeSyncErrorMessage: String?
+    private(set) var previousMessagingSyncErrorMessage: String?
     /// The in-flight write, exposed so callers (and tests) can await it.
     private(set) var pendingWrite: Task<Void, Never>?
     private(set) var pendingClaudeCodeWrite: Task<Void, Never>?
+    private(set) var pendingPreviousMessagingWrite: Task<Void, Never>?
 
     private let server: URL
     private let defaults: UserDefaults
     private let writeToServer: @MainActor (Bool) async throws -> Void
     private let writeClaudeCodeToServer: @MainActor (Bool) async throws -> Void
+    private let writePreviousMessagingToServer: @MainActor (Bool) async throws -> Void
     /// Invalidates stale write completions: only the latest toggle change may
     /// revert the value or publish an error.
     private var writeGeneration = 0
     private var claudeCodeWriteGeneration = 0
+    private var previousMessagingWriteGeneration = 0
 
     init(
         server: URL,
         defaults: UserDefaults = .standard,
         writeToServer: @escaping @MainActor (Bool) async throws -> Void,
-        writeClaudeCodeToServer: @escaping @MainActor (Bool) async throws -> Void = { _ in }
+        writeClaudeCodeToServer: @escaping @MainActor (Bool) async throws -> Void = { _ in },
+        writePreviousMessagingToServer: @escaping @MainActor (Bool) async throws -> Void = { _ in }
     ) {
         self.server = server
         self.defaults = defaults
         self.writeToServer = writeToServer
         self.writeClaudeCodeToServer = writeClaudeCodeToServer
+        self.writePreviousMessagingToServer = writePreviousMessagingToServer
         showsCliSessions = SessionRowDisplaySettings.showsCliSessions(for: server, in: defaults)
         showsClaudeCodeSessions = SessionRowDisplaySettings.showsClaudeCodeSessions(
+            for: server,
+            in: defaults
+        )
+        showsPreviousMessagingSessions = SessionRowDisplaySettings.showsPreviousMessagingSessions(
             for: server,
             in: defaults
         )
@@ -80,6 +96,19 @@ final class CliSessionsSyncModel {
         serverSyncsClaudeCodeSessions = true
         claudeCodeSyncErrorMessage = nil
         persistClaudeCode(serverValue)
+    }
+
+    /// Mirrors `adopt(serverValue:)` for `show_previous_messaging_sessions`.
+    /// Never writes back: only a user toggle changes the server's value.
+    func adoptPreviousMessaging(serverValue: Bool?) {
+        guard let serverValue else {
+            serverSyncsPreviousMessagingSessions = false
+            return
+        }
+
+        serverSyncsPreviousMessagingSessions = true
+        previousMessagingSyncErrorMessage = nil
+        persistPreviousMessaging(serverValue)
     }
 
     /// Applies a user toggle: optimistic local update, then the server write.
@@ -149,6 +178,34 @@ final class CliSessionsSyncModel {
         }
     }
 
+    /// Writes the user's choice to the server, serialized and reverted on
+    /// failure like the other toggles. Without a reported server value there
+    /// is nothing to change.
+    func setShowsPreviousMessagingSessions(_ newValue: Bool) {
+        guard serverSyncsPreviousMessagingSessions, newValue != showsPreviousMessagingSessions else { return }
+
+        let previousValue = showsPreviousMessagingSessions
+        persistPreviousMessaging(newValue)
+        previousMessagingSyncErrorMessage = nil
+
+        previousMessagingWriteGeneration += 1
+        let generation = previousMessagingWriteGeneration
+        let predecessor = pendingPreviousMessagingWrite
+        pendingPreviousMessagingWrite = Task { [weak self] in
+            await predecessor?.value
+            guard let self, self.previousMessagingWriteGeneration == generation else { return }
+            do {
+                try await self.writePreviousMessagingToServer(newValue)
+            } catch {
+                guard self.previousMessagingWriteGeneration == generation else { return }
+                self.persistPreviousMessaging(previousValue)
+                self.previousMessagingSyncErrorMessage = String(
+                    localized: "Could not save to the server. The toggle was reverted."
+                )
+            }
+        }
+    }
+
     private func persist(_ value: Bool) {
         showsCliSessions = value
         defaults.set(value, forKey: SessionRowDisplaySettings.showCliSessionsKey(for: server))
@@ -159,6 +216,14 @@ final class CliSessionsSyncModel {
         defaults.set(
             value,
             forKey: SessionRowDisplaySettings.showClaudeCodeSessionsKey(for: server)
+        )
+    }
+
+    private func persistPreviousMessaging(_ value: Bool) {
+        showsPreviousMessagingSessions = value
+        defaults.set(
+            value,
+            forKey: SessionRowDisplaySettings.showPreviousMessagingSessionsKey(for: server)
         )
     }
 }
