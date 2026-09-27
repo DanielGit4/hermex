@@ -4322,6 +4322,235 @@ final class ChatViewModelSendTests: XCTestCase {
         )
     }
 
+    /// A 500-message session whose newest 50 are cached: the server answers
+    /// the cold open with that same window, so no row may change identity.
+    @MainActor
+    func testCacheFirstPaintKeepsEveryRenderIDWhenTheServerReturnsTheCachedWindow() async throws {
+        let context = try makeContext()
+        try cacheLongSessionWindow(450..<500, in: context)
+        let viewModel = try makeViewModel { request in
+            Self.longSessionWindowResponse(450..<500, for: request)
+        }
+
+        viewModel.prepareInitialMessageLoad(modelContext: context)
+        let paintedRenderIDs = viewModel.displayedTranscriptMessages.map(\.renderID)
+        XCTAssertEqual(paintedRenderIDs.first, "transcript:450")
+        XCTAssertEqual(viewModel.messagesOffset, 450)
+        XCTAssertTrue(viewModel.hasOlderMessages, "Load earlier must show while the cache paints")
+        XCTAssertEqual(
+            viewModel.actionContext(for: viewModel.messages[10], visibleIndex: 10)?.fullHistoryIndex, 460,
+            "An edit from the paint must truncate at the message's real index"
+        )
+
+        await viewModel.loadMessages(modelContext: context, usesInitialPrefetch: true)
+
+        XCTAssertEqual(viewModel.displayedTranscriptMessages.map(\.renderID), paintedRenderIDs)
+        XCTAssertEqual(viewModel.messages.map(\.messageId), Self.longSessionMessages(450..<500).map(\.messageId))
+        XCTAssertEqual(viewModel.messagesOffset, 450)
+        XCTAssertTrue(viewModel.hasOlderMessages)
+    }
+
+    /// The server's window can reach further back than the paint (it counts
+    /// messages differently): every server row shows, and rows the paint
+    /// already showed keep their identity.
+    @MainActor
+    func testCacheFirstPaintKeepsRenderIDsWhenTheServerWindowReachesFurtherBack() async throws {
+        let context = try makeContext()
+        try cacheLongSessionWindow(400..<500, in: context)
+        let viewModel = try makeViewModel { request in
+            Self.longSessionWindowResponse(433..<500, for: request)
+        }
+
+        viewModel.prepareInitialMessageLoad(modelContext: context)
+        XCTAssertEqual(viewModel.messagesOffset, 450)
+        let paintedRenderIDs = Self.renderIDsByMessageID(viewModel.displayedTranscriptMessages)
+
+        await viewModel.loadMessages(modelContext: context, usesInitialPrefetch: true)
+
+        XCTAssertEqual(viewModel.messages.map(\.messageId), Self.longSessionMessages(433..<500).map(\.messageId))
+        XCTAssertEqual(viewModel.messagesOffset, 433)
+        let reconciledRenderIDs = Self.renderIDsByMessageID(viewModel.displayedTranscriptMessages)
+        XCTAssertEqual(paintedRenderIDs.count, 50)
+        for (messageID, renderID) in paintedRenderIDs {
+            XCTAssertEqual(reconciledRenderIDs[messageID], renderID, "\(messageID) changed identity")
+        }
+    }
+
+    /// The session grew since it was cached: the server window starts later
+    /// than the paint, and the paint's head must not stay above it.
+    @MainActor
+    func testCacheFirstPaintDropsItsStaleHeadWhenTheSessionGrew() async throws {
+        let context = try makeContext()
+        try cacheLongSessionWindow(450..<500, in: context)
+        let viewModel = try makeViewModel { request in
+            Self.longSessionWindowResponse(470..<520, messageCount: 520, for: request)
+        }
+
+        viewModel.prepareInitialMessageLoad(modelContext: context)
+        let paintedRenderIDs = Self.renderIDsByMessageID(viewModel.displayedTranscriptMessages)
+
+        await viewModel.loadMessages(modelContext: context, usesInitialPrefetch: true)
+
+        XCTAssertEqual(viewModel.messages.map(\.messageId), Self.longSessionMessages(470..<520).map(\.messageId))
+        XCTAssertEqual(viewModel.messagesOffset, 470)
+        XCTAssertTrue(viewModel.hasOlderMessages)
+        let reconciledRenderIDs = Self.renderIDsByMessageID(viewModel.displayedTranscriptMessages)
+        for index in 470..<500 {
+            XCTAssertEqual(reconciledRenderIDs["message-\(index)"], paintedRenderIDs["message-\(index)"])
+        }
+    }
+
+    /// "Load earlier" works while the cache paints, and the server window that
+    /// arrives afterwards merges below that page instead of replacing it.
+    @MainActor
+    func testOlderPageLoadedWhileTheCacheFirstPaintAwaitsTheServerSurvivesTheReconcile() async throws {
+        try await loadOlderPageDuringTheCacheFirstPaint(beforeTheInitialLoadStarts: false)
+    }
+
+    /// The same, with the page loaded during the push, before the initial load
+    /// has even started.
+    @MainActor
+    func testOlderPageLoadedBeforeTheInitialLoadStartsSurvivesTheReconcile() async throws {
+        try await loadOlderPageDuringTheCacheFirstPaint(beforeTheInitialLoadStarts: true)
+    }
+
+    @MainActor
+    private func loadOlderPageDuringTheCacheFirstPaint(beforeTheInitialLoadStarts: Bool) async throws {
+        let context = try makeContext()
+        try cacheLongSessionWindow(450..<500, in: context)
+        let newestWindowRequested = expectation(description: "newest window requested")
+        let releaseNewestWindow = DispatchSemaphore(value: 0)
+        let viewModel = try makeViewModel { request in
+            let query = URLComponents(url: try XCTUnwrap(request.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
+            if let before = query.first(where: { $0.name == "msg_before" })?.value {
+                XCTAssertEqual(before, "450")
+                return Self.longSessionWindowResponse(400..<450, for: request)
+            }
+            newestWindowRequested.fulfill()
+            XCTAssertEqual(releaseNewestWindow.wait(timeout: .now() + .seconds(5)), .success)
+            return Self.longSessionWindowResponse(433..<500, for: request)
+        }
+        defer { releaseNewestWindow.signal() }
+
+        viewModel.prepareInitialMessageLoad(modelContext: context)
+        await fulfillment(of: [newestWindowRequested], timeout: 2)
+        var initialLoad: Task<Void, Never>?
+        if !beforeTheInitialLoadStarts {
+            initialLoad = Task { @MainActor in
+                await viewModel.loadMessages(modelContext: context, usesInitialPrefetch: true)
+            }
+            // Let it capture the paint and wait on the held server window.
+            await drainMainActor()
+        }
+        let didLoadOlder = await viewModel.loadOlderMessages(modelContext: context)
+        XCTAssertTrue(didLoadOlder)
+        XCTAssertEqual(viewModel.messagesOffset, 400)
+        let renderIDs = viewModel.displayedTranscriptMessages.map(\.renderID)
+
+        releaseNewestWindow.signal()
+        if let initialLoad {
+            await initialLoad.value
+        } else {
+            await viewModel.loadMessages(modelContext: context, usesInitialPrefetch: true)
+        }
+
+        XCTAssertEqual(viewModel.messages.map(\.messageId), Self.longSessionMessages(400..<500).map(\.messageId))
+        XCTAssertEqual(viewModel.messagesOffset, 400)
+        XCTAssertTrue(viewModel.hasOlderMessages)
+        XCTAssertEqual(viewModel.displayedTranscriptMessages.map(\.renderID), renderIDs)
+    }
+
+    @MainActor
+    func testOfflineFallbackKeepsTheCachedWindowsOffsetWithoutOfferingOlderMessages() async throws {
+        let context = try makeContext()
+        try cacheLongSessionWindow(450..<500, in: context)
+        let viewModel = try makeViewModel { _ in
+            throw URLError(.notConnectedToInternet)
+        }
+
+        await viewModel.loadMessages(modelContext: context)
+
+        XCTAssertTrue(viewModel.isViewingCachedData)
+        XCTAssertEqual(viewModel.messages.map(\.messageId), Self.longSessionMessages(450..<500).map(\.messageId))
+        XCTAssertEqual(viewModel.messagesOffset, 450)
+        XCTAssertEqual(viewModel.displayedTranscriptMessages.first?.renderID, "transcript:450")
+        XCTAssertFalse(viewModel.hasOlderMessages, "Offline, pull-to-refresh must reload rather than page")
+    }
+
+    /// When the server rejects the load, the paint stays but cannot page:
+    /// pull-to-refresh must retry the load instead of asking for older messages.
+    @MainActor
+    func testFailedLoadAfterTheCacheFirstPaintStopsOfferingOlderMessages() async throws {
+        let context = try makeContext()
+        try cacheLongSessionWindow(450..<500, in: context)
+        let viewModel = try makeViewModel { request in
+            apiTestJSONResponse(#"{"error":"boom"}"#, for: request, status: 500)
+        }
+
+        viewModel.prepareInitialMessageLoad(modelContext: context)
+        XCTAssertTrue(viewModel.hasOlderMessages)
+        await viewModel.loadMessages(modelContext: context, usesInitialPrefetch: true)
+
+        XCTAssertNotNil(viewModel.errorMessage)
+        XCTAssertEqual(viewModel.messagesOffset, 450)
+        XCTAssertFalse(viewModel.hasOlderMessages)
+    }
+
+    /// Messages at absolute indexes `range` of a long session.
+    private static func longSessionMessages(_ range: Range<Int>) -> [ChatMessage] {
+        range.map { index in
+            ChatMessage(
+                role: index.isMultiple(of: 2) ? "user" : "assistant",
+                content: "Message \(index)",
+                timestamp: Double(1_770_000_000 + index),
+                messageId: "message-\(index)"
+            )
+        }
+    }
+
+    /// Caches the messages at `range` the way a load of that window does.
+    @MainActor
+    private func cacheLongSessionWindow(_ range: Range<Int>, in context: ModelContext) throws {
+        try CacheStore.cacheMessages(
+            Self.longSessionMessages(range),
+            serverURL: try XCTUnwrap(URL(string: "https://example.test")),
+            sessionID: "session-abc",
+            in: context,
+            messagesOffset: range.lowerBound
+        )
+    }
+
+    /// `/api/session` answering with the messages at `range` of a session of
+    /// `messageCount` messages, the window hermes-webui reports by offset.
+    private static func longSessionWindowResponse(
+        _ range: Range<Int>,
+        messageCount: Int = 500,
+        for request: URLRequest
+    ) -> (HTTPURLResponse, Data) {
+        let messages = range.map { index -> [String: Any] in
+            [
+                "role": index.isMultiple(of: 2) ? "user" : "assistant",
+                "content": "Message \(index)",
+                "timestamp": 1_770_000_000 + index,
+                "message_id": "message-\(index)"
+            ]
+        }
+        let body: [String: Any] = ["session": [
+            "session_id": "session-abc",
+            "title": "Planning",
+            "messages": messages,
+            "message_count": messageCount,
+            "_messages_offset": range.lowerBound,
+            "_messages_truncated": range.lowerBound > 0
+        ] as [String: Any]]
+        let data = (try? JSONSerialization.data(withJSONObject: body)) ?? Data()
+        return apiTestJSONResponse(String(decoding: data, as: UTF8.self), for: request)
+    }
+
+    private static func renderIDsByMessageID(_ transcriptMessages: [TranscriptMessage]) -> [String: String] {
+        transcriptMessages.reduce(into: [:]) { $0[$1.message.messageId ?? ""] = $1.renderID }
+    }
+
     @MainActor
     func testNilContextReconnectPreservesInMemoryOptimisticUserMessage() async throws {
         let streamClient = SpySSEStreamingClient()

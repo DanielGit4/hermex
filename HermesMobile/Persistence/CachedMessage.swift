@@ -6,6 +6,8 @@ final class CachedMessage {
     @Attribute(.unique) var cacheKey: String
     var serverURLString: String
     var sessionID: String
+    /// The message's absolute index in its session. Rows written before this
+    /// was absolute hold their index within the cached window instead.
     var sortIndex: Int
     var role: String?
     var content: String?

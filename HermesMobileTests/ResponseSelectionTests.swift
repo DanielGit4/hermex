@@ -276,6 +276,124 @@ final class ResponseSelectionVisibilityTests: XCTestCase {
     }
 }
 
+/// The selection host rebuilds and re-measures a reply only when something it
+/// shows changed. These pin that nothing it shows is left stale.
+@MainActor
+final class ResponseSelectionHostUpdateTests: XCTestCase {
+    static let reply = String(repeating: "A settled reply that wraps onto several lines. ", count: 6)
+
+    @Observable final class Inputs {
+        var text = ResponseSelectionHostUpdateTests.reply
+        var width: CGFloat = 360
+        var dynamicTypeSize = DynamicTypeSize.large
+        /// Read only inside the hosted reply, like a diff's Show all.
+        var showsMore = false
+    }
+
+    func testDynamicTypeChangeRemeasuresTheReply() async throws {
+        let inputs = Inputs()
+        let input = try await host(inputs)
+        let height = input.bounds.height
+        XCTAssertGreaterThan(height, 60, "The reply must wrap")
+
+        inputs.dynamicTypeSize = .accessibility3
+        await renderFrames()
+        XCTAssertGreaterThan(input.bounds.height, height * 1.5, "Larger text must grow the reply")
+    }
+
+    func testNewTextReplacesTheHostedReply() async throws {
+        let inputs = Inputs()
+        let input = try await host(inputs)
+
+        inputs.text = "A different reply."
+        await renderFrames()
+        input.selectAll(nil)
+        let range = try XCTUnwrap(input.selectedTextRange)
+        XCTAssertEqual(input.text(in: range), "A different reply.\n")
+        XCTAssertLessThan(input.bounds.height, 40, "One line must shrink the reply")
+    }
+
+    func testWidthChangeRemeasuresTheReply() async throws {
+        let inputs = Inputs()
+        let input = try await host(inputs)
+        let height = input.bounds.height
+
+        inputs.width = 180
+        await renderFrames()
+        XCTAssertEqual(input.bounds.width, 180, accuracy: 0.5)
+        XCTAssertGreaterThan(input.bounds.height, height * 1.5, "A narrower reply must wrap onto more lines")
+    }
+
+    func testReplyThatResizesItselfIsRemeasured() async throws {
+        let inputs = Inputs()
+        let input = try await host(inputs)
+        let height = input.bounds.height
+
+        inputs.showsMore = true
+        await renderFrames()
+        await renderFrames()
+        XCTAssertGreaterThan(input.bounds.height, height * 1.5, "The reply's own growth must reach its frame")
+    }
+
+    private struct Reply: View {
+        let inputs: Inputs
+        let text: String
+
+        var body: some View {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(text).responseSelectableText(text)
+                if inputs.showsMore {
+                    Text(text)
+                }
+            }
+        }
+    }
+
+    private struct Host: View {
+        let inputs: Inputs
+
+        var body: some View {
+            let text = inputs.text
+            VStack(spacing: 0) {
+                ResponseTextSelection(identity: text) {
+                    Reply(inputs: inputs, text: text)
+                }
+                .frame(width: inputs.width)
+                .environment(\.dynamicTypeSize, inputs.dynamicTypeSize)
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
+    private func host(_ inputs: Inputs) async throws -> ResponseSelectionInput {
+        let controller = UIHostingController(rootView: Host(inputs: inputs))
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        addTeardownBlock { @MainActor in
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+        await renderFrames()
+        return try XCTUnwrap(selectionInput(in: controller.view))
+    }
+
+    private func selectionInput(in view: UIView) -> ResponseSelectionInput? {
+        if let input = view as? ResponseSelectionInput { return input }
+        return view.subviews.lazy.compactMap { self.selectionInput(in: $0) }.first
+    }
+
+    private func renderFrames() async {
+        let rendered = expectation(description: "Update laid out and committed")
+        let driver = ResponseSelectionFrameDriver { rendered.fulfill() }
+        driver.start()
+        await fulfillment(of: [rendered], timeout: 10)
+        driver.stop()
+    }
+}
+
 @MainActor
 private final class ResponseSelectionFrameDriver: NSObject {
     private let completion: () -> Void

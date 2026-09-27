@@ -134,6 +134,56 @@ import XCTest
         }
     }
 
+    func testReportsReopenCostInALongChat() async throws {
+        try requireReportOptIn()
+        let reopens = try await reopenHostedChat(messageCount: 500, times: 3)
+        report(reopens, scenario: "long500")
+    }
+
+    /// Reopening a cached chat paints the server's window from the cache, rows
+    /// and tool cards included, so the server's answer re-runs no row and no
+    /// bubble. Only tool-call rows re-run their block: their cards are derived
+    /// again with fresh start times. Every row used to change identity and be
+    /// built a second time (about 950 ms in a 500-message chat).
+    func testReopeningACachedChatRebuildsNoBubbleWhenTheServerWindowArrives() async throws {
+        let reopens = try await reopenHostedChat(messageCount: 120, times: 1)
+        report(reopens, scenario: "regression120")
+        let reopen = try XCTUnwrap(reopens.first)
+
+        let messages = ChatTypingFixture.messages(count: 120)
+        let toolCallRows = messages[ChatTypingFixture.newestWindowStart(of: messages)...]
+            .filter { $0["tool_calls"] != nil }
+            .count
+        XCTAssertGreaterThan(reopen.paintBubbles, 0, "The cache must paint before the server answers")
+        XCTAssertEqual(reopen.passes[.messageBubble] ?? 0, 0, "The server window rebuilt bubbles whose content did not change")
+        XCTAssertEqual(reopen.passes[.transcriptRow] ?? 0, 0, "The server window re-ran rows whose content did not change")
+        XCTAssertLessThanOrEqual(
+            reopen.passes[.transcriptBlock] ?? 0, toolCallRows,
+            "Only tool-call rows may re-run their block"
+        )
+    }
+
+    func testReportsOwnerPassCostInALongChat() async throws {
+        try requireReportOptIn()
+        let passes = try await forceOwnerPassesInHostedChat(messageCount: 500, count: 3)
+        report(passes, scenario: "long500", label: "OWNER-PASS-PERF")
+    }
+
+    /// A `ChatView` pass that changes no row's data, the kind a button
+    /// appearing or a status changing causes, neither rewrites nor re-measures
+    /// a reply's selection host. It did both for every reply (about 200 ms of
+    /// a 300 ms pass in a 500-message chat).
+    func testAnOwnerPassWithUnchangedRowsLeavesEveryReplyHostAlone() async throws {
+        let passes = try await forceOwnerPassesInHostedChat(messageCount: 40, count: 2)
+        report(passes, scenario: "regression40", label: "OWNER-PASS-PERF")
+
+        for pass in passes {
+            XCTAssertGreaterThanOrEqual(pass.passes[.chatView] ?? 0, 1, "\(pass.direction) must re-run ChatView")
+            XCTAssertEqual(pass.passes[.responseHostUpdate] ?? 0, 0, "\(pass.direction) rewrote a reply whose content did not change")
+            XCTAssertEqual(pass.passes[.responseHostMeasure] ?? 0, 0, "\(pass.direction) re-measured a reply whose content and width did not change")
+        }
+    }
+
     // MARK: - Harness
 
     private func requireReportOptIn() throws {
@@ -188,22 +238,41 @@ import XCTest
         let fixture = try ChatTypingFixture(messageCount: messageCount)
         defer { fixture.tearDown() }
 
+        return try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture) {
+                fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
+            XCTAssertGreaterThanOrEqual(fixture.sessionRequestCount, 1, "The transcript must come from the mocked server")
+            return try await body(fixture, window)
+        }
+    }
+
+    /// Shows a new `ChatView` over `fixture` with the probes counting, runs
+    /// `body`, then closes the window and resets the probes. A fixture can be
+    /// shown again afterwards: its cache container outlives the window.
+    private func withHostedWindow<Result>(
+        _ fixture: ChatTypingFixture,
+        _ body: (UIWindow) async throws -> Result
+    ) async throws -> Result {
         ViewBodyProbe.isScrollToBottomButtonVisible = false
         ViewBodyProbe.scrollToBottomButtonAction = nil
-        let window = try fixture.show()
-        defer { close(window) }
+        // Count from the first pass on: `show()` lays the screen out itself, so
+        // a cache-first paint happens entirely inside it.
         ViewBodyProbe.counts = [:]
+        let window: UIWindow
+        do {
+            window = try fixture.show()
+        } catch {
+            ViewBodyProbe.counts = nil
+            throw error
+        }
+        defer { close(window) }
         defer {
             ViewBodyProbe.counts = nil
             ViewBodyProbe.isScrollToBottomButtonVisible = false
             ViewBodyProbe.scrollToBottomButtonAction = nil
         }
-
-        try await settle(window, fixture: fixture) {
-            fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
-        }
-        XCTAssertGreaterThanOrEqual(fixture.sessionRequestCount, 1, "The transcript must come from the mocked server")
-        return try await body(fixture, window)
+        return try await body(window)
     }
 
     private func type(_ keystrokes: [String], into window: UIWindow, fixture: ChatTypingFixture) async throws -> TypingRun {
@@ -261,7 +330,7 @@ import XCTest
 
     struct Crossing {
         /// `away` from the bottom, `back` to it with a plain scroll, or `tap`
-        /// on the scroll-to-bottom button.
+        /// on the scroll-to-bottom button. `owner<n>` for a forced owner pass.
         var direction: String
         /// Main-thread milliseconds from the scroll or tap until the update
         /// and its deferred main-queue work have drained.
@@ -295,6 +364,31 @@ import XCTest
             let back = await scroll(scrollView, toY: bottomOffsetY(of: scrollView), in: window, direction: "back")
             XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling back must hide the scroll-to-bottom button")
             return [away, tap, awayAgain, back]
+        }
+    }
+
+    /// Hosts the chat at the bottom and forces `count` owner passes that change
+    /// no row's data: `ChatView` and its transcript re-run with the state they
+    /// had, the way a button appearing or a status changing re-runs them.
+    /// Frames render until the screen settles, so what the pass defers counts
+    /// toward it.
+    ///
+    /// Not a settings flip: writing any `UserDefaults` key re-runs every view
+    /// holding an `@AppStorage`, which includes every row.
+    func forceOwnerPassesInHostedChat(messageCount: Int, count: Int) async throws -> [Crossing] {
+        try await withHostedChat(messageCount: messageCount) { fixture, window in
+            var passes: [Crossing] = []
+            for index in 1...count {
+                let before = ViewBodyProbe.counts ?? [:]
+                let start = CACurrentMediaTime()
+                fixture.ownerPasses.generation += 1
+                await drainKeystroke(in: window)
+                let end = CACurrentMediaTime()
+                try await settle(window, fixture: fixture) { true }
+                let after = ViewBodyProbe.counts ?? [:]
+                passes.append(Crossing(direction: "owner\(index)", ms: (end - start) * 1000, passes: after.merging(before) { $0 - $1 }))
+            }
+            return passes
         }
     }
 
@@ -349,12 +443,12 @@ import XCTest
         return Crossing(direction: direction, ms: (end - start) * 1000, passes: after.merging(before) { $0 - $1 })
     }
 
-    func report(_ crossings: [Crossing], scenario: String) {
+    func report(_ crossings: [Crossing], scenario: String, label: String = "SCROLL-PERF") {
         for crossing in crossings {
             let passes = crossing.passes
             let rows = (passes[.transcriptBlock] ?? 0) + (passes[.transcriptRow] ?? 0) + (passes[.messageBubble] ?? 0)
             let fields = [
-                "SCROLL-PERF scenario=\(scenario)",
+                "\(label) scenario=\(scenario)",
                 "direction=\(crossing.direction)",
                 "ms=\(format(crossing.ms))",
                 "landedMs=\(crossing.landedMs.map(format) ?? "-")",
@@ -370,6 +464,101 @@ import XCTest
             ]
             print(fields.joined(separator: " "))
         }
+    }
+
+    struct Reopen {
+        /// Milliseconds from releasing the server window until the screen has
+        /// settled, including `settle`'s quiet tail of twelve frames.
+        var ms: Double
+        /// The longest time between two rendered frames after the release:
+        /// the hitch a reader sees.
+        var longestFrameGapMs: Double
+        /// Body passes from the release until settled, by view.
+        var passes: [ViewBodyProbe.Site: Int]
+        /// Bubbles the cache-first paint drew before the release.
+        var paintBubbles: Int
+        /// Messages in the server window that replaced the paint.
+        var serverRows: Int
+    }
+
+    /// Opens a chat of `messageCount` messages once, so the app caches the
+    /// server's newest window through its own load, then reopens it `times`
+    /// times in a new `ChatView`: with the server's answer held, it settles on
+    /// the cache-first paint, then releases the answer and records what
+    /// replacing the paint with the server window costs.
+    func reopenHostedChat(messageCount: Int, times: Int) async throws -> [Reopen] {
+        let fixture = try ChatTypingFixture(messageCount: messageCount, servesNewestWindow: true)
+        defer { fixture.tearDown() }
+
+        try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture) {
+                fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
+        }
+
+        var reopens: [Reopen] = []
+        for _ in 0..<times {
+            fixture.sessionGate.hold()
+            defer { fixture.sessionGate.release() }
+            let sessionRequests = fixture.sessionRequestCount
+            let reopen = try await withHostedWindow(fixture) { window in
+                try await settle(window, fixture: fixture) {
+                    fixture.sessionRequestCount > sessionRequests && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+                }
+                let before = ViewBodyProbe.counts ?? [:]
+                let requests = fixture.requestCount
+                let frames = FrameGapRecorder()
+                frames.start()
+                let start = CACurrentMediaTime()
+                fixture.sessionGate.release()
+                // Applying the server window lets the chat's startup continue
+                // (approval state, composer configuration), which asks again.
+                try await settle(window, fixture: fixture) { fixture.requestCount > requests }
+                let end = CACurrentMediaTime()
+                frames.stop()
+                let after = ViewBodyProbe.counts ?? [:]
+                return Reopen(
+                    ms: (end - start) * 1000,
+                    longestFrameGapMs: frames.longestGapMs,
+                    passes: after.merging(before) { $0 - $1 },
+                    paintBubbles: before[.messageBubble] ?? 0,
+                    serverRows: fixture.serverWindow.count
+                )
+            }
+            reopens.append(reopen)
+        }
+        return reopens
+    }
+
+    func report(_ reopens: [Reopen], scenario: String) {
+        let sites: [ViewBodyProbe.Site] = [
+            .chatView, .transcript, .transcriptBlock, .transcriptRow, .messageBubble,
+            .responseHostUpdate, .responseHostMeasure
+        ]
+        let serverRows = reopens.first?.serverRows ?? 0
+        func fields(_ label: String, ms: Double, gap: Double, paint: Int, passes: (ViewBodyProbe.Site) -> Int) -> String {
+            ([
+                "REOPEN-PERF scenario=\(scenario)",
+                label,
+                "ms=\(format(ms))",
+                "longestFrameGapMs=\(format(gap))",
+                "paintBubbles=\(paint)",
+                "serverRows=\(serverRows)"
+            ] + sites.map { "\($0.rawValue)=\(passes($0))" }).joined(separator: " ")
+        }
+        for (index, reopen) in reopens.enumerated() {
+            print(fields(
+                "reopen=\(index + 1)", ms: reopen.ms, gap: reopen.longestFrameGapMs,
+                paint: reopen.paintBubbles, passes: { reopen.passes[$0] ?? 0 }
+            ))
+        }
+        print(fields(
+            "reopen=median",
+            ms: percentile(reopens.map(\.ms), 0.5),
+            gap: percentile(reopens.map(\.longestFrameGapMs), 0.5),
+            paint: Int(percentile(reopens.map { Double($0.paintBubbles) }, 0.5)),
+            passes: { site in Int(percentile(reopens.map { Double($0.passes[site] ?? 0) }, 0.5)) }
+        ))
     }
 
     /// Renders frames until `isReady` holds and the screen has stopped changing
@@ -483,12 +672,18 @@ import XCTest
     let container: ModelContainer
     let draftStore = ChatDraftStore(persistence: BotMemoryDrafts())
     let client: APIClient
+    /// Holds `/api/session` answers while held. Released by `tearDown()`.
+    let sessionGate: ResponseGate
+    /// The absolute indexes of the messages `/api/session` answers with.
+    let serverWindow: Range<Int>
     private let counter: RequestCounter
 
     var requestCount: Int { counter.total }
     var sessionRequestCount: Int { counter.sessions }
 
-    init(messageCount: Int) throws {
+    /// `servesNewestWindow` answers like hermes-webui's cold open instead of
+    /// with every message: only the newest window, with its offset.
+    init(messageCount: Int, servesNewestWindow: Bool = false) throws {
         let counter = RequestCounter()
         self.counter = counter
         let decoder = JSONDecoder()
@@ -501,18 +696,29 @@ import XCTest
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
 
-        let sessionBody = try JSONSerialization.data(withJSONObject: [
-            "session": [
-                "session_id": "typing-perf",
-                "title": "Typing perf",
-                "workspace": "/tmp/workspace",
-                "message_count": messageCount,
-                "messages": Self.messages(count: messageCount)
-            ] as [String: Any]
-        ])
+        let messages = Self.messages(count: messageCount)
+        let windowStart = servesNewestWindow ? Self.newestWindowStart(of: messages) : 0
+        serverWindow = windowStart..<messages.count
+        var sessionFields: [String: Any] = [
+            "session_id": "typing-perf",
+            "title": "Typing perf",
+            "workspace": "/tmp/workspace",
+            "message_count": messageCount,
+            "messages": Array(messages[windowStart...])
+        ]
+        if servesNewestWindow {
+            sessionFields["_messages_offset"] = windowStart
+            sessionFields["_messages_truncated"] = windowStart > 0
+        }
+        let sessionBody = try JSONSerialization.data(withJSONObject: ["session": sessionFields])
+        let sessionGate = ResponseGate()
+        self.sessionGate = sessionGate
         MockURLProtocol.requestHandler = { request in
             let isSession = request.url?.path == "/api/session"
             counter.record(isSession: isSession)
+            if isSession {
+                sessionGate.wait()
+            }
             let response = HTTPURLResponse(
                 url: request.url!, statusCode: 200, httpVersion: nil,
                 headerFields: ["Content-Type": "application/json"]
@@ -525,7 +731,20 @@ import XCTest
     }
 
     func tearDown() {
+        sessionGate.release()
         MockURLProtocol.requestHandler = nil
+    }
+
+    /// Where hermes-webui's cold-open window starts: the smallest suffix that
+    /// holds the newest `renderableLimit` messages other than tool results
+    /// (`_message_window_for_display`).
+    static func newestWindowStart(of messages: [[String: Any]], renderableLimit: Int = 50) -> Int {
+        var renderable = 0
+        for index in messages.indices.reversed() where messages[index]["role"] as? String != "tool" {
+            renderable += 1
+            if renderable == renderableLimit { return index }
+        }
+        return 0
     }
 
     func show() throws -> UIWindow {
@@ -533,19 +752,44 @@ import XCTest
         let window = UIWindow(windowScene: scene)
         // An iPhone 14 Pro Max's points, the device the lag was reported on.
         window.frame = CGRect(x: 0, y: 0, width: 430, height: 932)
-        window.rootViewController = UIHostingController(rootView: NavigationStack {
-            ChatView(
-                session: session,
-                server: server,
-                onAPIError: { _ in },
-                draftStore: draftStore,
-                draftAttachmentStore: BotAttachmentCopies(),
-                client: client
-            )
-        }
-        .modelContainer(container))
+        window.rootViewController = UIHostingController(rootView: ChatTypingHost(fixture: self)
+            .modelContainer(container))
         window.makeKeyAndVisible()
+        // Build and lay out the screen here, where no deadline runs. The first
+        // time a test process hosts ChatView is its costliest pass (about
+        // 0.5 s on a Mac); on a slow CI runner it held the main thread for 11 s
+        // inside the settle loop's first 10 s frame wait, so no frame could
+        // arrive before that wait expired.
+        window.layoutIfNeeded()
+        CATransaction.flush()
         return window
+    }
+
+    let ownerPasses = OwnerPassTrigger()
+    let draftAttachmentStore = BotAttachmentCopies()
+
+    /// Re-runs `ChatView` without changing its state, the way its parent
+    /// re-rendering does: the host hands it a new `onAPIError` closure.
+    @Observable final class OwnerPassTrigger {
+        var generation = 0
+    }
+
+    private struct ChatTypingHost: View {
+        let fixture: ChatTypingFixture
+
+        var body: some View {
+            let generation = fixture.ownerPasses.generation
+            NavigationStack {
+                ChatView(
+                    session: fixture.session,
+                    server: fixture.server,
+                    onAPIError: { _ in _ = generation },
+                    draftStore: fixture.draftStore,
+                    draftAttachmentStore: fixture.draftAttachmentStore,
+                    client: fixture.client
+                )
+            }
+        }
     }
 
     /// Whole turns of four messages (question, tool call, tool result, reply);
@@ -627,5 +871,62 @@ private final class RequestCounter: @unchecked Sendable {
             counts.total += 1
             if isSession { counts.sessions += 1 }
         }
+    }
+}
+
+/// Holds the mocked server's answers until released. A request that arrives
+/// while the gate is open is answered at once; a held one waits at most ten
+/// seconds, so a test that forgets to release cannot hang the run.
+final class ResponseGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private let group = DispatchGroup()
+    private var isHeld = false
+
+    func hold() {
+        lock.withLock {
+            guard !isHeld else { return }
+            isHeld = true
+            group.enter()
+        }
+    }
+
+    func release() {
+        lock.withLock {
+            guard isHeld else { return }
+            isHeld = false
+            group.leave()
+        }
+    }
+
+    /// Called on the mocked server's queue, never on the main thread.
+    func wait() {
+        _ = group.wait(timeout: .now() + 10)
+    }
+}
+
+/// Records when the display renders each frame, so a main-thread stall shows
+/// up as a long gap between two of them.
+@MainActor final class FrameGapRecorder: NSObject {
+    private var link: CADisplayLink?
+    private var timestamps: [CFTimeInterval] = []
+
+    func start() {
+        timestamps = [CACurrentMediaTime()]
+        link = CADisplayLink(target: self, selector: #selector(tick))
+        link?.add(to: .main, forMode: .common)
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+        timestamps.append(CACurrentMediaTime())
+    }
+
+    var longestGapMs: Double {
+        zip(timestamps.dropFirst(), timestamps).map { ($0 - $1) * 1000 }.max() ?? 0
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        timestamps.append(link.timestamp)
     }
 }
