@@ -256,9 +256,17 @@ import XCTest
     ) async throws -> Result {
         ViewBodyProbe.isScrollToBottomButtonVisible = false
         ViewBodyProbe.scrollToBottomButtonAction = nil
-        let window = try fixture.show()
-        defer { close(window) }
+        // Count from the first pass on: `show()` lays the screen out itself, so
+        // a cache-first paint happens entirely inside it.
         ViewBodyProbe.counts = [:]
+        let window: UIWindow
+        do {
+            window = try fixture.show()
+        } catch {
+            ViewBodyProbe.counts = nil
+            throw error
+        }
+        defer { close(window) }
         defer {
             ViewBodyProbe.counts = nil
             ViewBodyProbe.isScrollToBottomButtonVisible = false
