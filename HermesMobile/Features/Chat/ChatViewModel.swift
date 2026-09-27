@@ -211,8 +211,21 @@ final class ChatViewModel {
     private static let messagePageLimit = 50
 
     private(set) var messages: [ChatMessage] = [] {
-        didSet { recomputeDisplayedTranscriptMessages() }
+        didSet {
+            if !isGrowingStreamingReply {
+                messagesStructureRevision &+= 1
+            }
+            recomputeDisplayedTranscriptMessages()
+        }
     }
+    /// Bumped by every write to `messages` but one: the streaming reply's text
+    /// growing in place. Keys the memoized turn folds and terminal replies,
+    /// which both skip the turn holding the streaming reply.
+    @ObservationIgnored private var messagesStructureRevision = 0
+    /// True only while `flushAssistantTokens` grows the streaming reply's text.
+    @ObservationIgnored private var isGrowingStreamingReply = false
+    @ObservationIgnored private var turnFoldsMemo: (key: TurnDerivationKey, folds: TranscriptTurnFolds)?
+    @ObservationIgnored private var terminalReplyRenderIDsMemo: (key: TurnDerivationKey, renderIDs: Set<String>)?
     /// Memoized transcript mapping, recomputed once whenever `messages` or
     /// `messagesOffset` changes. Views read this single cached value instead of
     /// re-running the full classification pass on every body evaluation.
@@ -330,6 +343,87 @@ final class ChatViewModel {
             renderedActivityAnchorIDs: renderedActivityAnchorIDs
         )
         recomputeCompressionReferenceCard()
+    }
+
+    /// What the turn folds and terminal replies are derived from, short of the
+    /// streaming reply's text. The groups compare by buffer first, so an
+    /// unchanged key costs no walk.
+    private struct TurnDerivationKey: Equatable {
+        let messagesStructureRevision: Int
+        let messagesOffset: Int
+        let streamingAssistantMessageID: String?
+        let isStreamActive: Bool
+        let reasoningGroups: [ReasoningGroup]
+        let toolCallGroups: [ToolCallGroup]
+        /// Folds only: whether thinking and tool cards count as activity.
+        var showsActivity = false
+        var latestRunOutcome: TranscriptTurnRunOutcome?
+    }
+
+    private var turnDerivationKey: TurnDerivationKey {
+        TurnDerivationKey(
+            messagesStructureRevision: messagesStructureRevision,
+            messagesOffset: messagesOffset,
+            streamingAssistantMessageID: streamingAssistantMessageID,
+            isStreamActive: activeStreamID != nil,
+            reasoningGroups: displayedReasoningGroups,
+            toolCallGroups: completedToolCallGroups
+        )
+    }
+
+    /// Settled-turn folds for the displayed transcript. Activity anchors count
+    /// only while thinking and tool cards are shown, so a turn with nothing
+    /// visible to hide gets no row. Derived again only when the transcript's
+    /// structure, the stream, the latest run's outcome or a setting changes, so
+    /// a streamed word that only grows the reply reuses the last folds.
+    func turnFolds(foldsSettledTurns: Bool, showsThinkingAndToolCards: Bool) -> TranscriptTurnFolds {
+        guard foldsSettledTurns else { return .none }
+
+        var key = turnDerivationKey
+        key.showsActivity = showsThinkingAndToolCards
+        key.latestRunOutcome = latestRunOutcome
+        if let memo = turnFoldsMemo, memo.key == key {
+            return memo.folds
+        }
+
+        ViewBodyProbe.hit(.turnFoldsDerive)
+        let activityAnchorIDs: Set<String> = showsThinkingAndToolCards
+            ? Set(displayedReasoningGroups.compactMap(\.anchorMessageID))
+                .union(completedToolCallGroups.compactMap(\.anchorMessageID))
+            : []
+        let folds = TranscriptTurnFolds.derive(
+            transcriptMessages: displayedTranscriptMessages,
+            messages: messages,
+            messageOffset: messagesOffset,
+            activityAnchorIDs: activityAnchorIDs,
+            rendersBubble: Self.hasTranscriptMessageRowContent,
+            isStreamActive: key.isStreamActive,
+            streamingAssistantMessageID: streamingAssistantMessageID,
+            latestRunOutcome: latestRunOutcome
+        )
+        turnFoldsMemo = (key, folds)
+        return folds
+    }
+
+    /// Rows that get the time + copy row as the reply closing a settled turn.
+    /// Memoized like `turnFolds`.
+    func terminalReplyRenderIDs() -> Set<String> {
+        let key = turnDerivationKey
+        if let memo = terminalReplyRenderIDsMemo, memo.key == key {
+            return memo.renderIDs
+        }
+
+        ViewBodyProbe.hit(.terminalRepliesDerive)
+        let renderIDs = TranscriptMessageMetaPolicy.terminalReplyRenderIDs(
+            transcriptMessages: displayedTranscriptMessages,
+            messages: messages,
+            messageOffset: messagesOffset,
+            rendersBubble: Self.hasTranscriptMessageRowContent,
+            isStreamActive: key.isStreamActive,
+            streamingAssistantMessageID: streamingAssistantMessageID
+        )
+        terminalReplyRenderIDsMemo = (key, renderIDs)
+        return renderIDs
     }
     /// Synthesized "Context compaction · Reference only" card resolved from the
     /// session's `compression_anchor_*` metadata; nil when the session has no
@@ -5378,6 +5472,10 @@ final class ChatViewModel {
 
         if let index = messages.firstIndex(where: { $0.messageId == messageID }) {
             let existing = messages[index]
+            // Only the streaming reply's text changes, which leaves the turn
+            // folds and terminal replies as they were: both skip its turn.
+            isGrowingStreamingReply = existing.role == "assistant"
+            defer { isGrowingStreamingReply = false }
             messages[index] = ChatMessage(
                 role: existing.role,
                 content: (existing.content ?? "") + appendedContent,
@@ -6474,7 +6572,9 @@ extension ChatViewModel {
             .union(toolCallGroups.compactMap(\.anchorMessageID))
     }
 
-    nonisolated private static func hasTranscriptMessageRowContent(_ message: ChatMessage) -> Bool {
+    /// Whether a message draws a bubble: visible text, or a user message's
+    /// attachments. Activity-only assistant shells do not.
+    nonisolated static func hasTranscriptMessageRowContent(_ message: ChatMessage) -> Bool {
         if message.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false {
             return true
         }

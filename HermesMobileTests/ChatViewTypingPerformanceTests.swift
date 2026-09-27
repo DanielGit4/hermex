@@ -15,7 +15,7 @@ import XCTest
 /// take half a minute together, so they run only on request:
 /// `TEST_RUNNER_HERMEX_TYPING_PERF=1 scripts/test-sim <udid> --only HermesMobileTests/ChatViewTypingPerformanceTests`.
 /// The regression test always runs and asserts on body passes only.
-@MainActor final class ChatViewTypingPerformanceTests: XCTestCase {
+@MainActor final class ChatViewTypingPerformanceTests: HostedChatPerformanceTestCase {
     /// Exactly 60 characters.
     nonisolated static let typedText = "Please refactor the parser and add tests for the edge cases."
     /// About 300 characters: the draft wraps past the composer's minimum height
@@ -186,12 +186,6 @@ import XCTest
 
     // MARK: - Harness
 
-    private func requireReportOptIn() throws {
-        guard ProcessInfo.processInfo.environment["HERMEX_TYPING_PERF"] == "1" else {
-            throw XCTSkip("Set HERMEX_TYPING_PERF=1 to report typing cost.")
-        }
-    }
-
     struct TypingRun {
         /// Main-thread milliseconds per keystroke, from `insertText` until the
         /// update and its deferred main-queue work have drained.
@@ -247,34 +241,6 @@ import XCTest
         }
     }
 
-    /// Shows a new `ChatView` over `fixture` with the probes counting, runs
-    /// `body`, then closes the window and resets the probes. A fixture can be
-    /// shown again afterwards: its cache container outlives the window.
-    private func withHostedWindow<Result>(
-        _ fixture: ChatTypingFixture,
-        _ body: (UIWindow) async throws -> Result
-    ) async throws -> Result {
-        ViewBodyProbe.isScrollToBottomButtonVisible = false
-        ViewBodyProbe.scrollToBottomButtonAction = nil
-        // Count from the first pass on: `show()` lays the screen out itself, so
-        // a cache-first paint happens entirely inside it.
-        ViewBodyProbe.counts = [:]
-        let window: UIWindow
-        do {
-            window = try fixture.show()
-        } catch {
-            ViewBodyProbe.counts = nil
-            throw error
-        }
-        defer { close(window) }
-        defer {
-            ViewBodyProbe.counts = nil
-            ViewBodyProbe.isScrollToBottomButtonVisible = false
-            ViewBodyProbe.scrollToBottomButtonAction = nil
-        }
-        return try await body(window)
-    }
-
     private func type(_ keystrokes: [String], into window: UIWindow, fixture: ChatTypingFixture) async throws -> TypingRun {
         let editor = try XCTUnwrap(descendants(window).compactMap { $0 as? ComposerChipTextView }.first)
         XCTAssertTrue(editor.isEditable, "The composer must be editable, not the cached read-only state")
@@ -306,22 +272,6 @@ import XCTest
         }
         XCTAssertEqual(editor.sourceText, keystrokes.joined())
         return run
-    }
-
-    /// Everything a keystroke puts on the main thread: the SwiftUI update, the
-    /// layout and Core Animation commit, and each deferred `main.async` or
-    /// main-actor hop it schedules (chips, selection, height). Three rounds,
-    /// because a deferred hop can schedule one more update.
-    private func drainKeystroke(in window: UIWindow) async {
-        for _ in 0..<3 {
-            window.layoutIfNeeded()
-            CATransaction.flush()
-            await withCheckedContinuation { continuation in
-                DispatchQueue.main.async { continuation.resume() }
-            }
-        }
-        window.layoutIfNeeded()
-        CATransaction.flush()
     }
 
     /// How far above the bottom the reader scrolls: well past the 160 pt
@@ -561,30 +511,6 @@ import XCTest
         ))
     }
 
-    /// Renders frames until `isReady` holds and the screen has stopped changing
-    /// (same content height, same request count, no new body passes) for three
-    /// checks in a row.
-    private func settle(
-        _ window: UIWindow,
-        fixture: ChatTypingFixture,
-        until isReady: () -> Bool
-    ) async throws {
-        var previous: [Double] = []
-        var stableChecks = 0
-        for _ in 0..<150 {
-            await renderFrames(4)
-            let signature = [
-                Double(transcriptScrollView(in: window)?.contentSize.height ?? 0),
-                Double(fixture.requestCount),
-                Double((ViewBodyProbe.counts ?? [:]).values.reduce(0, +))
-            ]
-            stableChecks = isReady() && signature == previous ? stableChecks + 1 : 0
-            previous = signature
-            if stableChecks >= 3 { return }
-        }
-        XCTFail("The hosted chat never settled")
-    }
-
     func report(_ run: TypingRun, scenario: String) {
         let keystrokes = run.passes.count
         func perKey(_ site: ViewBodyProbe.Site) -> String {
@@ -624,15 +550,94 @@ import XCTest
         let counts = [passes[.chatView] ?? 0, passes[.transcript] ?? 0, rows, passes[.composer] ?? 0]
         return "\(index):\(format(run.totalMs[index])):" + counts.map(String.init).joined(separator: "/")
     }
+}
 
-    private func percentile(_ values: [Double], _ fraction: Double) -> Double {
+/// The hosted-chat harness the chat performance tests share: showing
+/// `ChatView` over a `ChatTypingFixture` with the probes counting, pumping
+/// frames, and draining an update. Holds no tests of its own.
+@MainActor class HostedChatPerformanceTestCase: XCTestCase {
+    func requireReportOptIn() throws {
+        guard ProcessInfo.processInfo.environment["HERMEX_TYPING_PERF"] == "1" else {
+            throw XCTSkip("Set HERMEX_TYPING_PERF=1 to report typing cost.")
+        }
+    }
+
+    /// Shows a new `ChatView` over `fixture` with the probes counting, runs
+    /// `body`, then closes the window and resets the probes. A fixture can be
+    /// shown again afterwards: its cache container outlives the window.
+    func withHostedWindow<Result>(
+        _ fixture: ChatTypingFixture,
+        _ body: (UIWindow) async throws -> Result
+    ) async throws -> Result {
+        ViewBodyProbe.isScrollToBottomButtonVisible = false
+        ViewBodyProbe.scrollToBottomButtonAction = nil
+        // Count from the first pass on: `show()` lays the screen out itself, so
+        // a cache-first paint happens entirely inside it.
+        ViewBodyProbe.counts = [:]
+        let window: UIWindow
+        do {
+            window = try fixture.show()
+        } catch {
+            ViewBodyProbe.counts = nil
+            throw error
+        }
+        defer { close(window) }
+        defer {
+            ViewBodyProbe.counts = nil
+            ViewBodyProbe.isScrollToBottomButtonVisible = false
+            ViewBodyProbe.scrollToBottomButtonAction = nil
+        }
+        return try await body(window)
+    }
+
+    /// Everything a keystroke puts on the main thread: the SwiftUI update, the
+    /// layout and Core Animation commit, and each deferred `main.async` or
+    /// main-actor hop it schedules (chips, selection, height). Three rounds,
+    /// because a deferred hop can schedule one more update.
+    func drainKeystroke(in window: UIWindow) async {
+        for _ in 0..<3 {
+            window.layoutIfNeeded()
+            CATransaction.flush()
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+        }
+        window.layoutIfNeeded()
+        CATransaction.flush()
+    }
+
+    /// Renders frames until `isReady` holds and the screen has stopped changing
+    /// (same content height, same request count, no new body passes) for three
+    /// checks in a row.
+    func settle(
+        _ window: UIWindow,
+        fixture: ChatTypingFixture,
+        until isReady: () -> Bool
+    ) async throws {
+        var previous: [Double] = []
+        var stableChecks = 0
+        for _ in 0..<150 {
+            await renderFrames(4)
+            let signature = [
+                Double(transcriptScrollView(in: window)?.contentSize.height ?? 0),
+                Double(fixture.requestCount),
+                Double((ViewBodyProbe.counts ?? [:]).values.reduce(0, +))
+            ]
+            stableChecks = isReady() && signature == previous ? stableChecks + 1 : 0
+            previous = signature
+            if stableChecks >= 3 { return }
+        }
+        XCTFail("The hosted chat never settled")
+    }
+
+    func percentile(_ values: [Double], _ fraction: Double) -> Double {
         guard !values.isEmpty else { return 0 }
         let sorted = values.sorted()
         let rank = Int((fraction * Double(sorted.count)).rounded(.up)) - 1
         return sorted[min(max(0, rank), sorted.count - 1)]
     }
 
-    private func format(_ value: Double) -> String {
+    func format(_ value: Double) -> String {
         String(format: "%.2f", value)
     }
 
@@ -663,6 +668,164 @@ import XCTest
     }
 }
 
+/// Streams a reply into the real `ChatView` over a hosted transcript served
+/// from a mocked client, a word per tick through the same stream delegate a
+/// live connection uses, and records what each streamed word costs: which
+/// views re-run their body, which full transcript walks run, and how long the
+/// main thread is held until the update, its coalesced follow scroll and
+/// their deferred hops have drained.
+///
+/// The timing test only reports, as one `STREAM-PERF` line in the test log,
+/// and runs on request like the typing reports: `HERMEX_TYPING_PERF=1`.
+@MainActor final class ChatViewStreamingPerformanceTests: HostedChatPerformanceTestCase {
+    func testReportsStreamingCostInALongChat() async throws {
+        try requireReportOptIn()
+        let run = try await streamIntoHostedChat(messageCount: 500, ticks: 40)
+        report(run, scenario: "long500")
+    }
+
+    /// A streamed word that only grows the reply walks the transcript for
+    /// neither the settled-turn folds nor the terminal replies, and re-runs
+    /// no row but the reply's own. Both walks used to run over every message
+    /// on each of the screen's passes per word.
+    func testStreamedWordsReuseTurnFoldsAndTerminalReplies() async throws {
+        let foldsKey = ChatTranscriptDisplaySettings.foldsSettledTurnsKey
+        let savedFolds = UserDefaults.standard.object(forKey: foldsKey)
+        defer { UserDefaults.standard.set(savedFolds, forKey: foldsKey) }
+        UserDefaults.standard.set(true, forKey: foldsKey)
+
+        let run = try await streamIntoHostedChat(messageCount: 40, ticks: 8)
+        report(run, scenario: "regression40")
+
+        XCTAssertEqual(run.passes.count, 8)
+        for (word, passes) in run.passes.enumerated() {
+            XCTAssertGreaterThanOrEqual(passes[.chatViewport] ?? 0, 1, "Word \(word) must reach the screen")
+            XCTAssertEqual(passes[.turnFoldsDerive] ?? 0, 0, "Word \(word) walked the transcript for turn folds")
+            XCTAssertEqual(passes[.terminalRepliesDerive] ?? 0, 0, "Word \(word) walked the transcript for terminal replies")
+            XCTAssertLessThanOrEqual(passes[.transcriptBlock] ?? 0, 1, "Word \(word) re-ran a row other than the reply's")
+            XCTAssertLessThanOrEqual(passes[.messageBubble] ?? 0, 1, "Word \(word) re-ran a bubble other than the reply's")
+        }
+    }
+
+    struct StreamRun {
+        /// Main-thread milliseconds per streamed word: the flush and its update
+        /// drained, plus the coalesced follow scroll it scheduled, drained.
+        var totalMs: [Double] = []
+        /// The synchronous part: the stream event, the flush and the view
+        /// model's transcript recompute, before SwiftUI updates.
+        var viewModelMs: [Double] = []
+        /// One fresh pair of full walks (turn folds and terminal replies) over
+        /// the transcript as it stood after the last word, median of five.
+        var walkMs: Double = 0
+        /// Body passes and transcript walks per streamed word, by site.
+        var passes: [[ViewBodyProbe.Site: Int]] = []
+        /// Whether the skills list had loaded while the reply streamed. Until
+        /// it has, every `ChatView` pass scans the user messages for a skill.
+        var skillsLoaded = false
+
+        func total(_ site: ViewBodyProbe.Site) -> Int {
+            passes.reduce(0) { $0 + ($1[site] ?? 0) }
+        }
+    }
+
+    /// Hosts `ChatView` over a transcript of `messageCount` messages driven by
+    /// a view model whose streams are scripted, sends a message so a real
+    /// stream is active, streams a first word (which adds the reply's row), and
+    /// then streams `ticks` words, one flush each. Frames render between them
+    /// the way a stream's cadence leaves room for, and count toward the word.
+    ///
+    /// Cadences are chosen so no timer flushes on its own: each word is
+    /// flushed explicitly, and only the follow scroll it schedules fires.
+    func streamIntoHostedChat(messageCount: Int, ticks: Int) async throws -> StreamRun {
+        let fixture = try ChatTypingFixture(messageCount: messageCount, answersChatStart: true)
+        defer { fixture.tearDown() }
+        let stream = ScriptedSSEStreamingClient()
+        let viewModel = fixture.makeStreamingViewModel(stream: stream)
+        fixture.viewModel = viewModel
+        defer { fixture.viewModel = nil }
+
+        return try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture) {
+                fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
+            let didStart = await viewModel.sendMessage("Summarize what changed in the parser.")
+            XCTAssertTrue(didStart, "The turn must start a stream")
+            XCTAssertNotNil(viewModel.activeStreamID, "The turn must leave a stream active")
+
+            var streamed = "Streaming "
+            stream.emit(.token(streamed))
+            let replyID = try XCTUnwrap(viewModel.streamingAssistantMessageID, "The first word must add the reply")
+            try await settle(window, fixture: fixture) { true }
+
+            var run = StreamRun()
+            for index in 0..<ticks {
+                let word = index.isMultiple(of: 9) ? "word\(index).\n\n" : "word\(index) "
+                let before = ViewBodyProbe.counts ?? [:]
+                let start = CACurrentMediaTime()
+                stream.emit(.token(word))
+                run.viewModelMs.append((CACurrentMediaTime() - start) * 1000)
+                await drainKeystroke(in: window)
+                var ms = CACurrentMediaTime() - start
+                await viewModel.awaitPendingStreamingScrollTriggerForTesting()
+                let scrollStart = CACurrentMediaTime()
+                await drainKeystroke(in: window)
+                ms += CACurrentMediaTime() - scrollStart
+                await renderFrames(2)
+
+                streamed += word
+                run.totalMs.append(ms * 1000)
+                let after = ViewBodyProbe.counts ?? [:]
+                run.passes.append(after.merging(before) { $0 - $1 })
+            }
+            run.skillsLoaded = viewModel.hasLoadedSkillSlashSuggestions
+            run.walkMs = percentile((0..<5).map { _ in timeFullWalks(over: viewModel) }, 0.5)
+
+            let reply = viewModel.messages.first { $0.messageId == replyID }
+            XCTAssertEqual(Array((reply?.content ?? "").utf8), Array(streamed.utf8), "The reply must be every streamed word, byte for byte")
+            stream.emit(.done(DoneStreamEvent()))
+            let completed = viewModel.messages.last { $0.role == "assistant" }
+            XCTAssertEqual(Array((completed?.content ?? "").utf8), Array(streamed.utf8), "Completing must keep the reply byte for byte")
+            try await settle(window, fixture: fixture) { true }
+            return run
+        }
+    }
+
+    /// Milliseconds for one fresh derive of the turn folds and the terminal
+    /// replies over `viewModel`'s transcript, the way a `ChatView` pass did
+    /// them before they were memoized.
+    private func timeFullWalks(over viewModel: ChatViewModel) -> Double {
+        let start = CACurrentMediaTime()
+        let folds = FreshTurnDerivations.turnFolds(viewModel)
+        let replies = FreshTurnDerivations.terminalReplyRenderIDs(viewModel)
+        let ms = (CACurrentMediaTime() - start) * 1000
+        XCTAssertFalse(folds.folds.isEmpty || replies.isEmpty, "The walks must have settled turns to find")
+        return ms
+    }
+
+    func report(_ run: StreamRun, scenario: String) {
+        let ticks = run.passes.count
+        let sites: [ViewBodyProbe.Site] = [
+            .chatView, .chatViewport, .transcript, .transcriptBlock, .transcriptRow, .messageBubble,
+            .responseHostUpdate, .responseHostMeasure, .turnFoldsDerive, .terminalRepliesDerive
+        ]
+        var fields = [
+            "STREAM-PERF scenario=\(scenario)",
+            "ticks=\(ticks)",
+            "median_ms=\(format(percentile(run.totalMs, 0.5)))",
+            "p95_ms=\(format(percentile(run.totalMs, 0.95)))",
+            "max_ms=\(format(run.totalMs.max() ?? 0))",
+            "vm_median_ms=\(format(percentile(run.viewModelMs, 0.5)))",
+            "walk_pair_ms=\(format(run.walkMs))"
+        ]
+        for site in sites {
+            fields.append("\(site.rawValue)=\(String(format: "%.2f", Double(run.total(site)) / Double(max(1, ticks))))/tick")
+        }
+        fields.append("skillsLoaded=\(run.skillsLoaded)")
+        fields.append("msPerTick=\(run.totalMs.map(format).joined(separator: ","))")
+        print(fields.joined(separator: " "))
+    }
+}
+
 /// A chat whose transcript the mocked server serves: realistic turns of a user
 /// question, a tool call, its result and a markdown reply with lists, inline
 /// and fenced code, tables and links. Every other request answers `{}`.
@@ -683,7 +846,9 @@ import XCTest
 
     /// `servesNewestWindow` answers like hermes-webui's cold open instead of
     /// with every message: only the newest window, with its offset.
-    init(messageCount: Int, servesNewestWindow: Bool = false) throws {
+    /// `answersChatStart` answers `/api/chat/start` with a stream, the way
+    /// hermes-webui starts a turn, so a send leaves a stream active.
+    init(messageCount: Int, servesNewestWindow: Bool = false, answersChatStart: Bool = false) throws {
         let counter = RequestCounter()
         self.counter = counter
         let decoder = JSONDecoder()
@@ -713,6 +878,9 @@ import XCTest
         let sessionBody = try JSONSerialization.data(withJSONObject: ["session": sessionFields])
         let sessionGate = ResponseGate()
         self.sessionGate = sessionGate
+        let chatStartBody = answersChatStart
+            ? Data(#"{"session_id": "typing-perf", "stream_id": "stream-perf"}"#.utf8)
+            : nil
         MockURLProtocol.requestHandler = { request in
             let isSession = request.url?.path == "/api/session"
             counter.record(isSession: isSession)
@@ -723,6 +891,9 @@ import XCTest
                 url: request.url!, statusCode: 200, httpVersion: nil,
                 headerFields: ["Content-Type": "application/json"]
             )!
+            if let chatStartBody, request.url?.path == "/api/chat/start" {
+                return (response, chatStartBody)
+            }
             return (response, isSession ? sessionBody : Data("{}".utf8))
         }
         let configuration = URLSessionConfiguration.ephemeral
@@ -733,6 +904,29 @@ import XCTest
     func tearDown() {
         sessionGate.release()
         MockURLProtocol.requestHandler = nil
+        ChatViewModel.resetActiveStreamSnapshotsForTesting()
+    }
+
+    /// A view model over this chat whose streams are scripted. `stream` flushes
+    /// the view model after every event it delivers, and the cadences are long
+    /// enough that nothing else flushes: only the follow scroll a flush
+    /// schedules fires on its own.
+    func makeStreamingViewModel(stream: ScriptedSSEStreamingClient) -> ChatViewModel {
+        let viewModel = ChatViewModel(
+            session: session,
+            server: server,
+            client: client,
+            streamClient: stream,
+            approvalStreamClient: ScriptedSSEStreamingClient(),
+            clarifyStreamClient: ScriptedSSEStreamingClient(),
+            btwStreamClient: ScriptedSSEStreamingClient(),
+            streamingScrollCoalescingDelayNanoseconds: 1_000_000,
+            streamingWordRevealCadenceNanoseconds: 60_000_000_000,
+            streamingMaxRevealLagNanoseconds: 3_600_000_000_000,
+            draftAttachmentStore: draftAttachmentStore
+        )
+        stream.flushPendingStreamingContent = { [weak viewModel] in viewModel?.flushPendingStreamingContent() }
+        return viewModel
     }
 
     /// Where hermes-webui's cold-open window starts: the smallest suffix that
@@ -767,6 +961,9 @@ import XCTest
 
     let ownerPasses = OwnerPassTrigger()
     let draftAttachmentStore = BotAttachmentCopies()
+    /// The view model the next `show()` drives the chat from; nil lets
+    /// `ChatView` build its own.
+    var viewModel: ChatViewModel?
 
     /// Re-runs `ChatView` without changing its state, the way its parent
     /// re-rendering does: the host hands it a new `onAPIError` closure.
@@ -786,7 +983,8 @@ import XCTest
                     onAPIError: { _ in _ = generation },
                     draftStore: fixture.draftStore,
                     draftAttachmentStore: fixture.draftAttachmentStore,
-                    client: fixture.client
+                    client: fixture.client,
+                    viewModel: fixture.viewModel
                 )
             }
         }
