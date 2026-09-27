@@ -582,6 +582,13 @@ import XCTest
         window.rootViewController = UIHostingController(rootView: ChatTypingHost(fixture: self)
             .modelContainer(container))
         window.makeKeyAndVisible()
+        // Build and lay out the screen here, where no deadline runs. The first
+        // time a test process hosts ChatView is its costliest pass (about
+        // 0.5 s on a Mac); on a slow CI runner it held the main thread for 11 s
+        // inside the settle loop's first 10 s frame wait, so no frame could
+        // arrive before that wait expired.
+        window.layoutIfNeeded()
+        CATransaction.flush()
         return window
     }
 
