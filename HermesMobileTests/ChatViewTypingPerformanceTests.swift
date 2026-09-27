@@ -163,6 +163,27 @@ import XCTest
         )
     }
 
+    func testReportsOwnerPassCostInALongChat() async throws {
+        try requireReportOptIn()
+        let passes = try await forceOwnerPassesInHostedChat(messageCount: 500, count: 3)
+        report(passes, scenario: "long500", label: "OWNER-PASS-PERF")
+    }
+
+    /// A `ChatView` pass that changes no row's data, the kind a button
+    /// appearing or a status changing causes, neither rewrites nor re-measures
+    /// a reply's selection host. It did both for every reply (about 200 ms of
+    /// a 300 ms pass in a 500-message chat).
+    func testAnOwnerPassWithUnchangedRowsLeavesEveryReplyHostAlone() async throws {
+        let passes = try await forceOwnerPassesInHostedChat(messageCount: 40, count: 2)
+        report(passes, scenario: "regression40", label: "OWNER-PASS-PERF")
+
+        for pass in passes {
+            XCTAssertGreaterThanOrEqual(pass.passes[.chatView] ?? 0, 1, "\(pass.direction) must re-run ChatView")
+            XCTAssertEqual(pass.passes[.responseHostUpdate] ?? 0, 0, "\(pass.direction) rewrote a reply whose content did not change")
+            XCTAssertEqual(pass.passes[.responseHostMeasure] ?? 0, 0, "\(pass.direction) re-measured a reply whose content and width did not change")
+        }
+    }
+
     // MARK: - Harness
 
     private func requireReportOptIn() throws {
@@ -301,7 +322,7 @@ import XCTest
 
     struct Crossing {
         /// `away` from the bottom, `back` to it with a plain scroll, or `tap`
-        /// on the scroll-to-bottom button.
+        /// on the scroll-to-bottom button. `owner<n>` for a forced owner pass.
         var direction: String
         /// Main-thread milliseconds from the scroll or tap until the update
         /// and its deferred main-queue work have drained.
@@ -335,6 +356,31 @@ import XCTest
             let back = await scroll(scrollView, toY: bottomOffsetY(of: scrollView), in: window, direction: "back")
             XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling back must hide the scroll-to-bottom button")
             return [away, tap, awayAgain, back]
+        }
+    }
+
+    /// Hosts the chat at the bottom and forces `count` owner passes that change
+    /// no row's data: `ChatView` and its transcript re-run with the state they
+    /// had, the way a button appearing or a status changing re-runs them.
+    /// Frames render until the screen settles, so what the pass defers counts
+    /// toward it.
+    ///
+    /// Not a settings flip: writing any `UserDefaults` key re-runs every view
+    /// holding an `@AppStorage`, which includes every row.
+    func forceOwnerPassesInHostedChat(messageCount: Int, count: Int) async throws -> [Crossing] {
+        try await withHostedChat(messageCount: messageCount) { fixture, window in
+            var passes: [Crossing] = []
+            for index in 1...count {
+                let before = ViewBodyProbe.counts ?? [:]
+                let start = CACurrentMediaTime()
+                fixture.ownerPasses.generation += 1
+                await drainKeystroke(in: window)
+                let end = CACurrentMediaTime()
+                try await settle(window, fixture: fixture) { true }
+                let after = ViewBodyProbe.counts ?? [:]
+                passes.append(Crossing(direction: "owner\(index)", ms: (end - start) * 1000, passes: after.merging(before) { $0 - $1 }))
+            }
+            return passes
         }
     }
 
@@ -389,12 +435,12 @@ import XCTest
         return Crossing(direction: direction, ms: (end - start) * 1000, passes: after.merging(before) { $0 - $1 })
     }
 
-    func report(_ crossings: [Crossing], scenario: String) {
+    func report(_ crossings: [Crossing], scenario: String, label: String = "SCROLL-PERF") {
         for crossing in crossings {
             let passes = crossing.passes
             let rows = (passes[.transcriptBlock] ?? 0) + (passes[.transcriptRow] ?? 0) + (passes[.messageBubble] ?? 0)
             let fields = [
-                "SCROLL-PERF scenario=\(scenario)",
+                "\(label) scenario=\(scenario)",
                 "direction=\(crossing.direction)",
                 "ms=\(format(crossing.ms))",
                 "landedMs=\(crossing.landedMs.map(format) ?? "-")",
@@ -698,19 +744,44 @@ import XCTest
         let window = UIWindow(windowScene: scene)
         // An iPhone 14 Pro Max's points, the device the lag was reported on.
         window.frame = CGRect(x: 0, y: 0, width: 430, height: 932)
-        window.rootViewController = UIHostingController(rootView: NavigationStack {
-            ChatView(
-                session: session,
-                server: server,
-                onAPIError: { _ in },
-                draftStore: draftStore,
-                draftAttachmentStore: BotAttachmentCopies(),
-                client: client
-            )
-        }
-        .modelContainer(container))
+        window.rootViewController = UIHostingController(rootView: ChatTypingHost(fixture: self)
+            .modelContainer(container))
         window.makeKeyAndVisible()
+        // Build and lay out the screen here, where no deadline runs. The first
+        // time a test process hosts ChatView is its costliest pass (about
+        // 0.5 s on a Mac); on a slow CI runner it held the main thread for 11 s
+        // inside the settle loop's first 10 s frame wait, so no frame could
+        // arrive before that wait expired.
+        window.layoutIfNeeded()
+        CATransaction.flush()
         return window
+    }
+
+    let ownerPasses = OwnerPassTrigger()
+    let draftAttachmentStore = BotAttachmentCopies()
+
+    /// Re-runs `ChatView` without changing its state, the way its parent
+    /// re-rendering does: the host hands it a new `onAPIError` closure.
+    @Observable final class OwnerPassTrigger {
+        var generation = 0
+    }
+
+    private struct ChatTypingHost: View {
+        let fixture: ChatTypingFixture
+
+        var body: some View {
+            let generation = fixture.ownerPasses.generation
+            NavigationStack {
+                ChatView(
+                    session: fixture.session,
+                    server: fixture.server,
+                    onAPIError: { _ in _ = generation },
+                    draftStore: fixture.draftStore,
+                    draftAttachmentStore: fixture.draftAttachmentStore,
+                    client: fixture.client
+                )
+            }
+        }
     }
 
     /// Whole turns of four messages (question, tool call, tool result, reply);

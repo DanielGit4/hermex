@@ -15,24 +15,81 @@ struct ResponseTextSelection<Content: View>: UIViewControllerRepresentable {
         ResponseSelectionController()
     }
 
+    /// SwiftUI calls this on every pass of the row's owners and on any
+    /// environment change, even one the reply never reads (each owner pass
+    /// re-bridges UIKit's trait collection). Only a changed fingerprint
+    /// rebuilds the hosted reply; `identity` must therefore cover everything
+    /// `content` shows that the environment does not.
     func updateUIViewController(_ controller: ResponseSelectionController, context: Context) {
-        ViewBodyProbe.hit(.responseHostUpdate)
-        controller.scope.collectsGlyphs = collectsGlyphs
+        if controller.scope.collectsGlyphs != collectsGlyphs {
+            controller.scope.collectsGlyphs = collectsGlyphs
+        }
         controller.input.onAskHermex = onAskHermex
         if controller.identity != identity {
             controller.input.selectedTextRange = nil
             controller.identity = identity
         }
+        let fingerprint = ResponseSelectionFingerprint(identity: identity, environment: environment)
+        guard fingerprint != controller.fingerprint else { return }
+        // Counted here, not on entry, so a test sees rebuilds rather than calls.
+        ViewBodyProbe.hit(.responseHostUpdate)
+        controller.fingerprint = fingerprint
+        controller.invalidateMeasuredSizes()
         controller.host.rootView = AnyView(content()
             .responseSelectionDocument(controller.scope)
             .textSelection(.disabled)
+            // At its own height, not the frame's, so a reply that grows says so.
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGSize.self, of: \.size) { [weak controller] size in
+                controller?.hostedContentDidLayOut(at: size)
+            }
             .environment(\.self, environment))
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiViewController: ResponseSelectionController, context: Context) -> CGSize? {
-        ViewBodyProbe.hit(.responseHostMeasure)
         guard let width = proposal.width, width > 0 else { return nil }
-        return uiViewController.host.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude))
+        return uiViewController.measuredSize(fitting: width)
+    }
+}
+
+/// What the hosted reply was built from: its text and the environment values
+/// its views read, directly or through `Text` and MarkdownUI. A new value read
+/// inside a reply belongs here too. `chatWorkspaceRoot` is read outside, by
+/// the bubble, to split the reply into media segments. `openURL` is left out
+/// because it cannot be compared; the transcript's is one stable action.
+struct ResponseSelectionFingerprint: Equatable {
+    let identity: String
+    let colorScheme: ColorScheme
+    let colorSchemeContrast: ColorSchemeContrast
+    let dynamicTypeSize: DynamicTypeSize
+    let legibilityWeight: LegibilityWeight?
+    let layoutDirection: LayoutDirection
+    let displayScale: CGFloat
+    let locale: Locale
+    let font: Font?
+    let lineSpacing: CGFloat
+    let multilineTextAlignment: TextAlignment
+    let isEnabled: Bool
+    let reduceMotion: Bool
+    let chatWorkspaceRoot: String?
+    let chatDisclosureToggled: ObjectIdentifier
+
+    init(identity: String, environment: EnvironmentValues) {
+        self.identity = identity
+        colorScheme = environment.colorScheme
+        colorSchemeContrast = environment.colorSchemeContrast
+        dynamicTypeSize = environment.dynamicTypeSize
+        legibilityWeight = environment.legibilityWeight
+        layoutDirection = environment.layoutDirection
+        displayScale = environment.displayScale
+        locale = environment.locale
+        font = environment.font
+        lineSpacing = environment.lineSpacing
+        multilineTextAlignment = environment.multilineTextAlignment
+        isEnabled = environment.isEnabled
+        reduceMotion = environment.accessibilityReduceMotion
+        chatWorkspaceRoot = environment.chatWorkspaceRoot
+        chatDisclosureToggled = ObjectIdentifier(environment.chatDisclosureToggled)
     }
 }
 
@@ -41,6 +98,35 @@ final class ResponseSelectionController: UIViewController {
     lazy var scope = ResponseSelectionScope(input: input)
     let host = UIHostingController(rootView: AnyView(EmptyView()))
     var identity = ""
+    /// Nil until the first update builds the hosted reply.
+    var fingerprint: ResponseSelectionFingerprint?
+    /// The hosted reply's size by proposed width, until it is rebuilt or
+    /// resizes itself (a diff's Show all, a code block's wrap toggle).
+    private var measuredSizes: [CGFloat: CGSize] = [:]
+
+    func measuredSize(fitting width: CGFloat) -> CGSize {
+        if let size = measuredSizes[width] { return size }
+        // Counted on a miss only, so a test sees real measurements.
+        ViewBodyProbe.hit(.responseHostMeasure)
+        let size = host.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude))
+        measuredSizes[width] = size
+        return size
+    }
+
+    func invalidateMeasuredSizes() {
+        measuredSizes = [:]
+    }
+
+    /// The hosted reply laid out at its own height. A height no measurement
+    /// returned means it resized itself, so SwiftUI must ask for it again.
+    func hostedContentDidLayOut(at size: CGSize) {
+        let isMeasured = measuredSizes.values.contains {
+            abs($0.width - size.width) < 0.5 && abs($0.height - size.height) < 0.5
+        }
+        guard !isMeasured else { return }
+        invalidateMeasuredSizes()
+        input.invalidateIntrinsicContentSize()
+    }
 
     override func loadView() {
         view = input
