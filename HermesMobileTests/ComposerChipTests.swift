@@ -711,6 +711,46 @@ final class ComposerChipPresentationTests: XCTestCase {
         XCTAssertEqual(updatedEditor.contentOffset.y, manualOffset.y, accuracy: 0.001)
     }
 
+    /// SwiftUI can hand the editor an update built before its own focus write
+    /// landed: the editor is first responder but the binding still says false.
+    /// The blur that update defers must not land once a later update, before
+    /// the blur runs, has found the editor focused as the binding now asks.
+    func testDeferredBlurYieldsToALaterUpdateThatKeepsFocus() async throws {
+        let state = ComposerPresentationHarnessState()
+        state.isFocused = false
+        let host = UIHostingController(
+            rootView: ComposerPresentationHarness(state: state, updateRevision: 0)
+        )
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = host
+        window.makeKeyAndVisible()
+        defer {
+            window.endEditing(true)
+            window.isHidden = true
+            window.rootViewController = nil
+        }
+
+        host.view.layoutIfNeeded()
+        let editor = try XCTUnwrap(descendants(of: host.view).compactMap { $0 as? ComposerChipTextView }.first)
+        XCTAssertTrue(editor.becomeFirstResponder())
+        XCTAssertTrue(state.isFocused)
+
+        state.isFocused = false
+        host.rootView = ComposerPresentationHarness(state: state, updateRevision: 1)
+        host.view.layoutIfNeeded()
+        state.isFocused = true
+        host.rootView = ComposerPresentationHarness(state: state, updateRevision: 2)
+        host.view.layoutIfNeeded()
+        // The deferred focus change yields once before it acts; three turns
+        // of the main actor let it run.
+        for _ in 0..<3 { await Task.yield() }
+
+        XCTAssertTrue(editor.isFirstResponder)
+        XCTAssertTrue(state.isFocused)
+    }
+
     private func descendants(of view: UIView) -> [UIView] {
         [view] + view.subviews.flatMap { descendants(of: $0) }
     }
