@@ -315,8 +315,8 @@ struct ChatView: View {
     /// those and not this screen and its transcript.
     @State private var scrollFollow = ChatScrollFollowState()
     @State private var followScrollGeneration = 0
-    /// While true the transcript's bottom size-change anchor and follow-driven
-    /// scrolls are suspended so a disclosure toggle grows or shrinks in place.
+    /// While true the transcript's bottom pin and follow-driven scrolls are
+    /// suspended so a disclosure toggle grows or shrinks in place.
     @State private var isDisclosureSettling = false
     @State private var disclosureSettleGeneration = 0
     /// Settled turns the user has opened, plus failed or stopped turns, which
@@ -2986,13 +2986,10 @@ struct ChatView: View {
     }
 
     private func handleFollowEvent(_ event: ChatScrollPolicy.FollowEvent) {
-        let resolved = ChatScrollPolicy.resolveFollow(current: scrollFollow.latch, event: event)
-        if resolved != scrollFollow.latch {
-            scrollFollow.latch = resolved
-        }
+        scrollFollow.apply(event)
     }
 
-    /// Suspends follow scrolls and the bottom anchor through a disclosure
+    /// Suspends follow scrolls and the bottom pin through a disclosure
     /// animation; the transcript view pins the offset itself. The latch is
     /// untouched, so the next streaming trigger catches up once the toggle has
     /// settled.
@@ -3019,21 +3016,7 @@ struct ChatView: View {
     }
 
     private func updateScrollMetrics(_ metrics: ChatScrollMetrics) {
-        let isStreaming = viewModel.activeStreamID != nil
-        let isNearBottom = ChatScrollPolicy.isNearBottom(
-            distanceFromBottom: metrics.distanceFromBottom,
-            isStreaming: isStreaming
-        )
-        let wasNearBottom = scrollFollow.isNearBottom
-        if isNearBottom != wasNearBottom {
-            scrollFollow.isNearBottom = isNearBottom
-        }
-        handleFollowEvent(.contentScrolled(
-            isAtBottom: ChatScrollPolicy.isAtBottom(distanceFromBottom: metrics.distanceFromBottom),
-            isUserScrolling: metrics.isUserInteracting,
-            movedAwayFromBottom: metrics.movedAwayFromBottom,
-            wasNearBottom: wasNearBottom
-        ))
+        scrollFollow.update(with: metrics, isStreaming: viewModel.activeStreamID != nil)
     }
 
     private func prepareTranscriptForExplicitSend() {
@@ -3271,12 +3254,40 @@ final class ChatComposerHeight {
 /// whether auto-follow is latched on. A reference for the same reason as
 /// `ChatComposerHeight`: read in `ChatView.body`, scrolling across the
 /// near-bottom threshold re-ran the whole screen and the transcript (about
-/// 450 ms in a 500-message chat). Only the scroll-to-bottom button, the
-/// size-change anchor and, during a run, the run-status pill read it.
+/// 450 ms in a 500-message chat). Only the scroll-to-bottom button and,
+/// during a run, the run-status pill read it in a body; the transcript's
+/// bottom pin reads it from scroll callbacks.
 @MainActor @Observable
 final class ChatScrollFollowState {
     var isNearBottom = true
     var latch = ChatScrollPolicy.FollowLatch()
+
+    /// Writes the latch only when the event changes it, so its readers re-run
+    /// only then.
+    func apply(_ event: ChatScrollPolicy.FollowEvent) {
+        let resolved = ChatScrollPolicy.resolveFollow(current: latch, event: event)
+        if resolved != latch {
+            latch = resolved
+        }
+    }
+
+    /// Folds one scroll report into the near-bottom band and the latch.
+    func update(with metrics: ChatScrollMetrics, isStreaming: Bool) {
+        let isNearBottom = ChatScrollPolicy.isNearBottom(
+            distanceFromBottom: metrics.distanceFromBottom,
+            isStreaming: isStreaming
+        )
+        let wasNearBottom = self.isNearBottom
+        if isNearBottom != wasNearBottom {
+            self.isNearBottom = isNearBottom
+        }
+        apply(.contentScrolled(
+            isAtBottom: ChatScrollPolicy.isAtBottom(distanceFromBottom: metrics.distanceFromBottom),
+            isUserScrolling: metrics.isUserInteracting,
+            movedAwayFromBottom: metrics.movedAwayFromBottom,
+            wasNearBottom: wasNearBottom
+        ))
+    }
 }
 
 /// Hands `content` the composer's current height, so only this view re-runs

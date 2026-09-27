@@ -28,12 +28,12 @@ struct ChatTranscriptView: View {
     let showsThinkingAndToolCards: Bool
     /// Start date for the "Working for" tail row; nil hides the row.
     let workingRowStartedAt: Date?
-    /// Read only by the scroll-to-bottom button and the size-change anchor in
-    /// their bodies, so crossing the near-bottom threshold or flipping follow
-    /// re-runs those two and not the transcript.
+    /// Read in a body only by the scroll-to-bottom button, so crossing the
+    /// near-bottom threshold or flipping follow re-runs that and not the
+    /// transcript. The bottom pin reads it from scroll callbacks.
     let scrollFollow: ChatScrollFollowState
-    /// True while a disclosure toggle animates; suspends the bottom size-change
-    /// anchor and follow-driven scrolls so the tapped row stays stationary.
+    /// True while a disclosure toggle animates; suspends the bottom pin and
+    /// follow-driven scrolls so the tapped row stays stationary.
     let isDisclosureSettling: Bool
     let latestTranscriptMessageRole: String?
     let activeStreamID: String?
@@ -140,14 +140,7 @@ struct ChatTranscriptView: View {
                             contentWidth: contentWidth
                         )
                     }
-                    .defaultScrollAnchor(
-                        ChatScrollPolicy.initialTranscriptAnchor,
-                        for: .initialOffset
-                    )
-                    .modifier(FollowSizeChangeAnchor(
-                        scrollFollow: scrollFollow,
-                        isDisclosureSettling: isDisclosureSettling
-                    ))
+                    .chatTranscriptScrollAnchors()
                     .frame(width: viewportWidth)
                     .refreshable {
                         if hasOlderMessages {
@@ -225,8 +218,8 @@ struct ChatTranscriptView: View {
         }
     }
 
-    /// Follow-driven scrolls run only while the latch is on and no disclosure
-    /// toggle is mid-animation.
+    /// Follow-driven scrolls and the bottom pin run only while the latch is on
+    /// and no disclosure toggle is mid-animation.
     private var isFollowingLatestContent: Bool {
         scrollFollow.latch.isFollowing && !isDisclosureSettling
     }
@@ -362,6 +355,7 @@ struct ChatTranscriptView: View {
                 ChatScrollObserver(
                     isStreaming: activeStreamID != nil,
                     scrollPositionController: scrollPositionController,
+                    followsLatestContent: { isFollowingLatestContent },
                     onFollowEvent: onFollowEvent
                 ) { metrics in
                     onUpdateScrollMetrics(metrics)
@@ -876,21 +870,14 @@ private struct ChatTranscriptMessageRow: View {
     }
 }
 
-/// Keeps the transcript's size changes bottom-pinned while follow is latched
-/// on. Reads the latch in its own body, so follow flipping re-runs this
-/// modifier and not the transcript it wraps.
-private struct FollowSizeChangeAnchor: ViewModifier {
-    let scrollFollow: ChatScrollFollowState
-    let isDisclosureSettling: Bool
-
-    func body(content: Content) -> some View {
-        content.defaultScrollAnchor(
-            ChatScrollPolicy.sizeChangeAnchor(
-                shouldFollowLatestMessage: scrollFollow.latch.isFollowing,
-                isDisclosureSettling: isDisclosureSettling
-            ),
-            for: .sizeChanges
-        )
+extension View {
+    /// The Sessions transcript's scroll anchors: open at the latest content,
+    /// then keep the offset through size changes. While follow is on,
+    /// `ChatScrollObserver` keeps the bottom pinned instead. The anchors never
+    /// depend on follow: changing one re-updates every reply's selection host.
+    func chatTranscriptScrollAnchors() -> some View {
+        defaultScrollAnchor(ChatScrollPolicy.initialTranscriptAnchor, for: .initialOffset)
+            .defaultScrollAnchor(nil, for: .sizeChanges)
     }
 }
 

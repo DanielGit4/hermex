@@ -1,3 +1,4 @@
+import SwiftUI
 import UIKit
 import XCTest
 @testable import HermesMobile
@@ -354,5 +355,438 @@ final class ChatScrollPositionControllerTests: XCTestCase {
         let scrollView = UIScrollView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
         scrollView.contentSize = CGSize(width: 320, height: 1_200)
         return scrollView
+    }
+}
+
+/// `ChatScrollObserver`'s bottom pin on a bare `UIScrollView`.
+@MainActor
+final class ChatScrollObserverBottomPinTests: XCTestCase {
+    private var isFollowing = true
+
+    func testGrowthWhileFollowingKeepsTheReaderAtTheBottom() {
+        let (scrollView, coordinator) = makeObservedScrollView()
+        defer { coordinator.detach() }
+        scrollView.contentOffset.y = bottomOffsetY(scrollView)
+
+        for growth in [180, 40, 320] as [CGFloat] {
+            scrollView.contentSize.height += growth
+            XCTAssertEqual(scrollView.contentOffset.y, bottomOffsetY(scrollView), accuracy: 0.001)
+        }
+    }
+
+    func testGrowthWhileFollowingAboveTheBottomLeavesTheOffsetLikeABottomSizeChangeAnchor() {
+        // Mid-way through a scroll toward the bottom, or 16 pt up after the
+        // composer grew: SwiftUI's bottom anchor leaves the offset alone.
+        let (scrollView, coordinator) = makeObservedScrollView()
+        defer { coordinator.detach() }
+        let offset = bottomOffsetY(scrollView) - 16
+        scrollView.contentOffset.y = offset
+
+        scrollView.contentSize.height += 300
+
+        XCTAssertEqual(scrollView.contentOffset.y, offset, accuracy: 0.001)
+    }
+
+    func testGrowthWhileNotFollowingLeavesTheReaderWhereTheyAre() {
+        let (scrollView, coordinator) = makeObservedScrollView()
+        defer { coordinator.detach() }
+        scrollView.contentOffset.y = 240
+        isFollowing = false
+
+        scrollView.contentSize.height += 300
+
+        XCTAssertEqual(scrollView.contentOffset.y, 240, accuracy: 0.001)
+    }
+
+    func testInsetChangesAreLeftAloneLikeABottomSizeChangeAnchorLeavesThem() {
+        let (scrollView, coordinator) = makeObservedScrollView()
+        defer { coordinator.detach() }
+        let bottom = bottomOffsetY(scrollView)
+        scrollView.contentOffset.y = bottom
+
+        scrollView.contentInset.bottom = 16
+        scrollView.contentOffset.y = bottom
+
+        XCTAssertEqual(scrollView.contentOffset.y, bottom, accuracy: 0.001)
+    }
+
+    func testDisclosureHoldStandsThePinDown() {
+        let controller = ChatScrollPositionController()
+        let (scrollView, coordinator) = makeObservedScrollView(controller: controller)
+        defer { coordinator.detach() }
+        let bottom = bottomOffsetY(scrollView)
+        scrollView.contentOffset.y = bottom
+
+        controller.holdPosition {}
+        scrollView.contentSize.height += 300
+
+        XCTAssertEqual(scrollView.contentOffset.y, bottom, accuracy: 0.001)
+    }
+
+    func testPinnedOffsetClampsToTheTopWhileTheContentIsShorterThanTheViewport() {
+        let previous = ChatScrollObserver.BottomPinBaseline(contentHeight: 200, boundsHeight: 480, offsetY: -20)
+        XCTAssertEqual(
+            ChatScrollObserver.bottomPinnedOffsetY(
+                previous: previous, contentHeight: 300, boundsHeight: 480,
+                adjustedInset: UIEdgeInsets(top: 20, left: 0, bottom: 0, right: 0)
+            ),
+            -20
+        )
+        XCTAssertNil(ChatScrollObserver.bottomPinnedOffsetY(
+            previous: previous, contentHeight: 200, boundsHeight: 480, adjustedInset: .zero
+        ))
+    }
+
+    private func makeObservedScrollView(
+        controller: ChatScrollPositionController? = nil
+    ) -> (UIScrollView, ChatScrollObserver.Coordinator) {
+        let scrollView = UIScrollView(frame: CGRect(x: 0, y: 0, width: 320, height: 480))
+        scrollView.contentSize = CGSize(width: 320, height: 1_200)
+        let coordinator = ChatScrollObserver.Coordinator(
+            metricContext: ChatScrollObserver.MetricContext(isStreaming: false),
+            scrollPositionController: controller,
+            onFollowEvent: { _ in },
+            onMetrics: { _ in }
+        )
+        coordinator.followsLatestContent = { [unowned self] in self.isFollowing }
+        let observer = ChatScrollObserver.ObserverView(coordinator: coordinator)
+        scrollView.addSubview(observer)
+        return (scrollView, coordinator)
+    }
+
+    private func bottomOffsetY(_ scrollView: UIScrollView) -> CGFloat {
+        scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+    }
+}
+
+/// Hosts a bare transcript wired the way the Sessions transcript wires its
+/// own: `chatTranscriptScrollAnchors()`, `ChatScrollObserver` with the bottom
+/// pin, `ChatScrollPositionController` for disclosure holds and
+/// `ChatScrollFollowState` for the latch. Rows have heights the test sets, so
+/// it can grow a streaming reply or toggle a card and watch the reader.
+@MainActor
+final class ChatTranscriptScrollAnchoringTests: XCTestCase {
+    /// Scrolled up while a reply streams in below: what the reader sees stays
+    /// where it is.
+    func testReaderScrolledUpStaysPutWhileAReplyGrowsBelow() async throws {
+        let harness = try await hostedHarness()
+        defer { close(harness) }
+        await scroll(harness, toDistanceFromBottom: 1_500)
+        XCTAssertFalse(harness.follow.latch.isFollowing, "Scrolling away must switch follow off")
+
+        let offset = harness.scrollView.contentOffset.y
+        for step in 1...5 {
+            await grow(harness, row: harness.rows.heights.count - 1, by: 180)
+            XCTAssertEqual(harness.scrollView.contentOffset.y, offset, accuracy: 1, "Growth step \(step) moved the reader")
+        }
+        XCTAssertFalse(harness.follow.latch.isFollowing, "Growth below must not switch follow back on")
+    }
+
+    /// Back at the bottom after reading up, with follow re-armed by the drag
+    /// settling there, each growth step stays pinned to the latest content by
+    /// itself: this transcript has no follow scrolls. (Until a transcript has
+    /// been scrolled, SwiftUI holds its initial bottom anchor on its own, so
+    /// the reader scrolls away first.)
+    func testReaderBackAtTheBottomStaysThereWhileAReplyGrows() async throws {
+        let harness = try await hostedHarness()
+        defer { close(harness) }
+        await scroll(harness, toDistanceFromBottom: 1_500)
+        await scroll(harness, toDistanceFromBottom: 0)
+        harness.follow.apply(.userScrollEnd(isAtBottom: true))
+        XCTAssertTrue(harness.follow.latch.isFollowing)
+
+        for step in 1...5 {
+            await grow(harness, row: harness.rows.heights.count - 1, by: 180)
+            XCTAssertLessThanOrEqual(distanceFromBottom(harness.scrollView), 1, "Growth step \(step) left the bottom")
+        }
+        XCTAssertTrue(harness.follow.latch.isFollowing, "Growth must not switch follow off")
+    }
+
+    /// The scroll-to-bottom tap as `ChatView.scrollToBottom` performs it: an
+    /// explicit reset and an animated SwiftUI scroll to the bottom row. The
+    /// growth that follows stays pinned.
+    func testTapToTheBottomResumesFollowAndTheNextGrowthStaysPinned() async throws {
+        let harness = try await hostedHarness()
+        defer { close(harness) }
+        await scroll(harness, toDistanceFromBottom: 1_500)
+        XCTAssertFalse(harness.follow.latch.isFollowing, "Scrolling away must switch follow off")
+
+        harness.follow.apply(.reset)
+        withAnimation(ChatMotion.scrollToLatest(reduceMotion: false)) {
+            harness.proxy?.scrollTo(AnchoringTranscript.bottomID, anchor: .bottom)
+        }
+        var frames = 0
+        while distanceFromBottom(harness.scrollView) > 1, frames < 120 {
+            await renderFrames(2)
+            frames += 2
+        }
+        await drain(harness)
+        XCTAssertLessThanOrEqual(distanceFromBottom(harness.scrollView), 1, "The tap must land at the bottom")
+        XCTAssertTrue(harness.follow.latch.isFollowing, "The tap must turn follow back on")
+
+        for step in 1...3 {
+            await grow(harness, row: harness.rows.heights.count - 1, by: 180)
+            XCTAssertLessThanOrEqual(distanceFromBottom(harness.scrollView), 1, "Growth step \(step) after the tap left the bottom")
+        }
+    }
+
+    /// A finger that lands at the bottom while a reply streams switches follow
+    /// off (`ChatScrollObserver` reports `.userScrollBegin` on pan begin), so
+    /// the content growing under it must not move.
+    func testFingerDownAtTheBottomKeepsTheContentStillWhileAReplyGrows() async throws {
+        let harness = try await hostedHarness()
+        defer { close(harness) }
+        await scroll(harness, toDistanceFromBottom: 1_500)
+        await scroll(harness, toDistanceFromBottom: 0)
+        harness.follow.apply(.userScrollBegin)
+
+        let offset = harness.scrollView.contentOffset.y
+        for step in 1...3 {
+            await grow(harness, row: harness.rows.heights.count - 1, by: 180)
+            XCTAssertEqual(harness.scrollView.contentOffset.y, offset, accuracy: 1, "Growth step \(step) moved the content under the finger")
+        }
+    }
+
+    /// Expanding, then collapsing, a card on screen while scrolled up leaves
+    /// the reader where they are on every frame of the animation.
+    func testTogglingACardWhileScrolledUpDoesNotMoveTheReader() async throws {
+        let harness = try await hostedHarness()
+        defer { close(harness) }
+        await scroll(harness, toDistanceFromBottom: 1_500)
+        XCTAssertFalse(harness.follow.latch.isFollowing, "Scrolling away must switch follow off")
+        let visibleRow = try XCTUnwrap(firstRowBelowTheTop(of: harness), "A row must be on screen")
+
+        let offset = harness.scrollView.contentOffset.y
+        for (change, growth) in [("Expanding", 320), ("Collapsing", -320)] as [(String, CGFloat)] {
+            let offsets = await toggleCard(harness, row: visibleRow, by: growth)
+            for (frame, offsetY) in offsets.enumerated() {
+                XCTAssertEqual(offsetY, offset, accuracy: 1, "\(change) the card moved the reader on frame \(frame)")
+            }
+        }
+    }
+
+    // MARK: - Harness
+
+    private static let rowHeight: CGFloat = 120
+    private static let rowCount = 40
+
+    private func hostedHarness() async throws -> AnchoringHarness {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let harness = AnchoringHarness(heights: Array(repeating: Self.rowHeight, count: Self.rowCount))
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 430, height: 932)
+        window.rootViewController = UIHostingController(rootView: AnchoringTranscript(harness: harness))
+        window.makeKeyAndVisible()
+        harness.window = window
+        try await settle(harness)
+        return harness
+    }
+
+    private func close(_ harness: AnchoringHarness) {
+        harness.window?.isHidden = true
+        harness.window?.rootViewController = nil
+        harness.window = nil
+    }
+
+    private func settle(_ harness: AnchoringHarness) async throws {
+        var previous: [CGFloat] = []
+        for _ in 0..<60 {
+            await renderFrames(3)
+            let scrollView = harness.window.flatMap { transcriptScrollView(in: $0) }
+            let signature = [scrollView?.contentSize.height ?? 0, scrollView?.contentOffset.y ?? 0]
+            if scrollView != nil, harness.proxy != nil, harness.disclosureToggled != nil, signature == previous {
+                harness.scrollView = scrollView
+                return
+            }
+            previous = signature
+        }
+        throw HarnessNeverSettled()
+    }
+
+    private struct HarnessNeverSettled: Error {}
+
+    /// An animated scroll with no gesture, like a status-bar tap. Animated,
+    /// because SwiftUI does not register an offset set without animation and
+    /// re-applies its initial bottom anchor on the next size change.
+    private func scroll(_ harness: AnchoringHarness, toDistanceFromBottom distance: CGFloat) async {
+        let scrollView = harness.scrollView!
+        let targetY = bottomOffsetY(scrollView) - distance
+        scrollView.setContentOffset(CGPoint(x: 0, y: targetY), animated: true)
+        var frames = 0
+        while abs(scrollView.contentOffset.y - targetY) > 0.5, frames < 120 {
+            await renderFrames(2)
+            frames += 2
+        }
+        await drain(harness)
+        await renderFrames(2)
+    }
+
+    private func grow(_ harness: AnchoringHarness, row: Int, by growth: CGFloat) async {
+        harness.rows.heights[row] += growth
+        await drain(harness)
+    }
+
+    /// Toggles a card the way the transcript's cards do: announce the toggle,
+    /// then change the height in the disclosure animation. Returns the offset
+    /// on each frame until the animation and the hold are over.
+    private func toggleCard(_ harness: AnchoringHarness, row: Int, by growth: CGFloat) async -> [CGFloat] {
+        harness.disclosureToggled?.callAsFunction()
+        withAnimation(ChatMotion.disclosure(reduceMotion: false)) {
+            harness.rows.heights[row] += growth
+        }
+        var offsets: [CGFloat] = []
+        for _ in 0..<40 {
+            await renderFrames(1)
+            offsets.append(harness.scrollView.contentOffset.y)
+        }
+        return offsets
+    }
+
+    /// The first row whose top is inside the viewport.
+    private func firstRowBelowTheTop(of harness: AnchoringHarness) -> Int? {
+        let scrollView = harness.scrollView!
+        let visibleTop = scrollView.contentOffset.y + scrollView.adjustedContentInset.top
+        var rowTop = AnchoringTranscript.topPadding
+        for (index, height) in harness.rows.heights.enumerated() {
+            if rowTop >= visibleTop { return index }
+            rowTop += height + AnchoringTranscript.spacing
+        }
+        return nil
+    }
+
+    private func drain(_ harness: AnchoringHarness) async {
+        for _ in 0..<3 {
+            harness.window?.layoutIfNeeded()
+            CATransaction.flush()
+            await withCheckedContinuation { continuation in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+        }
+        harness.window?.layoutIfNeeded()
+        CATransaction.flush()
+    }
+
+    private func distanceFromBottom(_ scrollView: UIScrollView) -> CGFloat {
+        bottomOffsetY(scrollView) - scrollView.contentOffset.y
+    }
+
+    private func bottomOffsetY(_ scrollView: UIScrollView) -> CGFloat {
+        scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+    }
+
+    private func transcriptScrollView(in view: UIView) -> UIScrollView? {
+        if let scrollView = view as? UIScrollView, scrollView.contentSize.height > 0 { return scrollView }
+        for subview in view.subviews {
+            if let scrollView = transcriptScrollView(in: subview) { return scrollView }
+        }
+        return nil
+    }
+
+    private func renderFrames(_ target: Int) async {
+        let rendered = expectation(description: "Frames rendered")
+        let driver = BotRenderFrameDriver(target: target) { rendered.fulfill() }
+        driver.start()
+        await fulfillment(of: [rendered], timeout: 10)
+        driver.stop()
+    }
+}
+
+@MainActor
+private final class AnchoringHarness {
+    @MainActor @Observable
+    final class Rows {
+        var heights: [CGFloat]
+        /// What `ChatView` sets for `ChatScrollPolicy.disclosureAnchorSuspension`
+        /// after a toggle.
+        var isDisclosureSettling = false
+
+        init(heights: [CGFloat]) {
+            self.heights = heights
+        }
+    }
+
+    let rows: Rows
+    let follow = ChatScrollFollowState()
+    let controller = ChatScrollPositionController()
+    var window: UIWindow?
+    var scrollView: UIScrollView!
+    var proxy: ScrollViewProxy?
+    /// The transcript's `chatDisclosureToggled` action, as a card reads it.
+    var disclosureToggled: ChatDisclosureToggleAction?
+    private var settleGeneration = 0
+
+    init(heights: [CGFloat]) {
+        rows = Rows(heights: heights)
+    }
+
+    /// `ChatTranscriptView.isFollowingLatestContent`.
+    var isFollowingLatestContent: Bool {
+        follow.latch.isFollowing && !rows.isDisclosureSettling
+    }
+
+    /// `ChatView.suspendBottomAnchorForDisclosure()`.
+    func suspendFollowForDisclosure() {
+        settleGeneration += 1
+        let generation = settleGeneration
+        rows.isDisclosureSettling = true
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(ChatScrollPolicy.disclosureAnchorSuspension))
+            guard generation == settleGeneration else { return }
+            rows.isDisclosureSettling = false
+        }
+    }
+}
+
+private struct AnchoringTranscript: View {
+    static let topPadding: CGFloat = 16
+    static let spacing: CGFloat = 12
+    static let bottomID = "bottom"
+    private static let contentID = "content"
+
+    let harness: AnchoringHarness
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(spacing: Self.spacing) {
+                    ForEach(harness.rows.heights.indices, id: \.self) { index in
+                        Color.secondary.frame(height: harness.rows.heights[index])
+                    }
+                    Color.clear
+                        .frame(height: 1)
+                        .background { DisclosureActionReader(harness: harness) }
+                        .id(Self.bottomID)
+                }
+                .padding(.top, Self.topPadding)
+                .frame(maxWidth: .infinity)
+                .chatDisclosureToggled {
+                    harness.controller.holdPosition {
+                        proxy.scrollTo(Self.contentID, anchor: .top)
+                    }
+                    harness.suspendFollowForDisclosure()
+                }
+                .id(Self.contentID)
+                .background {
+                    ChatScrollObserver(
+                        isStreaming: false,
+                        scrollPositionController: harness.controller,
+                        followsLatestContent: { harness.isFollowingLatestContent },
+                        onFollowEvent: { harness.follow.apply($0) },
+                        onMetrics: { harness.follow.update(with: $0, isStreaming: false) }
+                    )
+                }
+            }
+            .chatTranscriptScrollAnchors()
+            .onAppear { harness.proxy = proxy }
+        }
+    }
+}
+
+private struct DisclosureActionReader: View {
+    @Environment(\.chatDisclosureToggled) private var disclosureToggled
+    let harness: AnchoringHarness
+
+    var body: some View {
+        Color.clear.onAppear { harness.disclosureToggled = disclosureToggled }
     }
 }

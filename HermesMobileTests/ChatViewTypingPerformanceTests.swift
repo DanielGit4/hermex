@@ -76,6 +76,10 @@ import XCTest
     /// in a 500-message chat). A reply the scroll carries into or out of view
     /// still re-runs its own bubble, once, to start or stop collecting glyphs
     /// for selection.
+    ///
+    /// Scrolling away and the tap also flip auto-follow, which must not
+    /// re-update every reply's selection host either: a scroll anchor that
+    /// changed with follow did (about 500 ms in a 500-message chat).
     func testCrossingTheNearBottomThresholdReRunsNeitherScreenNorTranscript() async throws {
         let crossings = try await crossNearBottomInHostedChat(messageCount: 40)
         report(crossings, scenario: "regression40")
@@ -89,6 +93,44 @@ import XCTest
                 crossing.passes[.messageBubble] ?? 0, crossing.passes[.replyVisibility] ?? 0,
                 "Scrolling \(crossing.direction) re-ran a bubble whose visibility did not change"
             )
+            XCTAssertLessThanOrEqual(
+                crossing.passes[.responseHostUpdate] ?? 0, crossing.passes[.replyVisibility] ?? 0,
+                "Scrolling \(crossing.direction) re-updated a selection host whose visibility did not change"
+            )
+        }
+    }
+
+    /// Tapping the scroll-to-bottom button lands at the bottom, hides the
+    /// button and turns follow back on, so content that changes height next
+    /// stays pinned to the bottom. The change here is settled turns unfolding,
+    /// which moves nothing but the transcript's height and scrolls nothing.
+    func testTappingScrollToBottomLandsThereAndResumesFollow() async throws {
+        let foldsKey = ChatTranscriptDisplaySettings.foldsSettledTurnsKey
+        let savedFolds = UserDefaults.standard.object(forKey: foldsKey)
+        defer { UserDefaults.standard.set(savedFolds, forKey: foldsKey) }
+        UserDefaults.standard.set(true, forKey: foldsKey)
+
+        try await withHostedChat(messageCount: 40) { fixture, window in
+            let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
+            let observer = try XCTUnwrap(
+                descendants(window).compactMap { ($0 as? ChatScrollObserver.ObserverView)?.coordinator }.first
+            )
+            _ = await scroll(scrollView, toY: bottomOffsetY(of: scrollView) - Self.scrollAwayDistance, in: window, direction: "away")
+            XCTAssertTrue(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling away must show the scroll-to-bottom button")
+            XCTAssertEqual(observer.followsLatestContent?(), false, "Scrolling away must switch follow off")
+
+            _ = try await tapScrollToBottomButton(scrollView, in: window)
+            XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "Tapping the button must hide it")
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "Tapping the button must land at the bottom")
+            XCTAssertEqual(observer.followsLatestContent?(), true, "Tapping the button must turn follow back on")
+
+            let height = scrollView.contentSize.height
+            UserDefaults.standard.set(false, forKey: foldsKey)
+            await drainKeystroke(in: window)
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "The first relayout after the tap left the bottom")
+            try await settle(window, fixture: fixture) { true }
+            XCTAssertGreaterThan(abs(scrollView.contentSize.height - height), 20, "Unfolding must change the transcript's height")
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "Content that changed after the tap must stay pinned to the bottom")
         }
     }
 
