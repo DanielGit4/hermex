@@ -1276,6 +1276,9 @@ enum ViewBodyProbe {
         /// Not bodies: a reply's selection host rewriting its hosted content
         /// and being measured, which SwiftUI can do without a body pass.
         case responseHostUpdate, responseHostMeasure
+        /// Not bodies: a full walk of the transcript deriving the settled-turn
+        /// folds or the terminal replies' meta rows.
+        case turnFoldsDerive, terminalRepliesDerive
     }
 
     #if DEBUG
