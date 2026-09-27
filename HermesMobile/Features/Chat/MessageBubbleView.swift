@@ -171,7 +171,10 @@ struct MessageBubbleView: View {
                 .onGeometryChange(for: Bool.self) { geometry in
                     guard let viewport = geometry.bounds(of: .scrollView(axis: .vertical)) else { return true }
                     return viewport.intersects(CGRect(origin: .zero, size: geometry.size))
-                } action: { responseIsVisible = $0 }
+                } action: { isVisible in
+                    ViewBodyProbe.hit(.replyVisibility)
+                    responseIsVisible = isVisible
+                }
             }
 
             linkPreview(linkPreviewURL)

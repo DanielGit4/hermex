@@ -50,9 +50,7 @@ import XCTest
     /// draft onto a new line and grows the composer, which used to re-run the
     /// screen and re-measure every row (about 400 ms in a 500-message chat).
     ///
-    /// Typed a word at a time to stay quick. Two grown lines stay well inside
-    /// the near-bottom band; pushing the reader past it does re-run the screen,
-    /// on purpose, to show the scroll-to-bottom button.
+    /// Typed a word at a time to stay quick.
     func testTypingAndWrappingReRunOnlyTheComposer() async throws {
         let words = Self.wrappingText.prefix(215).split(separator: " ").map { String($0) + " " }
         let run = try await typeIntoHostedChat(messageCount: 40, keystrokes: words)
@@ -75,15 +73,21 @@ import XCTest
     /// Scrolling away from the bottom far enough to show the scroll-to-bottom
     /// button, and back, re-runs neither the screen, the transcript nor a row.
     /// Both used to re-run all of them (about 400 ms in a 500-message chat).
+    /// A reply the scroll carries into or out of view still re-runs its own
+    /// bubble, once, to start or stop collecting glyphs for selection.
     func testCrossingTheNearBottomThresholdReRunsNeitherScreenNorTranscript() async throws {
         let crossings = try await crossNearBottomInHostedChat(messageCount: 40)
         report(crossings, scenario: "regression40")
 
         XCTAssertEqual(crossings.map(\.direction), ["away", "back"])
         for crossing in crossings {
-            for site in [ViewBodyProbe.Site.chatView, .chatViewport, .transcript, .transcriptBlock, .transcriptRow, .messageBubble] {
+            for site in [ViewBodyProbe.Site.chatView, .chatViewport, .transcript, .transcriptBlock, .transcriptRow] {
                 XCTAssertEqual(crossing.passes[site] ?? 0, 0, "Scrolling \(crossing.direction) re-ran \(site.rawValue)")
             }
+            XCTAssertLessThanOrEqual(
+                crossing.passes[.messageBubble] ?? 0, crossing.passes[.replyVisibility] ?? 0,
+                "Scrolling \(crossing.direction) re-ran a bubble whose visibility did not change"
+            )
         }
     }
 
@@ -274,6 +278,8 @@ import XCTest
                 "chatViewport=\(passes[.chatViewport] ?? 0)",
                 "transcript=\(passes[.transcript] ?? 0)",
                 "rows=\(rows)",
+                "bubbles=\(passes[.messageBubble] ?? 0)",
+                "replyVisibility=\(passes[.replyVisibility] ?? 0)",
                 "composer=\(passes[.composer] ?? 0)"
             ]
             print(fields.joined(separator: " "))

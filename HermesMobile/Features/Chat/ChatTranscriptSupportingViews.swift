@@ -1198,6 +1198,9 @@ struct PinnedLocalNoticeStack: View {
 enum ViewBodyProbe {
     enum Site: String, CaseIterable {
         case chatView, chatViewport, transcript, transcriptBlock, transcriptRow, messageBubble, composer
+        /// Not a body: a reply scrolling into or out of the viewport, which
+        /// re-runs its bubble once to start or stop collecting glyphs.
+        case replyVisibility
     }
 
     #if DEBUG

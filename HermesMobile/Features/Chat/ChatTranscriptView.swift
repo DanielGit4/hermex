@@ -28,13 +28,14 @@ struct ChatTranscriptView: View {
     let showsThinkingAndToolCards: Bool
     /// Start date for the "Working for" tail row; nil hides the row.
     let workingRowStartedAt: Date?
-    let showsScrollToBottomButton: Bool
-    let shouldFollowLatestMessage: Bool
+    /// Read only by the scroll-to-bottom button and the size-change anchor in
+    /// their bodies, so crossing the near-bottom threshold or flipping follow
+    /// re-runs those two and not the transcript.
+    let scrollFollow: ChatScrollFollowState
     /// True while a disclosure toggle animates; suspends the bottom size-change
     /// anchor and follow-driven scrolls so the tapped row stays stationary.
     let isDisclosureSettling: Bool
     let latestTranscriptMessageRole: String?
-    let isScrolledNearBottom: Bool
     let activeStreamID: String?
     /// Reads the stream's coalesced scroll trigger. Only `StreamingFollowTrigger`
     /// calls it, so a bump re-runs that leaf rather than this view and its owner.
@@ -143,13 +144,10 @@ struct ChatTranscriptView: View {
                         ChatScrollPolicy.initialTranscriptAnchor,
                         for: .initialOffset
                     )
-                    .defaultScrollAnchor(
-                        ChatScrollPolicy.sizeChangeAnchor(
-                            shouldFollowLatestMessage: shouldFollowLatestMessage,
-                            isDisclosureSettling: isDisclosureSettling
-                        ),
-                        for: .sizeChanges
-                    )
+                    .modifier(FollowSizeChangeAnchor(
+                        scrollFollow: scrollFollow,
+                        isDisclosureSettling: isDisclosureSettling
+                    ))
                     .frame(width: viewportWidth)
                     .refreshable {
                         if hasOlderMessages {
@@ -173,19 +171,16 @@ struct ChatTranscriptView: View {
                         }
                     )
 
-                    if showsScrollToBottomButton {
-                        ComposerHeightReader(height: composerHeight) { composerHeight in
-                            ChatScrollToBottomButton(
-                                bottomPadding: composerHeight + 12 + composerChromeHeight,
-                                onTap: {
-                                    releasingHold { onScrollToBottom(proxy) }
-                                }
-                            )
+                    ChatScrollToBottomButtonSlot(
+                        scrollFollow: scrollFollow,
+                        isStreaming: activeStreamID != nil,
+                        composerHeight: composerHeight,
+                        composerChromeHeight: composerChromeHeight,
+                        onTap: {
+                            releasingHold { onScrollToBottom(proxy) }
                         }
-                        .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
-                    }
+                    )
                 }
-                .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsScrollToBottomButton)
                 .background(Color(.systemBackground))
                 .background {
                     StreamingFollowTrigger(trigger: streamingScrollTrigger) {
@@ -222,7 +217,7 @@ struct ChatTranscriptView: View {
                     releasingHold { onScrollToBottom(proxy) }
                 }
                 .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
-                    if isScrolledNearBottom {
+                    if scrollFollow.isNearBottom {
                         releasingHold { onScrollToBottom(proxy) }
                     }
                 }
@@ -233,7 +228,7 @@ struct ChatTranscriptView: View {
     /// Follow-driven scrolls run only while the latch is on and no disclosure
     /// toggle is mid-animation.
     private var isFollowingLatestContent: Bool {
-        shouldFollowLatestMessage && !isDisclosureSettling
+        scrollFollow.latch.isFollowing && !isDisclosureSettling
     }
 
     /// Identifies the whole transcript content so a scroll to its top can be
@@ -878,6 +873,57 @@ private struct ChatTranscriptMessageRow: View {
             onFork: onFork,
             onCopy: onCopy
         )
+    }
+}
+
+/// Keeps the transcript's size changes bottom-pinned while follow is latched
+/// on. Reads the latch in its own body, so follow flipping re-runs this
+/// modifier and not the transcript it wraps.
+private struct FollowSizeChangeAnchor: ViewModifier {
+    let scrollFollow: ChatScrollFollowState
+    let isDisclosureSettling: Bool
+
+    func body(content: Content) -> some View {
+        content.defaultScrollAnchor(
+            ChatScrollPolicy.sizeChangeAnchor(
+                shouldFollowLatestMessage: scrollFollow.latch.isFollowing,
+                isDisclosureSettling: isDisclosureSettling
+            ),
+            for: .sizeChanges
+        )
+    }
+}
+
+/// Shows the scroll-to-bottom button once the reader has left the bottom.
+/// Reads the scroll position in its own body, so the button appearing or
+/// disappearing re-runs this slot and not the transcript and its rows.
+private struct ChatScrollToBottomButtonSlot: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    let scrollFollow: ChatScrollFollowState
+    let isStreaming: Bool
+    let composerHeight: ChatComposerHeight
+    let composerChromeHeight: CGFloat
+    let onTap: () -> Void
+
+    var body: some View {
+        let showsButton = ChatScrollPolicy.showsScrollToBottomButton(
+            isNearBottom: scrollFollow.isNearBottom,
+            isStreaming: isStreaming,
+            isFollowing: scrollFollow.latch.isFollowing
+        )
+        ZStack(alignment: .bottom) {
+            if showsButton {
+                ComposerHeightReader(height: composerHeight) { composerHeight in
+                    ChatScrollToBottomButton(
+                        bottomPadding: composerHeight + 12 + composerChromeHeight,
+                        onTap: onTap
+                    )
+                }
+                .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+            }
+        }
+        .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: showsButton)
     }
 }
 
