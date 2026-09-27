@@ -20,6 +20,14 @@ enum CacheStore {
             .map(SessionSummary.init(cachedSession:))
     }
 
+    /// A session's newest cached messages and where they sit in the session.
+    struct MessageWindow {
+        let messages: [ChatMessage]
+        /// The absolute index of the first message (its `sortIndex`), or 0
+        /// when nothing is cached.
+        let messagesOffset: Int
+    }
+
     @MainActor
     static func cachedMessages(
         serverURL: URL,
@@ -55,6 +63,54 @@ enum CacheStore {
             return cachedMessages.reversed().map(ChatMessage.init(cachedMessage:))
         }
         return cachedMessages.map(ChatMessage.init(cachedMessage:))
+    }
+
+    /// The window hermes-webui opens a session with, read from the cache: the
+    /// newest cached messages that hold `renderableLimit` messages other than
+    /// tool results, and the absolute index of the first one. A transcript
+    /// painted from it takes the same place, the same rows and so the same row
+    /// identities as the server window that replaces it.
+    ///
+    /// Rows cached before `sortIndex` became absolute hold indexes relative to
+    /// their window. They read with an offset that is too small, until the next
+    /// successful load rewrites them.
+    @MainActor
+    static func cachedMessageWindow(
+        serverURL: URL,
+        sessionID: String,
+        in context: ModelContext,
+        renderableLimit: Int,
+        now: Date = Date()
+    ) throws -> MessageWindow {
+        let empty = MessageWindow(messages: [], messagesOffset: 0)
+        guard renderableLimit > 0 else { return empty }
+
+        let serverURLString = serverURL.absoluteString
+        var renderableDescriptor = FetchDescriptor<CachedMessage>(
+            predicate: #Predicate { cachedMessage in
+                cachedMessage.serverURLString == serverURLString
+                    && cachedMessage.sessionID == sessionID
+                    && cachedMessage.expiresAt > now
+                    && cachedMessage.role != "tool"
+            },
+            sortBy: [SortDescriptor(\CachedMessage.sortIndex, order: .reverse)]
+        )
+        renderableDescriptor.fetchLimit = renderableLimit
+        guard let firstSortIndex = try context.fetch(renderableDescriptor).last?.sortIndex else { return empty }
+
+        let windowDescriptor = FetchDescriptor<CachedMessage>(
+            predicate: #Predicate { cachedMessage in
+                cachedMessage.serverURLString == serverURLString
+                    && cachedMessage.sessionID == sessionID
+                    && cachedMessage.expiresAt > now
+                    && cachedMessage.sortIndex >= firstSortIndex
+            },
+            sortBy: [SortDescriptor(\CachedMessage.sortIndex)]
+        )
+        return MessageWindow(
+            messages: try context.fetch(windowDescriptor).map(ChatMessage.init(cachedMessage:)),
+            messagesOffset: max(0, firstSortIndex)
+        )
     }
 
     @MainActor
@@ -130,21 +186,26 @@ enum CacheStore {
         try saveAndTrim(context, now: cachedAt)
     }
 
+    /// Replaces a session's cached messages with `messages`, the transcript
+    /// window that starts at absolute index `messagesOffset` in the session.
+    /// Each row's `sortIndex` is its absolute index.
     @MainActor
     static func cacheMessages(
         _ messages: [ChatMessage],
         serverURL: URL,
         sessionID: String,
         in context: ModelContext,
+        messagesOffset: Int = 0,
         cachedAt: Date = Date()
     ) throws {
         let serverURLString = serverURL.absoluteString
+        let firstSortIndex = max(0, messagesOffset)
         let freshKeys = Set(messages.enumerated().map { offset, message in
             CachedMessage.cacheKey(
                 serverURLString: serverURLString,
                 sessionID: sessionID,
                 message: message,
-                sortIndex: offset
+                sortIndex: firstSortIndex + offset
             )
         })
         // One session-scoped fetch serves both the upsert lookups below and the
@@ -164,20 +225,21 @@ enum CacheStore {
         }
 
         for (offset, message) in messages.enumerated() {
+            let sortIndex = firstSortIndex + offset
             let cacheKey = CachedMessage.cacheKey(
                 serverURLString: serverURLString,
                 sessionID: sessionID,
                 message: message,
-                sortIndex: offset
+                sortIndex: sortIndex
             )
             if let cachedMessage = cachedMessagesByKey[cacheKey] {
-                cachedMessage.refresh(from: message, sortIndex: offset, cachedAt: cachedAt)
+                cachedMessage.refresh(from: message, sortIndex: sortIndex, cachedAt: cachedAt)
             } else {
                 context.insert(CachedMessage(
                     serverURLString: serverURLString,
                     sessionID: sessionID,
                     message: message,
-                    sortIndex: offset,
+                    sortIndex: sortIndex,
                     cachedAt: cachedAt
                 ))
             }

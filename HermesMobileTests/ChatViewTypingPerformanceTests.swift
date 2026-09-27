@@ -140,6 +140,29 @@ import XCTest
         report(reopens, scenario: "long500")
     }
 
+    /// Reopening a cached chat paints the server's window from the cache, rows
+    /// and tool cards included, so the server's answer re-runs no row and no
+    /// bubble. Only tool-call rows re-run their block: their cards are derived
+    /// again with fresh start times. Every row used to change identity and be
+    /// built a second time (about 950 ms in a 500-message chat).
+    func testReopeningACachedChatRebuildsNoBubbleWhenTheServerWindowArrives() async throws {
+        let reopens = try await reopenHostedChat(messageCount: 120, times: 1)
+        report(reopens, scenario: "regression120")
+        let reopen = try XCTUnwrap(reopens.first)
+
+        let messages = ChatTypingFixture.messages(count: 120)
+        let toolCallRows = messages[ChatTypingFixture.newestWindowStart(of: messages)...]
+            .filter { $0["tool_calls"] != nil }
+            .count
+        XCTAssertGreaterThan(reopen.paintBubbles, 0, "The cache must paint before the server answers")
+        XCTAssertEqual(reopen.passes[.messageBubble] ?? 0, 0, "The server window rebuilt bubbles whose content did not change")
+        XCTAssertEqual(reopen.passes[.transcriptRow] ?? 0, 0, "The server window re-ran rows whose content did not change")
+        XCTAssertLessThanOrEqual(
+            reopen.passes[.transcriptBlock] ?? 0, toolCallRows,
+            "Only tool-call rows may re-run their block"
+        )
+    }
+
     // MARK: - Harness
 
     private func requireReportOptIn() throws {

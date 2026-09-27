@@ -665,6 +665,106 @@ final class CacheStoreTests: XCTestCase {
         )
     }
 
+    func testCachedMessageWindowReturnsTheAbsoluteIndexOfItsFirstMessage() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let messages = (450..<500).map { index in
+            ChatMessage(
+                role: index.isMultiple(of: 2) ? "user" : "assistant",
+                content: "Message \(index)",
+                timestamp: Double(1_770_000_000 + index),
+                messageId: "m\(index)"
+            )
+        }
+
+        try CacheStore.cacheMessages(messages, serverURL: serverURL, sessionID: "abc123", in: context, messagesOffset: 450)
+
+        XCTAssertEqual(try fetchCachedMessages(in: context).map(\.sortIndex).sorted(), Array(450..<500))
+        let window = try CacheStore.cachedMessageWindow(
+            serverURL: serverURL, sessionID: "abc123", in: context, renderableLimit: 50
+        )
+        XCTAssertEqual(window.messagesOffset, 450)
+        XCTAssertEqual(window.messages.map(\.messageId), messages.map(\.messageId))
+
+        let newest = try CacheStore.cachedMessageWindow(
+            serverURL: serverURL, sessionID: "abc123", in: context, renderableLimit: 20
+        )
+        XCTAssertEqual(newest.messagesOffset, 480)
+        XCTAssertEqual(newest.messages.map(\.messageId), (480..<500).map { "m\($0)" })
+    }
+
+    /// Like hermes-webui's cold-open window: the newest messages that hold the
+    /// limit's worth of non-tool messages, with the tool results among them.
+    func testCachedMessageWindowCountsOnlyMessagesOtherThanToolResults() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let messages = [
+            ChatMessage(role: "user", content: "Run the tests", timestamp: 1_770_000_000, messageId: "m100"),
+            ChatMessage(
+                role: "assistant", content: "", timestamp: 1_770_000_001, messageId: "m101",
+                toolCalls: [.object(["id": .string("call-1"), "function": .object(["name": .string("terminal")])])]
+            ),
+            ChatMessage(role: "tool", content: "1 failure", timestamp: 1_770_000_002, messageId: "m102", toolCallId: "call-1"),
+            ChatMessage(role: "assistant", content: "One test fails.", timestamp: 1_770_000_003, messageId: "m103"),
+            ChatMessage(role: "user", content: "Fix it", timestamp: 1_770_000_004, messageId: "m104"),
+            ChatMessage(role: "assistant", content: "Fixed.", timestamp: 1_770_000_005, messageId: "m105")
+        ]
+        try CacheStore.cacheMessages(messages, serverURL: serverURL, sessionID: "abc123", in: context, messagesOffset: 100)
+
+        let window = try CacheStore.cachedMessageWindow(
+            serverURL: serverURL, sessionID: "abc123", in: context, renderableLimit: 4
+        )
+
+        XCTAssertEqual(window.messagesOffset, 101)
+        XCTAssertEqual(window.messages.map(\.messageId), ["m101", "m102", "m103", "m104", "m105"])
+    }
+
+    /// A message without an ID is keyed by its index, so rewriting the same
+    /// window at the same offset updates its row instead of replacing it.
+    func testCacheMessagesKeepsTheRowOfAMessageWithoutIDAcrossRewritesOfTheSameWindow() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let firstCachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+        let messages = [
+            ChatMessage(role: "user", content: "No ID", timestamp: 1_770_000_000, messageId: nil),
+            ChatMessage(role: "assistant", content: "Also none", timestamp: 1_770_000_001, messageId: nil)
+        ]
+
+        try CacheStore.cacheMessages(
+            messages, serverURL: serverURL, sessionID: "abc123", in: context,
+            messagesOffset: 450, cachedAt: firstCachedAt
+        )
+        let keys = try fetchCachedMessages(in: context).map(\.cacheKey).sorted()
+        try CacheStore.cacheMessages(
+            messages, serverURL: serverURL, sessionID: "abc123", in: context,
+            messagesOffset: 450, cachedAt: firstCachedAt.addingTimeInterval(60)
+        )
+
+        let rows = try fetchCachedMessages(in: context)
+        XCTAssertEqual(rows.map(\.cacheKey).sorted(), keys)
+        XCTAssertEqual(rows.map(\.sortIndex).sorted(), [450, 451])
+        XCTAssertEqual(rows.map(\.cachedAt), [firstCachedAt, firstCachedAt], "An unchanged row is not rewritten")
+    }
+
+    func testCacheMessagesClampsANegativeOffsetToZero() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let messages = [
+            ChatMessage(role: "user", content: "First", timestamp: 1_770_000_000, messageId: "m0"),
+            ChatMessage(role: "assistant", content: "Second", timestamp: 1_770_000_001, messageId: "m1")
+        ]
+
+        try CacheStore.cacheMessages(messages, serverURL: serverURL, sessionID: "abc123", in: context, messagesOffset: -5)
+
+        XCTAssertEqual(try fetchCachedMessages(in: context).map(\.sortIndex).sorted(), [0, 1])
+        XCTAssertEqual(
+            try CacheStore.cachedMessageWindow(
+                serverURL: serverURL, sessionID: "abc123", in: context, renderableLimit: 50
+            ).messagesOffset,
+            0
+        )
+    }
+
     func testCacheMaintenanceEvictsOnlyTheLeastRecentlyCachedOverflowAcrossServers() throws {
         let context = try makeContext()
         let serverA = URL(string: "https://a.example.test")!

@@ -262,7 +262,9 @@ final class ChatViewModel {
     /// cache-first render, or the skill catalog turning sent `/slug` text into
     /// chips. A reader who was pinned to the bottom is put back there.
     private(set) var transcriptRelayoutScrollToken = 0
-    private var hasPrimedInitialCachedMessages = false
+    /// Where the transcript `prepareInitialMessageLoad` painted from the cache
+    /// starts, until the initial load reconciles it; nil when nothing was painted.
+    private var primedCacheFirstOffset: Int?
     /// The transcript request `prepareInitialMessageLoad` sends while the push
     /// transition runs, so the round trip overlaps the animation (#678). Only the
     /// initial `loadMessages` may use it, and only while the active stream is the
@@ -1501,13 +1503,13 @@ final class ChatViewModel {
         defer { isLoading = false }
 
         // Cache-first render (#289): capture the pre-reload window *before* painting
-        // any cached transcript, so the network reconcile below replaces it cleanly
-        // (no merge, no duplication). Then, on a cold open with a populated cache,
+        // any cached transcript. Then, on a cold open with a populated cache,
         // render the cached messages immediately so the loading skeleton never shows.
         let previousMessages = messages
         let previousMessagesOffset = messagesOffset
-        let usesPrimedInitialCache = hasPrimedInitialCachedMessages && !previousMessages.isEmpty
-        hasPrimedInitialCachedMessages = false
+        let primedCacheFirstOffset = self.primedCacheFirstOffset
+        self.primedCacheFirstOffset = nil
+        let usesPrimedInitialCache = primedCacheFirstOffset != nil && !previousMessages.isEmpty
         let cacheFirstPlaceholder: [ChatMessage]
         if previousMessages.isEmpty, let modelContext {
             cacheFirstPlaceholder = renderCachedMessagesBeforeReload(
@@ -1520,6 +1522,12 @@ final class ChatViewModel {
             cacheFirstPlaceholder = []
         }
         let renderedCacheFirst = !cacheFirstPlaceholder.isEmpty
+        // Where the cached window starts, so the reconcile can tell an older page
+        // loaded since the paint, even one loaded before this load began.
+        var cacheFirstOffset = messagesOffset
+        if usesPrimedInitialCache, let primedCacheFirstOffset {
+            cacheFirstOffset = primedCacheFirstOffset
+        }
 
         do {
             let response: SessionResponse
@@ -1564,15 +1572,29 @@ final class ChatViewModel {
                 )
             }
             applyCompressionAnchorMetadata(from: session)
+            // A cache-first paint sits at its rows' absolute indexes, so plainly
+            // replacing it with the server window keeps every row's identity.
+            // Merging or trimming against it could keep stale cached rows above
+            // the window or cut server rows the paint lacks. An older page
+            // loaded while the paint showed stays: the window merges into it.
+            let reconcilesAgainst: (messages: [ChatMessage], offset: Int)
+            if !renderedCacheFirst {
+                reconcilesAgainst = (previousMessages, previousMessagesOffset)
+            } else if messagesOffset < cacheFirstOffset {
+                reconcilesAgainst = (messages, messagesOffset)
+            } else {
+                reconcilesAgainst = ([], cacheFirstOffset)
+            }
             applyReloadedMessages(
                 reloadedMessages,
                 from: session,
-                previousMessages: previousMessages,
-                previousMessagesOffset: previousMessagesOffset
+                previousMessages: reconcilesAgainst.messages,
+                previousMessagesOffset: reconcilesAgainst.offset
             )
             if renderedCacheFirst {
-                // The taller server transcript has now replaced the lighter cache-first
-                // render; signal the view to re-pin to the bottom without a visible jump.
+                // The server transcript has now replaced the cache-first render and
+                // may be taller (new messages, server-only tool details); signal the
+                // view to re-pin to the bottom without a visible jump.
                 transcriptRelayoutScrollToken += 1
             }
             latestServerLoadHadAssistantResponseAfterLatestUser = Self.hasAssistantResponseAfterLatestUser(
@@ -1590,7 +1612,10 @@ final class ChatViewModel {
             )
             if let modelContext {
                 do {
-                    try CacheStore.cacheMessages(messages, serverURL: server, sessionID: sessionID, in: modelContext)
+                    try CacheStore.cacheMessages(
+                        messages, serverURL: server, sessionID: sessionID, in: modelContext,
+                        messagesOffset: messagesOffset
+                    )
                 } catch {
                     cacheErrorMessage = error.localizedDescription
                 }
@@ -1624,26 +1649,33 @@ final class ChatViewModel {
             latestServerLoadHadAssistantResponseAfterLatestUser = false
             if CacheFallbackPolicy.shouldUseCache(for: error), let modelContext {
                 do {
-                    let cachedMessages = try CacheStore.cachedMessages(
+                    let cachedWindow = try CacheStore.cachedMessageWindow(
                         serverURL: server,
                         sessionID: sessionID,
                         in: modelContext,
-                        limit: Self.messagePageLimit
+                        renderableLimit: Self.messagePageLimit
                     )
-                    if !cachedMessages.isEmpty {
+                    if !cachedWindow.messages.isEmpty {
                         clearCompressionAnchorMetadata()
-                        messages = cachedMessages
+                        messages = cachedWindow.messages
                         transcriptRevision &+= 1
                         latestServerLoadHadAssistantResponseAfterLatestUser = Self.hasAssistantResponseAfterLatestUser(
                             in: messages
                         )
                         responseCompletionNeedsTranscriptRefresh = false
-                        messagesOffset = 0
+                        messagesOffset = cachedWindow.messagesOffset
+                        // Offline the server cannot page, and pull-to-refresh
+                        // reloads (which reconnects) only without older messages.
                         hasOlderMessages = false
                         isViewingCachedData = true
                         contextWindowSnapshot = nil
                         errorMessage = nil
-                        setCompletedToolCallGroups([])
+                        // Keep the cache-first paint's tool cards.
+                        setCompletedToolCallGroups(ToolCallGroup.groups(
+                            persistedToolCalls: [],
+                            messages: messages,
+                            messageOffset: messagesOffset
+                        ))
                         completedReasoningGroups = []
                         liveToolCalls = []
                         liveReasoningText = ""
@@ -1719,7 +1751,7 @@ final class ChatViewModel {
             sessionID: sessionID,
             modelContext: modelContext
         )
-        hasPrimedInitialCachedMessages = !cachedMessages.isEmpty
+        primedCacheFirstOffset = cachedMessages.isEmpty ? nil : messagesOffset
     }
 
     /// Clears the stored initial prefetch and returns its task when this load may
@@ -1764,7 +1796,9 @@ final class ChatViewModel {
 
     /// Cache-first render (#289): on a cold session open, paint the cached transcript
     /// immediately so the loading skeleton never appears, then let the in-flight
-    /// `loadMessages` network reload reconcile silently in place. Keeps
+    /// `loadMessages` network reload reconcile silently in place. The paint takes the
+    /// cached window's absolute offset, so its rows carry the render IDs the server
+    /// window will give them and "Load earlier" pages from the right place. Keeps
     /// `isViewingCachedData` off because this is the success-expected window, not an
     /// offline failure — the offline indicator stays tied to a real network error.
     /// Returns the cached messages it rendered (empty if nothing was cached), so the
@@ -1774,13 +1808,13 @@ final class ChatViewModel {
         sessionID: String,
         modelContext: ModelContext
     ) -> [ChatMessage] {
-        let cachedMessages: [ChatMessage]
+        let cachedWindow: CacheStore.MessageWindow
         do {
-            cachedMessages = try CacheStore.cachedMessages(
+            cachedWindow = try CacheStore.cachedMessageWindow(
                 serverURL: server,
                 sessionID: sessionID,
                 in: modelContext,
-                limit: Self.messagePageLimit
+                renderableLimit: Self.messagePageLimit
             )
         } catch {
             // A cache read failure must not block the normal network load; fall back
@@ -1788,14 +1822,21 @@ final class ChatViewModel {
             return []
         }
 
-        guard !cachedMessages.isEmpty else { return [] }
+        guard !cachedWindow.messages.isEmpty else { return [] }
 
-        messages = cachedMessages
+        messages = cachedWindow.messages
         transcriptRevision &+= 1
-        messagesOffset = 0
-        hasOlderMessages = false
+        messagesOffset = cachedWindow.messagesOffset
+        hasOlderMessages = cachedWindow.messagesOffset > 0
+        // The same tool-call groups the reconcile derives from these messages,
+        // so settled turns fold the same way before and after it.
+        setCompletedToolCallGroups(ToolCallGroup.groups(
+            persistedToolCalls: [],
+            messages: messages,
+            messageOffset: messagesOffset
+        ))
         isViewingCachedData = false
-        return cachedMessages
+        return cachedWindow.messages
     }
 
     /// Undo a cache-first placeholder (#289) when the reload fails without adopting
@@ -1813,7 +1854,14 @@ final class ChatViewModel {
         messages = previousMessages
         transcriptRevision &+= 1
         messagesOffset = previousMessagesOffset
-        hasOlderMessages = previousMessagesOffset > 0
+        // What is left, nothing or a paint the server failed to confirm, cannot
+        // page; pull-to-refresh must reload instead.
+        hasOlderMessages = false
+        setCompletedToolCallGroups(ToolCallGroup.groups(
+            persistedToolCalls: [],
+            messages: messages,
+            messageOffset: messagesOffset
+        ))
     }
 
     @discardableResult
@@ -1888,7 +1936,10 @@ final class ChatViewModel {
 
             if let modelContext {
                 do {
-                    try CacheStore.cacheMessages(messages, serverURL: server, sessionID: sessionID, in: modelContext)
+                    try CacheStore.cacheMessages(
+                        messages, serverURL: server, sessionID: sessionID, in: modelContext,
+                        messagesOffset: messagesOffset
+                    )
                 } catch {
                     cacheErrorMessage = error.localizedDescription
                 }
@@ -2818,7 +2869,10 @@ final class ChatViewModel {
         guard let modelContext else { return }
 
         do {
-            try CacheStore.cacheMessages(messages, serverURL: server, sessionID: sessionID, in: modelContext)
+            try CacheStore.cacheMessages(
+                messages, serverURL: server, sessionID: sessionID, in: modelContext,
+                messagesOffset: messagesOffset
+            )
         } catch {
             cacheErrorMessage = error.localizedDescription
         }
@@ -3838,7 +3892,9 @@ final class ChatViewModel {
 
             if let modelContext {
                 do {
-                    try CacheStore.cacheMessages([], serverURL: server, sessionID: sessionID, in: modelContext)
+                    try CacheStore.cacheMessages(
+                        [], serverURL: server, sessionID: sessionID, in: modelContext, messagesOffset: 0
+                    )
                 } catch {
                     // The server history is gone but the offline copy still
                     // holds it, so a later cold open would repaint messages the
@@ -4243,7 +4299,10 @@ final class ChatViewModel {
 
                 if let modelContext {
                     do {
-                        try CacheStore.cacheMessages(messages, serverURL: server, sessionID: sessionID, in: modelContext)
+                        try CacheStore.cacheMessages(
+                            messages, serverURL: server, sessionID: sessionID, in: modelContext,
+                            messagesOffset: messagesOffset
+                        )
                     } catch {
                         cacheErrorMessage = error.localizedDescription
                     }
@@ -4350,7 +4409,10 @@ final class ChatViewModel {
 
                 if let modelContext {
                     do {
-                        try CacheStore.cacheMessages(messages, serverURL: server, sessionID: sessionID, in: modelContext)
+                        try CacheStore.cacheMessages(
+                            messages, serverURL: server, sessionID: sessionID, in: modelContext,
+                            messagesOffset: messagesOffset
+                        )
                     } catch {
                         cacheErrorMessage = error.localizedDescription
                     }
