@@ -45,6 +45,32 @@ import XCTest
         XCTAssertEqual(bundle.plugins.plugins.map(\.name), ["sentinel-plugin"])
     }
 
+    func testTheNextOpenAfterARefreshFinishesRefreshesAgain() async {
+        let inFlight = expectation(description: "the first refresh is in flight")
+        inFlight.expectedFulfillmentCount = 3
+        HeldURLProtocol.install(decide: { Self.signIn($0) ?? .hold }, onHold: { request in
+            if Self.lists[request.url?.path ?? ""] != nil { inFlight.fulfill() }
+        })
+        let bundle = makeStore().bundle(server: server, connection: Self.connection)
+        let refresh = bundle.refreshLists()
+        await fulfillment(of: [inFlight], timeout: 5)
+        Self.lists.forEach { HeldURLProtocol.release($0.key, json: $0.value) }
+        await refresh.value
+
+        // Reopen the moment the refresh finishes, before anything else runs on the main actor.
+        let againInFlight = expectation(description: "the next open refreshes the three lists")
+        againInFlight.expectedFulfillmentCount = 3
+        HeldURLProtocol.install(decide: { Self.signIn($0) ?? .hold }, onHold: { request in
+            if Self.lists[request.url?.path ?? ""] != nil { againInFlight.fulfill() }
+        })
+        let next = bundle.refreshLists()
+        XCTAssertFalse(next == refresh, "a finished refresh is never joined")
+        await fulfillment(of: [againInFlight], timeout: 5)
+
+        Self.lists.forEach { HeldURLProtocol.release($0.key, json: $0.value) }
+        await next.value
+    }
+
     func testReentryShowsThePreviousRowsWhileTheyRefresh() async throws {
         HeldURLProtocol.install { Self.signIn($0) ?? Self.list($0) }
         let store = makeStore()

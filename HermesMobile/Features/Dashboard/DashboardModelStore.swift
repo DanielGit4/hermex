@@ -20,6 +20,7 @@ import Foundation
         let plugins: PluginsViewModel
         let pluginCatalog: PluginCatalogViewModel
         private var listRefresh: Task<Void, Never>?
+        private var listGeneration = 0
 
         init(client: DashboardClient) {
             self.client = client
@@ -32,21 +33,23 @@ import Foundation
 
         /// Loads installed skills, plugins and MCP servers side by side, keeping any rows
         /// already shown. The store owns the task, so opening a section doesn't cancel
-        /// it; a call while one runs joins it.
+        /// it; a call while one runs joins it, and a call once it has finished starts
+        /// a new one.
         @discardableResult
         func refreshLists() -> Task<Void, Never> {
             if let listRefresh { return listRefresh }
-            let task = Task { [skillsHub, mcpServers, plugins] in
+            listGeneration += 1
+            let generation = listGeneration
+            let task = Task { [weak self, skillsHub, mcpServers, plugins] in
                 async let skills: Void = skillsHub.loadInstalled()
                 async let servers: Void = mcpServers.load(force: true)
                 async let installed: Void = plugins.load(force: true)
                 _ = await (skills, servers, installed)
+                // Cleared on the main actor before `value` resolves, and only if no newer
+                // refresh replaced this one after `cancel()`.
+                if self?.listGeneration == generation { self?.listRefresh = nil }
             }
             listRefresh = task
-            Task { [weak self] in
-                await task.value
-                if self?.listRefresh == task { self?.listRefresh = nil }
-            }
             return task
         }
 
