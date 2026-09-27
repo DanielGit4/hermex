@@ -15,15 +15,22 @@ actor APIClient {
     /// Read when building each request so live edits apply without rebuilding the
     /// client. Defaults to the process-wide store; tests inject a fixed list (#255).
     private let customHeaderProvider: @Sendable () -> [CustomHeader]
+    /// Last-known `/api/models` and `/api/providers` answers. The scope comes from
+    /// the session's cookie jar, so a client on the shared session uses the
+    /// process-wide cache and a client on its own session gets its own, unless
+    /// one is passed in.
+    let catalogCache: ServerCatalogCache
 
     init(
         baseURL: URL,
         session: URLSession? = nil,
         publicMediaSession: URLSession? = nil,
-        customHeaderProvider: @escaping @Sendable () -> [CustomHeader] = { CustomHeaderStore.shared.snapshot() }
+        customHeaderProvider: @escaping @Sendable () -> [CustomHeader] = { CustomHeaderStore.shared.snapshot() },
+        catalogCache: ServerCatalogCache? = nil
     ) {
         self.baseURL = baseURL
         self.customHeaderProvider = customHeaderProvider
+        self.catalogCache = catalogCache ?? (session == nil ? .shared : ServerCatalogCache())
 
         // One redirect guard per client (its origin + header provider), attached
         // to each request as a per-task delegate so a server-issued same-origin →

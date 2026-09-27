@@ -8,6 +8,13 @@ protocol InsightsDataClient: Sendable {
     func insights(days: Int) async throws -> InsightsResponse
     func providers() async throws -> ProvidersResponse
     func providerQuota(provider: String, refresh: Bool) async throws -> ProviderQuotaResponse
+    /// The last successful `providers()` answer, so quota probes can start before
+    /// a slow providers request returns.
+    func lastKnownProviders() async -> ServerCatalogCache.Entry<ProvidersResponse>?
+}
+
+extension InsightsDataClient {
+    func lastKnownProviders() async -> ServerCatalogCache.Entry<ProvidersResponse>? { nil }
 }
 
 extension APIClient: InsightsDataClient {}
@@ -216,6 +223,10 @@ final class InsightsViewModel {
     ///
     /// `refresh` bypasses the server's 45 s probe cache and belongs only to the
     /// toolbar button and pull-to-refresh.
+    ///
+    /// `/api/providers` can take seconds, so probes start from the last-known
+    /// providers while it runs, and run again only when the fresh answer selects
+    /// different providers.
     func loadLimits(refresh: Bool = false) async {
         limitsGeneration += 1
         let generation = limitsGeneration
@@ -229,20 +240,36 @@ final class InsightsViewModel {
             }
         }
 
+        async let freshProviders = client.providers()
+        var probed: [String]?
+        if let cached = await client.lastKnownProviders() {
+            let selection = providerQuotaSelection(from: cached.value)
+            guard generation == limitsGeneration, !Task.isCancelled else { return }
+            if !selection.isEmpty {
+                await probeLimits(selection, refresh: refresh, generation: generation)
+                probed = selection
+            }
+        }
+
         let selection: [String]
         do {
-            selection = providerQuotaSelection(from: try await client.providers())
+            selection = providerQuotaSelection(from: try await freshProviders)
         } catch {
             // Nothing to correct the cards with — leave whatever is on screen.
             return
         }
 
-        guard generation == limitsGeneration, !Task.isCancelled else { return }
+        guard generation == limitsGeneration, !Task.isCancelled, selection != probed else { return }
         guard !selection.isEmpty else {
             limitCards = []
             return
         }
 
+        await probeLimits(selection, refresh: refresh, generation: generation)
+    }
+
+    private func probeLimits(_ selection: [String], refresh: Bool, generation: Int) async {
+        guard generation == limitsGeneration, !Task.isCancelled else { return }
         isLoadingLimits = true
 
         let fetchedAt = Date()

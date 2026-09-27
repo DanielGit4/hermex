@@ -100,6 +100,16 @@ struct ChatComposerConfigLoader {
         )
     }
 
+    /// The last-known catalog for `profile`, to fill an empty picker while the fresh
+    /// load runs. Lists only: `loadConfiguration` seeds the chat's model from the
+    /// fresh answer alone. Nil when the client's active profile is another one.
+    func lastKnownCatalogGroups(profile: String?) async -> [ModelCatalogGroup]? {
+        guard let groups = await client.lastKnownModels(profile: Self.nonEmpty(profile))?.value.catalogGroups,
+              !groups.isEmpty
+        else { return nil }
+        return groups
+    }
+
     private func resolveProfile(into state: inout ChatComposerConfigState) async throws {
         let profilesResponse = try await client.profiles()
         state.profileOptions = profilesResponse.profiles ?? []

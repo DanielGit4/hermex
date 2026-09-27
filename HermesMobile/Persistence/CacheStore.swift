@@ -191,6 +191,18 @@ enum CacheStore {
         try saveAndTrim(context, now: cachedAt)
     }
 
+    /// Everything "Clear Offline Cache" deletes for one server: its cached
+    /// sessions and messages, its Bot history index, and its last-known model
+    /// and provider catalogs. Other servers keep theirs.
+    @MainActor
+    static func clearOfflineData(for serverURL: URL, in context: ModelContext,
+                                 botHistory: BotHistoryCache = .shared,
+                                 catalogs: ServerCatalogCache = .shared) async throws {
+        try clearCache(for: serverURL, in: context)
+        try await botHistory.remove(server: serverURL)
+        try await catalogs.remove(server: serverURL)
+    }
+
     /// Deletes only the cached sessions and messages belonging to `serverURL`,
     /// leaving every other configured server's offline data intact (#18). Backs
     /// the Settings "Clear Offline Cache" action (active server) and the purge

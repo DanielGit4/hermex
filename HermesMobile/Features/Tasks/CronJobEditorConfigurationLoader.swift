@@ -44,18 +44,25 @@ final class CronJobEditorConfigurationLoader {
         _ = await (models, profiles, skills)
     }
 
+    /// Fills the picker from the last-known catalog at once, then the fresh one.
+    /// A failure with last-known rows on screen stays quiet: the picker is usable.
     func loadModels() async {
         guard !isLoadingModels else { return }
         isLoadingModels = true
         modelsErrorMessage = nil
         defer { isLoadingModels = false }
 
+        async let fresh = client.models()
+        if modelGroups.isEmpty, let cached = await client.lastKnownModels() {
+            modelGroups = cached.value.catalogGroups
+        }
+
         do {
-            modelGroups = try await client.models().catalogGroups
+            modelGroups = try await fresh.catalogGroups
         } catch {
             // A cancelled `.task` (the sheet dismissed mid-load) is not a
             // failure the user should see.
-            guard !Self.isCancellation(error) else { return }
+            guard !Self.isCancellation(error), modelGroups.isEmpty else { return }
             modelsErrorMessage = error.localizedDescription
         }
     }

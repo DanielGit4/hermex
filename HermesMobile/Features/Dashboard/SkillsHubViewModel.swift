@@ -44,6 +44,8 @@ import Observation
 
     private(set) var installedSections: [InstalledSection] = []
     private(set) var installedState: LoadState = .idle
+    /// When the installed rows on screen were read from the host.
+    private(set) var installedLoadedAt: Date?
     /// Hub lock entries keyed by install identifier: trust level and last scan verdict.
     private(set) var hubLock: [String: HubLockEntry] = [:]
     private(set) var hubLockByName: [String: HubLockEntry] = [:]
@@ -95,9 +97,11 @@ import Observation
     func loadInstalled() async {
         guard installedState != .loading else { return }
         installedState = .loading
+        let startedAt = Date()
         async let lock = lockEntries()
         do {
             setInstalled(try await client.installedSkills())
+            installedLoadedAt = startedAt
             installedState = .loaded
         } catch {
             installedState = DashboardProblem.isCancellation(error)
@@ -356,9 +360,11 @@ import Observation
 
     @discardableResult
     private func refreshInstalled() async throws -> [DashboardSkill] {
+        let startedAt = Date()
         async let lock = lockEntries()
         let skills = try await client.installedSkills()
         setInstalled(skills)
+        installedLoadedAt = startedAt
         installedState = .loaded
         if let entries = await lock { setHubLock(entries) }
         return skills

@@ -36,6 +36,8 @@ import Observation
 
     private(set) var plugins: [AgentPlugin] = []
     private(set) var listState: DashboardLoadState = .idle
+    /// When the rows on screen were read from the host.
+    private(set) var lastLoadedAt: Date?
     private(set) var activity: [String: Activity] = [:]
     private(set) var toggleOutcomes: [String: ToggleOutcome] = [:]
     private(set) var toggleProblems: [String: String] = [:]
@@ -77,7 +79,9 @@ import Observation
         listState = .loading
         if force { removalNotice = nil }
         do {
+            let startedAt = Date()
             plugins = try await client.pluginsHub()
+            lastLoadedAt = startedAt
             listState = .loaded
         } catch {
             listState = DashboardProblem.isCancellation(error)
@@ -88,8 +92,10 @@ import Observation
     /// A fresh read that confirms a change on the host. It throws rather than keep stale rows.
     @discardableResult
     func refresh() async throws -> [AgentPlugin] {
+        let startedAt = Date()
         let fresh = try await client.pluginsHub()
         plugins = fresh
+        lastLoadedAt = startedAt
         listState = .loaded
         return fresh
     }

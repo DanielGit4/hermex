@@ -20,6 +20,8 @@ struct DefaultModelPickerView: View {
     @State private var selectedProvider: String?
     @State private var favoriteModelKeys: [ModelFavoriteKey] = ModelFavoritesStore.shared.favoriteKeys
     @State private var errorMessage: String?
+    /// When the request behind the catalog on screen started.
+    @State private var catalogFetchedAt: Date?
     @State private var isSaving = false
     @State private var isSavingCustom = false
     @State private var saveError: String?
@@ -33,6 +35,7 @@ struct DefaultModelPickerView: View {
             favoriteModelKeys: favoriteModelKeys,
             isSelected: isCurrentDefault,
             loadStatus: loadStatus,
+            refreshNote: refreshNote,
             inFlightKey: inFlightKey,
             isCommittingCustom: isSavingCustom,
             isSelectionDisabled: isSaving,
@@ -56,6 +59,11 @@ struct DefaultModelPickerView: View {
         if isLoading && groups.isEmpty { return .loading }
         if let errorMessage, groups.isEmpty { return .failed(errorMessage) }
         return .loaded
+    }
+
+    private var refreshNote: CatalogRefreshNote.State? {
+        if let errorMessage, let catalogFetchedAt { return .failed(since: catalogFetchedAt, detail: errorMessage) }
+        return isLoading ? .refreshing : nil
     }
 
     /// The tapped catalog row while its save is in flight. A custom save names
@@ -128,16 +136,22 @@ struct DefaultModelPickerView: View {
         return model.matchesSelection(modelID: defaultModel, providerID: defaultProvider)
     }
 
+    /// Shows the last-known catalog at once, then the fresh one. Saving never
+    /// reads the cache: it sends the row the user tapped and waits for the server.
     private func loadModels() async {
         guard !isLoading else { return }
         isLoading = true
         errorMessage = nil
+        let client = APIClient(baseURL: server)
+        let startedAt = Date()
+
+        async let fresh = client.models()
+        if groups.isEmpty, let cached = await client.lastKnownModels() {
+            apply(cached.value, fetchedAt: cached.fetchedAt)
+        }
 
         do {
-            let response = try await APIClient(baseURL: server).models()
-            defaultModel = response.defaultModel ?? currentDefaultModel
-            groups = response.catalogGroups
-            activeProvider = response.activeProvider
+            apply(try await fresh, fetchedAt: startedAt)
         } catch {
             errorMessage = error.localizedDescription
         }
@@ -145,6 +159,13 @@ struct DefaultModelPickerView: View {
         isLoading = false
 
         await overlayLiveModels()
+    }
+
+    private func apply(_ response: ModelsResponse, fetchedAt: Date) {
+        defaultModel = response.defaultModel ?? currentDefaultModel
+        groups = response.catalogGroups
+        activeProvider = response.activeProvider
+        catalogFetchedAt = fetchedAt
     }
 
     /// Overlays the active provider's live (uncached) list onto the cached

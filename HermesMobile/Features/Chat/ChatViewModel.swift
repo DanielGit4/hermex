@@ -858,6 +858,14 @@ final class ChatViewModel {
         lastError = nil
         defer { isLoadingComposerConfiguration = false }
 
+        // The picker gets rows before `/api/models` answers. Only the list: the
+        // loader below still seeds the model from the fresh response.
+        if modelCatalogGroups.isEmpty,
+           let groups = await ChatComposerConfigLoader(client: client).lastKnownCatalogGroups(profile: currentProfile),
+           modelCatalogGroups.isEmpty {
+            modelCatalogGroups = groups
+        }
+
         repeat {
             needsComposerConfigurationReload = false
 
@@ -884,6 +892,11 @@ final class ChatViewModel {
     /// the active provider's live list from `/api/models/live`. Failures are
     /// silent by design — the picker keeps whatever it already shows.
     func refreshModelCatalogForPickerOpen() async {
+        if modelCatalogGroups.isEmpty,
+           let groups = await ChatComposerConfigLoader(client: client).lastKnownCatalogGroups(profile: currentProfile) {
+            modelCatalogGroups = groups
+        }
+
         if let response = try? await client.models() {
             let groups = response.catalogGroups
             if !groups.isEmpty {

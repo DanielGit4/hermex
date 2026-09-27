@@ -874,7 +874,8 @@ struct SettingsView: View {
     }
 
     private var defaultModelLabel: String {
-        if isLoadingDefaultModel {
+        // A last-known default stays readable while the fresh catalog loads.
+        if isLoadingDefaultModel, defaultModel?.isEmpty ?? true {
             return String(localized: "Loading")
         }
 
@@ -1134,6 +1135,10 @@ struct SettingsView: View {
         serverSettingsError = nil
         serverUpdateState = nil
         let client = APIClient(baseURL: server)
+        let lastKnownDefaultModel = await client.lastKnownModels()?.value.defaultModel
+        if defaultModel == nil {
+            defaultModel = lastKnownDefaultModel
+        }
 
         do {
             let settings = try await client.settings()
@@ -1165,8 +1170,9 @@ struct SettingsView: View {
             let catalog = try await client.models()
             defaultModel = catalog.defaultModel
         } catch {
-            // Non-fatal: default model is optional info
-            defaultModel = nil
+            // Non-fatal: default model is optional info. A last-known value
+            // stays; without one the row reads "Not set" as before.
+            defaultModel = lastKnownDefaultModel
         }
 
         isLoadingDefaultModel = false
@@ -1330,8 +1336,7 @@ struct SettingsView: View {
         do {
             // Scoped to the active server only, so clearing one server's cache
             // never wipes another configured server's offline data (#18).
-            try CacheStore.clearCache(for: server, in: modelContext)
-            try await BotHistoryCache.shared.remove(server: server)
+            try await CacheStore.clearOfflineData(for: server, in: modelContext)
             cacheStatusMessage = String(localized: "This server's offline cache was cleared.")
         } catch {
             cacheStatusMessage = String(localized: "Could not clear offline cache.")

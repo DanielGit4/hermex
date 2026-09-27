@@ -477,9 +477,14 @@ private struct CreateProfileSheet: View {
     }
 
     private func loadModels() async {
-        // Best-effort, like the webui form: on failure the picker simply keeps
-        // only the "Use active profile default" option.
-        guard let response = try? await APIClient(baseURL: server).models() else { return }
+        // Best-effort, like the webui form: on failure the picker keeps the
+        // last-known catalog, or only the "Use active profile default" option.
+        let client = APIClient(baseURL: server)
+        async let fresh = client.models()
+        if modelGroups.isEmpty, let cached = await client.lastKnownModels() {
+            modelGroups = cached.value.catalogGroups
+        }
+        guard let response = try? await fresh else { return }
         modelGroups = response.catalogGroups
     }
 

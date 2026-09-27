@@ -13,6 +13,9 @@ final class ProvidersViewModel {
     private(set) var activeProviderID: String?
     private(set) var isLoading = false
     private(set) var errorMessage: String?
+    /// When the request behind the rows on screen started: a last-known answer's
+    /// time until a fresh one lands.
+    private(set) var dataFetchedAt: Date?
 
     private let client: APIClient
 
@@ -26,6 +29,8 @@ final class ProvidersViewModel {
         self.client = client ?? APIClient(baseURL: server)
     }
 
+    /// Shows the last-known providers at once when the screen has none, then
+    /// replaces them with the fresh answer. A failed fetch keeps the rows.
     func load() async {
         loadGeneration += 1
         let generation = loadGeneration
@@ -33,11 +38,17 @@ final class ProvidersViewModel {
         isLoading = true
         errorMessage = nil
 
+        let startedAt = Date()
+        async let fresh = client.providers()
+        if providers.isEmpty, let cached = await client.lastKnownProviders(),
+           generation == loadGeneration, providers.isEmpty {
+            apply(cached.value, fetchedAt: cached.fetchedAt)
+        }
+
         do {
-            let response = try await client.providers()
+            let response = try await fresh
             guard generation == loadGeneration else { return }
-            providers = response.providers ?? []
-            activeProviderID = Self.normalizedProviderID(response.activeProvider)
+            apply(response, fetchedAt: startedAt)
         } catch is CancellationError {
             // The owning view was dismissed (or the refresh gesture was torn
             // down) mid-request — don't surface "cancelled" as a load error.
@@ -51,6 +62,21 @@ final class ProvidersViewModel {
         // A newer load owns the loading state now — leave it alone.
         guard generation == loadGeneration else { return }
         isLoading = false
+    }
+
+    /// What to say above rows the screen already shows; nil while there are none.
+    var refreshNote: CatalogRefreshNote.State? {
+        guard !providers.isEmpty else { return nil }
+        if let errorMessage, let dataFetchedAt {
+            return .failed(since: dataFetchedAt, detail: errorMessage)
+        }
+        return isLoading ? .refreshing : nil
+    }
+
+    private func apply(_ response: ProvidersResponse, fetchedAt: Date) {
+        providers = response.providers ?? []
+        activeProviderID = Self.normalizedProviderID(response.activeProvider)
+        dataFetchedAt = fetchedAt
     }
 
     func isActive(_ provider: ProviderSummary) -> Bool {

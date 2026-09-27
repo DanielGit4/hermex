@@ -70,6 +70,11 @@
 		C04000000000000000000003 /* APIClient+Chat.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000013 /* APIClient+Chat.swift */; };
 		C04000000000000000000004 /* APIClient+Workspace.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000014 /* APIClient+Workspace.swift */; };
 		C04000000000000000000005 /* APIClient+ServerPanels.swift in Sources */ = {isa = PBXBuildFile; fileRef = C04000000000000000000015 /* APIClient+ServerPanels.swift */; };
+		CA7A00000000000000000B01 /* ServerCatalogCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7A00000000000000000F01 /* ServerCatalogCache.swift */; };
+		CA7A00000000000000000B02 /* DashboardModelStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7A00000000000000000F02 /* DashboardModelStore.swift */; };
+		CA7A00000000000000000B03 /* CatalogRefreshNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7A00000000000000000F03 /* CatalogRefreshNote.swift */; };
+		CA7A00000000000000000B04 /* ServerCatalogCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7A00000000000000000F04 /* ServerCatalogCacheTests.swift */; };
+		CA7A00000000000000000B05 /* DashboardModelStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7A00000000000000000F05 /* DashboardModelStoreTests.swift */; };
 		C0415B0000000000000001 /* APIClient+ProviderQuota.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0415A0000000000000001 /* APIClient+ProviderQuota.swift */; };
 		C0415B0000000000000002 /* ProviderLimitsCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0415A0000000000000002 /* ProviderLimitsCard.swift */; };
 		C0415B0000000000000003 /* APIClientProviderQuotaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0415A0000000000000003 /* APIClientProviderQuotaTests.swift */; };
@@ -678,6 +683,11 @@
 		C04000000000000000000013 /* APIClient+Chat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Chat.swift"; sourceTree = "<group>"; };
 		C04000000000000000000014 /* APIClient+Workspace.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+Workspace.swift"; sourceTree = "<group>"; };
 		C04000000000000000000015 /* APIClient+ServerPanels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+ServerPanels.swift"; sourceTree = "<group>"; };
+		CA7A00000000000000000F01 /* ServerCatalogCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerCatalogCache.swift; sourceTree = "<group>"; };
+		CA7A00000000000000000F02 /* DashboardModelStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardModelStore.swift; sourceTree = "<group>"; };
+		CA7A00000000000000000F03 /* CatalogRefreshNote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogRefreshNote.swift; sourceTree = "<group>"; };
+		CA7A00000000000000000F04 /* ServerCatalogCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerCatalogCacheTests.swift; sourceTree = "<group>"; };
+		CA7A00000000000000000F05 /* DashboardModelStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardModelStoreTests.swift; sourceTree = "<group>"; };
 		C0415A0000000000000001 /* APIClient+ProviderQuota.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+ProviderQuota.swift"; sourceTree = "<group>"; };
 		C0415A0000000000000002 /* ProviderLimitsCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderLimitsCard.swift; sourceTree = "<group>"; };
 		C0415A0000000000000003 /* APIClientProviderQuotaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientProviderQuotaTests.swift; sourceTree = "<group>"; };
@@ -1318,6 +1328,8 @@
 				A760F1A70000000000000002 /* HermesAgentFixtureTests.swift */,
 				2F45F15CC7743DD0EF843B5E /* HermexPushProvisioningTests.swift */,
 				DA5B000000000000000000F8 /* DashboardClientTests.swift */,
+				CA7A00000000000000000F04 /* ServerCatalogCacheTests.swift */,
+				CA7A00000000000000000F05 /* DashboardModelStoreTests.swift */,
 				DA5B000000000000000000F9 /* SkillsHubDecodingTests.swift */,
 				DA5B000000000000000000FA /* SkillsHubViewModelTests.swift */,
 				DA5C00000000000000000F08 /* MCPDashboardClientTests.swift */,
@@ -1523,6 +1535,7 @@
 				C04000000000000000000014 /* APIClient+Workspace.swift */,
 				C03120000000000000F002 /* APIClient+Git.swift */,
 				C04000000000000000000015 /* APIClient+ServerPanels.swift */,
+				CA7A00000000000000000F01 /* ServerCatalogCache.swift */,
 				C0415A0000000000000001 /* APIClient+ProviderQuota.swift */,
 				C04000000000000000000016 /* APIClient+Cron.swift */,
 				C04000000000000000000017 /* APIClient+Memory.swift */,
@@ -1688,6 +1701,7 @@
 				C09500000000000000000006 /* AdaptiveGlassDebugFixture.swift */,
 				C0FF000000000000000000B2 /* CustomHeadersEditor.swift */,
 				C0366000000000000000002 /* ModelPickerSheet.swift */,
+				CA7A00000000000000000F03 /* CatalogRefreshNote.swift */,
 				C0366000000000000000004 /* ModelPickerConfiguration.swift */,
 				C0DE512E0000000000000203 /* SectionCard.swift */,
 			);
@@ -2017,6 +2031,7 @@
 			children = (
 				DA5B000000000000000000F2 /* DashboardSupport.swift */,
 				DA5B000000000000000000F3 /* DashboardView.swift */,
+				CA7A00000000000000000F02 /* DashboardModelStore.swift */,
 				DA5B000000000000000000F4 /* SkillsHubModels.swift */,
 				DA5B000000000000000000F5 /* SkillsHubViewModel.swift */,
 				DA5B000000000000000000F6 /* SkillsHubView.swift */,
@@ -2412,6 +2427,9 @@
 				1D1FF0000000000000000B33 /* SourceFileSurface.swift in Sources */,
 				C03140000000000000B001 /* GitBranchPickerView.swift in Sources */,
 				C04000000000000000000005 /* APIClient+ServerPanels.swift in Sources */,
+				CA7A00000000000000000B01 /* ServerCatalogCache.swift in Sources */,
+				CA7A00000000000000000B02 /* DashboardModelStore.swift in Sources */,
+				CA7A00000000000000000B03 /* CatalogRefreshNote.swift in Sources */,
 				C0415B0000000000000001 /* APIClient+ProviderQuota.swift in Sources */,
 				C04000000000000000000006 /* APIClient+Cron.swift in Sources */,
 				C04000000000000000000007 /* APIClient+Memory.swift in Sources */,
@@ -2687,6 +2705,8 @@
 				A760F1A70000000000000001 /* HermesAgentFixtureTests.swift in Sources */,
 				1331AA23B3B0713A5896D0A3 /* HermexPushProvisioningTests.swift in Sources */,
 				DA5B000000000000000000B8 /* DashboardClientTests.swift in Sources */,
+				CA7A00000000000000000B04 /* ServerCatalogCacheTests.swift in Sources */,
+				CA7A00000000000000000B05 /* DashboardModelStoreTests.swift in Sources */,
 				DA5B000000000000000000B9 /* SkillsHubDecodingTests.swift in Sources */,
 				DA5B000000000000000000BA /* SkillsHubViewModelTests.swift in Sources */,
 				DA5C00000000000000000B08 /* MCPDashboardClientTests.swift in Sources */,
