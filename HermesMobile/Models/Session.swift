@@ -9,9 +9,15 @@ struct SessionsResponse: Decodable {
     let archivedCount: Int?
     let serverTime: Double?
     let serverTz: String?
+    /// True when the rows span every profile (`all_profiles=1`). The server
+    /// ignores the request in isolated-profile mode and answers false; older
+    /// servers omit it.
+    let allProfiles: Bool?
+    /// The profile this client's `hermes_profile` cookie selects.
+    let activeProfile: String?
 
     enum CodingKeys: String, CodingKey {
-        case sessions, cliCount, archivedCount, serverTime, serverTz
+        case sessions, cliCount, archivedCount, serverTime, serverTz, allProfiles, activeProfile
     }
 
     init(
@@ -19,13 +25,17 @@ struct SessionsResponse: Decodable {
         cliCount: Int? = nil,
         archivedCount: Int? = nil,
         serverTime: Double? = nil,
-        serverTz: String? = nil
+        serverTz: String? = nil,
+        allProfiles: Bool? = nil,
+        activeProfile: String? = nil
     ) {
         self.sessions = sessions
         self.cliCount = cliCount
         self.archivedCount = archivedCount
         self.serverTime = serverTime
         self.serverTz = serverTz
+        self.allProfiles = allProfiles
+        self.activeProfile = activeProfile
     }
 
     init(from decoder: Decoder) throws {
@@ -35,6 +45,8 @@ struct SessionsResponse: Decodable {
         archivedCount = container.decodeLossyIntIfPresent(forKey: .archivedCount)
         serverTime = container.decodeLossyDoubleIfPresent(forKey: .serverTime)
         serverTz = container.decodeLossyStringIfPresent(forKey: .serverTz)
+        allProfiles = container.decodeLossyBoolIfPresent(forKey: .allProfiles)
+        activeProfile = container.decodeLossyStringIfPresent(forKey: .activeProfile)
     }
 }
 
@@ -104,12 +116,15 @@ struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
     let name: String?
     let color: String?
     let createdAt: Double?
+    /// The profile that owns the project, on `all_profiles=1` responses.
+    let profile: String?
 
     enum CodingKeys: String, CodingKey {
         case projectId
         case name
         case color
         case createdAt
+        case profile
     }
 
     init(from decoder: Decoder) throws {
@@ -118,6 +133,7 @@ struct ProjectSummary: Decodable, Equatable, Hashable, Identifiable {
         name = container.decodeLossyStringIfPresent(forKey: .name)
         color = container.decodeLossyStringIfPresent(forKey: .color)
         createdAt = container.decodeLossyDoubleIfPresent(forKey: .createdAt)
+        profile = container.decodeLossyStringIfPresent(forKey: .profile)
     }
 }
 
@@ -227,6 +243,11 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
     /// redacted like the title). Absent on title matches, on every non-search
     /// response, and on servers older than the commit that added it.
     let matchPreview: String?
+    /// Messaging handoff (`handoff_state` / `handoff_platform`), as the Hermes
+    /// desktop app reads it. The WebUI list does not emit these yet; decoded so
+    /// a row shows its origin once it does.
+    let handoffState: String?
+    let handoffPlatform: String?
 
     init(
         sessionId: String? = nil,
@@ -261,7 +282,9 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         readOnly: Bool? = nil,
         isReadOnly: Bool? = nil,
         matchType: String? = nil,
-        matchPreview: String? = nil
+        matchPreview: String? = nil,
+        handoffState: String? = nil,
+        handoffPlatform: String? = nil
     ) {
         self.sessionId = sessionId
         self.title = title
@@ -296,6 +319,8 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         self.isReadOnly = isReadOnly
         self.matchType = matchType
         self.matchPreview = matchPreview
+        self.handoffState = handoffState
+        self.handoffPlatform = handoffPlatform
     }
 
     enum CodingKeys: String, CodingKey {
@@ -307,6 +332,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         case userMessageCount, hasPendingUserMessage, pendingStartedAt, worktreePath
         case sourceTag, rawSource, sessionSource, sourceLabel
         case parentSessionId, relationshipType, readOnly, isReadOnly, matchType, matchPreview
+        case handoffState, handoffPlatform
     }
 
     /// Lossy field by field, like `SessionDetail` and `ProjectSummary` already
@@ -354,6 +380,8 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         isReadOnly = container.decodeLossyBoolIfPresent(forKey: .isReadOnly)
         matchType = container.decodeLossyStringIfPresent(forKey: .matchType)
         matchPreview = container.decodeLossyStringIfPresent(forKey: .matchPreview)
+        handoffState = container.decodeLossyStringIfPresent(forKey: .handoffState)
+        handoffPlatform = container.decodeLossyStringIfPresent(forKey: .handoffPlatform)
     }
 
     /// Decodes a session array a row at a time, so one unreadable row costs that
@@ -417,6 +445,8 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         isReadOnly = detail.isReadOnly
         matchType = nil
         matchPreview = nil
+        handoffState = nil
+        handoffPlatform = nil
     }
 
     /// Applies the import response without dropping list metadata that the
@@ -456,7 +486,9 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
             readOnly: imported.readOnly ?? readOnly,
             isReadOnly: imported.isReadOnly ?? isReadOnly,
             matchType: imported.matchType ?? matchType,
-            matchPreview: imported.matchPreview ?? matchPreview
+            matchPreview: imported.matchPreview ?? matchPreview,
+            handoffState: imported.handoffState ?? handoffState,
+            handoffPlatform: imported.handoffPlatform ?? handoffPlatform
         )
     }
 
@@ -496,15 +528,63 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
             readOnly: readOnly,
             isReadOnly: isReadOnly,
             matchType: matchType,
-            matchPreview: matchPreview
+            matchPreview: matchPreview,
+            handoffState: handoffState,
+            handoffPlatform: handoffPlatform
         )
     }
 }
 
-extension SessionSummary {
-    private static let messagingSourceMarkers: Set<String> = [
-        "discord", "email", "matrix", "slack", "telegram", "wecom", "wecom_callback", "weixin"
+/// Source ids the server stamps on rows (`raw_source` / `source_tag`), with the
+/// Hermes desktop app's labels and its split between messaging platforms and
+/// local surfaces.
+enum SessionSource {
+    /// Rows from these platforms group per platform instead of in Sessions.
+    static let messagingIDs: Set<String> = [
+        "api_server", "bluebubbles", "dingtalk", "discord", "email", "feishu", "homeassistant",
+        "matrix", "mattermost", "photon", "qqbot", "signal", "slack", "sms", "telegram",
+        "webhook", "wecom", "wecom_callback", "weixin", "whatsapp", "yuanbao"
     ]
+
+    /// Surfaces a handoff never names as its origin.
+    static let localIDs: Set<String> = [
+        "acp", "cli", "codex", "desktop", "gateway", "local", "oneshot", "tui", "webui"
+    ]
+
+    private static let labels: [String: String] = [
+        "acp": "ACP", "api_server": "API", "bluebubbles": "iMessage", "cli": "CLI",
+        "codex": "Codex", "desktop": "Desktop", "discord": "Discord", "email": "Email",
+        "gateway": "Gateway", "kanban": "Kanban", "local": "Local", "matrix": "Matrix",
+        "mattermost": "Mattermost", "oneshot": "One-shot", "photon": "Photon", "qqbot": "QQ",
+        "signal": "Signal", "slack": "Slack", "sms": "SMS", "telegram": "Telegram", "tui": "TUI",
+        "webhook": "Webhook", "wecom": "WeCom", "wecom_callback": "WeCom Callback",
+        "weixin": "WeChat", "whatsapp": "WhatsApp", "yuanbao": "Yuanbao"
+    ]
+
+    /// Table ids keyed by their words, so a server label that only restates an
+    /// id ("Weixin", "Api Server") resolves to the desktop label.
+    private static let idsByWords: [String: String] = Dictionary(
+        uniqueKeysWithValues: labels.keys.map { (words($0), $0) }
+    )
+
+    /// The desktop label for a lowercased source id; an unknown id reads as its
+    /// words capitalized.
+    static func label(for id: String) -> String {
+        labels[id] ?? words(id).capitalized
+    }
+
+    /// The table label a server-sent label restates, or nil when the server's
+    /// label says something the table does not ("Telegram Business").
+    static func tableLabel(restatedBy serverLabel: String) -> String? {
+        idsByWords[words(serverLabel.lowercased())].flatMap { labels[$0] }
+    }
+
+    private static func words(_ id: String) -> String {
+        id.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: "-", with: " ")
+    }
+}
+
+extension SessionSummary {
     private static let cliSourceMarkers: Set<String> = ["acp", "cli", "desktop", "tui"]
 
     /// Delegated children are identified only by an explicit source marker.
@@ -542,44 +622,59 @@ extension SessionSummary {
         let markers = [rawSource, sourceTag, sourceLabel]
             .compactMap(Self.normalizedSourceMarker)
         return isCliSession == true
-            || markers.contains(where: Self.messagingSourceMarkers.contains)
+            || markers.contains(where: SessionSource.messagingIDs.contains)
             || markers.contains(where: Self.cliSourceMarkers.contains)
     }
 
-    /// The source chip shown by hermes-webui, preferring the server's label and
-    /// falling back to stable brand/acronym casing for older servers.
+    /// The source chip, labelled like the Hermes desktop app. The server's
+    /// label wins only when it says more than the source id itself
+    /// ("Telegram Business"); one that just restates it ("Weixin") reads as the
+    /// desktop label ("WeChat").
     var sourceDisplayLabel: String? {
         guard requiresExternalImport else { return nil }
 
         if let label = Self.nonEmpty(sourceLabel), label.lowercased() != "webui" {
-            return label
+            return SessionSource.tableLabel(restatedBy: label) ?? label
         }
 
         let marker = [rawSource, sourceTag, sessionSource]
             .compactMap(Self.normalizedSourceMarker)
             .first { $0 != "messaging" && $0 != "webui" }
 
-        switch marker {
-        case "cli": return "CLI"
-        case "tui": return "TUI"
-        case "acp": return "ACP"
-        case "telegram": return "Telegram"
-        case "discord": return "Discord"
-        case "slack": return "Slack"
-        case "email": return "Email"
-        case "matrix": return "Matrix"
-        case "weixin": return "WeChat"
-        case "wecom": return "WeCom"
-        case "wecom_callback": return "WeCom Callback"
-        case "desktop": return "Desktop"
-        case let marker?:
-            return marker
-                .replacingOccurrences(of: "_", with: " ")
-                .replacingOccurrences(of: "-", with: " ")
-                .capitalized
-        case nil:
+        guard let marker else {
             return isCliSession == true ? "CLI" : "Messaging"
         }
+        return SessionSource.label(for: marker)
+    }
+
+    /// The messaging platform id this row groups under (`telegram`,
+    /// `whatsapp`, ...), or nil for WebUI and local rows, which stay in
+    /// Sessions. A row the server marks `messaging` with an id the table does
+    /// not know still groups, under that id.
+    ///
+    /// Runs for every row on every list pass, so it reads each source field
+    /// once instead of asking `requiresExternalImport`; the outcome is the same.
+    var messagingPlatform: String? {
+        let source = Self.normalizedSourceMarker(sessionSource)
+        guard source != "webui" else { return nil }
+
+        let markers = [rawSource, sourceTag, sourceLabel].compactMap(Self.normalizedSourceMarker)
+        if let platform = markers.first(where: SessionSource.messagingIDs.contains) {
+            return platform
+        }
+
+        guard source == "messaging" else { return nil }
+        return markers.first { $0 != "messaging" && $0 != "webui" } ?? "messaging"
+    }
+
+    /// The platform a completed messaging handoff came from, labelled for the
+    /// row's origin badge. Nil for local origins and unfinished handoffs.
+    var handoffOriginLabel: String? {
+        guard Self.normalizedSourceMarker(handoffState) == "completed",
+              let platform = Self.normalizedSourceMarker(handoffPlatform),
+              !SessionSource.localIDs.contains(platform)
+        else { return nil }
+        return SessionSource.label(for: platform)
     }
 
     var shouldAppearInSessionList: Bool {

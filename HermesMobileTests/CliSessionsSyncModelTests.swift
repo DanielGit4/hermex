@@ -143,6 +143,93 @@ final class CliSessionsSyncModelTests: APIClientTestCase {
         XCTAssertEqual(response.showClaudeCodeSessions, false)
     }
 
+    func testUpdateSettingsPostsExactlyTheShowPreviousMessagingSessionsKey() async throws {
+        let client = makeClient { request in
+            XCTAssertEqual(request.url?.path, "/api/settings")
+            XCTAssertEqual(request.httpMethod, "POST")
+
+            let body = try XCTUnwrap(Self.jsonBody(from: request))
+            XCTAssertEqual(body.count, 1)
+            XCTAssertEqual(body["show_previous_messaging_sessions"] as? Bool, true)
+
+            return apiTestJSONResponse(
+                #"{"show_cli_sessions":true,"show_previous_messaging_sessions":true}"#,
+                for: request
+            )
+        }
+
+        let response = try await client.updateSettings(showPreviousMessagingSessions: true)
+
+        XCTAssertEqual(response.showPreviousMessagingSessions, true)
+    }
+
+    // MARK: - Show previous messaging sessions
+
+    /// Off by default, adopted from the server, and never written by adopting.
+    @MainActor
+    func testPreviousMessagingAdoptsTheServerValuePerServerWithoutWriting() {
+        var writtenValues: [Bool] = []
+        let model = makeModel(server: serverA, writePreviousMessagingToServer: { writtenValues.append($0) })
+        XCTAssertFalse(model.showsPreviousMessagingSessions)
+        XCTAssertFalse(model.serverSyncsPreviousMessagingSessions)
+
+        model.adoptPreviousMessaging(serverValue: true)
+
+        XCTAssertTrue(model.showsPreviousMessagingSessions)
+        XCTAssertTrue(model.serverSyncsPreviousMessagingSessions)
+        XCTAssertEqual(writtenValues, [])
+        XCTAssertTrue(SessionRowDisplaySettings.showsPreviousMessagingSessions(for: serverA, in: defaults))
+        XCTAssertFalse(
+            SessionRowDisplaySettings.showsPreviousMessagingSessions(for: serverB, in: defaults),
+            "Server A's value must not reach server B"
+        )
+    }
+
+    /// The server alone applies the setting, so without a reported value
+    /// there is nothing to flip.
+    @MainActor
+    func testPreviousMessagingCannotBeFlippedWhenTheServerOmitsIt() async {
+        var writtenValues: [Bool] = []
+        let model = makeModel(server: serverA, writePreviousMessagingToServer: { writtenValues.append($0) })
+
+        model.adoptPreviousMessaging(serverValue: nil)
+        model.setShowsPreviousMessagingSessions(true)
+        await model.pendingPreviousMessagingWrite?.value
+
+        XCTAssertFalse(model.showsPreviousMessagingSessions)
+        XCTAssertEqual(writtenValues, [])
+    }
+
+    @MainActor
+    func testPreviousMessagingToggleWritesBackAndRevertsOnFailure() async {
+        var shouldFail = false
+        var writtenValues: [Bool] = []
+        let model = makeModel(
+            server: serverA,
+            writePreviousMessagingToServer: { value in
+                writtenValues.append(value)
+                if shouldFail { throw URLError(.notConnectedToInternet) }
+            }
+        )
+        model.adoptPreviousMessaging(serverValue: false)
+
+        model.setShowsPreviousMessagingSessions(true)
+        await model.pendingPreviousMessagingWrite?.value
+        XCTAssertEqual(writtenValues, [true])
+        XCTAssertTrue(model.showsPreviousMessagingSessions)
+        XCTAssertNil(model.previousMessagingSyncErrorMessage)
+
+        shouldFail = true
+        model.setShowsPreviousMessagingSessions(false)
+        XCTAssertFalse(model.showsPreviousMessagingSessions, "Optimistic update applies immediately")
+        await model.pendingPreviousMessagingWrite?.value
+
+        XCTAssertEqual(writtenValues, [true, false])
+        XCTAssertTrue(model.showsPreviousMessagingSessions, "A failed write reverts the toggle")
+        XCTAssertNotNil(model.previousMessagingSyncErrorMessage)
+        XCTAssertTrue(SessionRowDisplaySettings.showsPreviousMessagingSessions(for: serverA, in: defaults))
+    }
+
     // MARK: - Adopt on load
 
     @MainActor
@@ -427,13 +514,15 @@ final class CliSessionsSyncModelTests: APIClientTestCase {
     private func makeModel(
         server: URL,
         writeClaudeCodeToServer: @escaping @MainActor (Bool) async throws -> Void = { _ in },
+        writePreviousMessagingToServer: @escaping @MainActor (Bool) async throws -> Void = { _ in },
         writeToServer: @escaping @MainActor (Bool) async throws -> Void = { _ in }
     ) -> CliSessionsSyncModel {
         CliSessionsSyncModel(
             server: server,
             defaults: defaults,
             writeToServer: writeToServer,
-            writeClaudeCodeToServer: writeClaudeCodeToServer
+            writeClaudeCodeToServer: writeClaudeCodeToServer,
+            writePreviousMessagingToServer: writePreviousMessagingToServer
         )
     }
 

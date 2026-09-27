@@ -11,17 +11,31 @@ extension APIClient {
     /// Fetches the session list. `includeArchived` opts in to archived rows
     /// (merged with the visible ones; each row carries an `archived` flag) and
     /// `archivedLimit` optionally caps how many archived rows the server appends
-    /// (issue #17). Defaults keep today's request untouched.
-    func sessions(includeArchived: Bool = false, archivedLimit: Int? = nil) async throws -> SessionsResponse {
+    /// (issue #17). `allProfiles` asks for every profile's rows, each carrying
+    /// its `profile`. Defaults keep today's request untouched.
+    func sessions(
+        includeArchived: Bool = false,
+        archivedLimit: Int? = nil,
+        allProfiles: Bool = false
+    ) async throws -> SessionsResponse {
         try await send(
-            endpoint: .sessions(includeArchived: includeArchived, archivedLimit: archivedLimit),
+            endpoint: .sessions(
+                includeArchived: includeArchived,
+                archivedLimit: archivedLimit,
+                allProfiles: allProfiles
+            ),
             method: "GET"
         )
     }
 
-    func searchSessions(query: String, content: Bool = true, depth: Int = 5) async throws -> SessionSearchResponse {
+    func searchSessions(
+        query: String,
+        content: Bool = true,
+        depth: Int = 5,
+        allProfiles: Bool = false
+    ) async throws -> SessionSearchResponse {
         try await send(
-            endpoint: .sessionsSearch(query: query, content: content, depth: depth),
+            endpoint: .sessionsSearch(query: query, content: content, depth: depth, allProfiles: allProfiles),
             method: "GET"
         )
     }

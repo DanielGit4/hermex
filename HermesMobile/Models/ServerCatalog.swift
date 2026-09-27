@@ -317,6 +317,9 @@ struct SettingsResponse: Decodable, Equatable {
     let checkForUpdates: Bool?
     let showCliSessions: Bool?
     let showClaudeCodeSessions: Bool?
+    /// Whether the session list also carries messaging chats a newer session
+    /// of the same chat replaced. Server-side filter; off by default.
+    let showPreviousMessagingSessions: Bool?
     let maxTokens: Int?
     let maxTokensEffective: Int?
     let authEnabled: Bool?
@@ -332,6 +335,7 @@ struct SettingsResponse: Decodable, Equatable {
         case checkForUpdates
         case showCliSessions
         case showClaudeCodeSessions
+        case showPreviousMessagingSessions
         case maxTokens
         case maxTokensEffective
         case authEnabled
@@ -349,6 +353,7 @@ struct SettingsResponse: Decodable, Equatable {
         checkForUpdates = container.decodeLossyBoolIfPresent(forKey: .checkForUpdates)
         showCliSessions = container.decodeLossyBoolIfPresent(forKey: .showCliSessions)
         showClaudeCodeSessions = container.decodeLossyBoolIfPresent(forKey: .showClaudeCodeSessions)
+        showPreviousMessagingSessions = container.decodeLossyBoolIfPresent(forKey: .showPreviousMessagingSessions)
         maxTokens = container.decodeLossyIntIfPresent(forKey: .maxTokens)
         maxTokensEffective = container.decodeLossyIntIfPresent(forKey: .maxTokensEffective)
         authEnabled = container.decodeLossyBoolIfPresent(forKey: .authEnabled)

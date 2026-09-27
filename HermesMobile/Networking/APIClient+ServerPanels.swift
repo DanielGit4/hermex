@@ -175,6 +175,18 @@ extension APIClient {
         )
     }
 
+    /// Writes only `show_previous_messaging_sessions`. The server applies it to
+    /// every client's session list, the WebUI sidebar included.
+    func updateSettings(showPreviousMessagingSessions: Bool) async throws -> SettingsResponse {
+        try await send(
+            endpoint: .settings,
+            method: "POST",
+            body: ShowPreviousMessagingSessionsUpdateRequest(
+                showPreviousMessagingSessions: showPreviousMessagingSessions
+            )
+        )
+    }
+
     func updatesCheck() async throws -> UpdatesCheckResponse {
         try await send(endpoint: .updatesCheck, method: "GET")
     }
@@ -264,4 +276,9 @@ private struct ShowCliSessionsUpdateRequest: Encodable {
 private struct ShowClaudeCodeSessionsUpdateRequest: Encodable {
     // Encoded as `show_claude_code_sessions` by convertToSnakeCase.
     let showClaudeCodeSessions: Bool
+}
+
+private struct ShowPreviousMessagingSessionsUpdateRequest: Encodable {
+    // Encoded as `show_previous_messaging_sessions` by convertToSnakeCase.
+    let showPreviousMessagingSessions: Bool
 }

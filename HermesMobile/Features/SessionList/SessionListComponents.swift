@@ -205,6 +205,8 @@ struct SessionSidebarUtilityRows: View {
     let topPadding: CGFloat
     let automatedVisibility: AutomatedSessionVisibility
     let sectionVisibility: SidebarSectionVisibility
+    /// The list's profile filter; Projects lists and counts only its projects.
+    let profileFilter: String?
     @Binding var profilesAreExpanded: Bool
     @Binding var projectsAreExpanded: Bool
     @Binding var selectedProjectID: String?
@@ -442,16 +444,17 @@ struct SessionSidebarUtilityRows: View {
 
     @ViewBuilder
     private var projectOptionRows: some View {
-        if viewModel.isLoadingProjects && viewModel.projects.isEmpty {
+        let projects = viewModel.visibleProjects(profileFilter: profileFilter)
+        if viewModel.isLoadingProjects && projects.isEmpty {
             disclosureSubrow {
                 CompactStatusRow(title: String(localized: "Loading projects..."), systemImage: "folder")
             }
-        } else if viewModel.projects.isEmpty {
+        } else if projects.isEmpty {
             disclosureSubrow {
                 CompactStatusRow(title: String(localized: "No projects"), systemImage: "folder")
             }
         } else {
-            ForEach(viewModel.projects) { project in
+            ForEach(projects) { project in
                 disclosureSubrow {
                     ProjectFilterRow(
                         project: project,
@@ -487,10 +490,11 @@ struct SessionSidebarUtilityRows: View {
     }
 
     private func sessionCount(for project: ProjectSummary) -> Int {
-        guard let projectID = project.projectId else { return 0 }
-        return viewModel.sessions.filter { session in
-            session.projectId == projectID && automatedVisibility.shows(session)
-        }.count
+        viewModel.sessionCount(
+            inProject: project,
+            automatedVisibility: automatedVisibility,
+            profileFilter: profileFilter
+        )
     }
 }
 
@@ -626,6 +630,7 @@ struct SessionInteractiveRow: View {
     /// The query of the screen showing this row, so a screen with its own search
     /// field never shows another screen's excerpts.
     var searchText: String = ""
+    var showsSourceBadge = true
 
     var body: some View {
         Button {
@@ -638,7 +643,9 @@ struct SessionInteractiveRow: View {
                 isViewingCachedData: viewModel.isViewingCachedData,
                 isUnread: viewModel.isUnread(session),
                 attentionState: viewModel.attentionState(for: session),
-                searchExcerpt: viewModel.searchExcerpt(for: session, searchText: searchText)
+                searchExcerpt: viewModel.searchExcerpt(for: session, searchText: searchText),
+                profileLabel: viewModel.profileChipLabel(for: session),
+                showsSourceBadge: showsSourceBadge
             )
         }
         .buttonStyle(.plain)
@@ -659,7 +666,7 @@ struct SessionInteractiveRow: View {
         .contextMenu {
             SessionRowContextMenu(
                 session: session,
-                projects: viewModel.projects,
+                projects: viewModel.moveTargets(for: session),
                 isViewingCachedData: viewModel.isViewingCachedData,
                 isRenamingSession: viewModel.isRenamingSession,
                 isCreatingProject: viewModel.isCreatingProject,
@@ -715,9 +722,16 @@ struct SessionInteractiveRow: View {
     }
 }
 
-struct ScheduledSessionsDisclosure: View {
+/// A collapsible group of session rows in the list: Scheduled, and one per
+/// messaging platform. Search expands it and shows every match; otherwise it
+/// shows at most `previewLimit` rows, then "View all" when `viewAll` is set.
+struct SessionRowsDisclosure: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let viewModel: SessionListViewModel
+    let title: String
+    let assetImage: String
+    let expandLabel: String
+    let collapseLabel: String
     /// The sidebar's current query, forwarded to rows for match excerpts.
     var searchText: String = ""
     let sessions: [SessionSummary]
@@ -726,23 +740,28 @@ struct ScheduledSessionsDisclosure: View {
     let showsMessageCount: Bool
     let showsWorkspace: Bool
     let selectedSessionID: String?
-    @Binding var userIsExpanded: Bool
+    let isExpandedByUser: Bool
+    let toggle: () -> Void
     let actions: SessionListRowActions
-    let viewAll: () -> Void
+    var previewLimit: Int?
+    var viewAll: (() -> Void)?
+    /// False for a messaging platform, whose title already names every row's source.
+    var showsSourceBadges = true
 
-    private var isExpanded: Bool { isSearchActive || userIsExpanded }
+    private var isExpanded: Bool { isSearchActive || isExpandedByUser }
     private var displayedSessions: [SessionSummary] {
-        isSearchActive ? sessions : Array(sessions.prefix(5))
+        guard !isSearchActive, let previewLimit else { return sessions }
+        return Array(sessions.prefix(previewLimit))
     }
 
     var body: some View {
         SidebarDisclosureButton(
-            title: String(localized: "Scheduled sessions"),
-            assetImage: "LucideCalendarClock",
+            title: title,
+            assetImage: assetImage,
             isExpanded: isExpanded
         ) {
             guard !isSearchActive else { return }
-            userIsExpanded.toggle()
+            toggle()
         } accessory: {
             Text("\(totalCount)")
                 .font(.footnote.weight(.semibold))
@@ -754,13 +773,7 @@ struct ScheduledSessionsDisclosure: View {
         .padding(.horizontal, 24)
         .padding(.top, isSearchActive ? 16 : 12)
         .sessionsScreenListRow()
-        .accessibilityLabel(
-            isSearchActive
-                ? String(localized: "Scheduled sessions")
-                : isExpanded
-                    ? String(localized: "Collapse scheduled sessions")
-                    : String(localized: "Expand scheduled sessions")
-        )
+        .accessibilityLabel(isSearchActive ? title : isExpanded ? collapseLabel : expandLabel)
 
         if isExpanded {
             ForEach(displayedSessions) { session in
@@ -771,12 +784,13 @@ struct ScheduledSessionsDisclosure: View {
                     showsWorkspace: showsWorkspace,
                     selectedSessionID: selectedSessionID,
                     actions: actions,
-                    searchText: searchText
+                    searchText: searchText,
+                    showsSourceBadge: showsSourceBadges
                 )
                 .transition(SessionListMotion.disclosureContentTransition(reduceMotion: reduceMotion))
             }
 
-            if !isSearchActive && sessions.count > 5 {
+            if let viewAll, !isSearchActive, sessions.count > displayedSessions.count {
                 HapticButton(action: viewAll) {
                     HStack(spacing: 12) {
                         Image(systemName: "magnifyingglass")
@@ -800,9 +814,64 @@ struct ScheduledSessionsDisclosure: View {
     }
 }
 
+/// Narrows the list to one profile's chats, or shows all profiles. It filters
+/// the rows, the Scheduled and messaging groups, and Projects; it never moves
+/// the Active Profile, which only chooses where New Chat starts.
+struct SessionProfileFilterMenu: View {
+    let options: [String]
+    let selection: String?
+    let displayName: (String) -> String
+    let select: (String?) -> Void
+
+    var body: some View {
+        Menu {
+            Picker(selection: Binding(
+                get: { selection ?? "" },
+                set: { select($0.isEmpty ? nil : $0) }
+            )) {
+                Text("All profiles").tag("")
+                ForEach(options, id: \.self) { name in
+                    Text(verbatim: displayName(name)).tag(name)
+                }
+            } label: {
+                Text("Profile")
+            }
+            .pickerStyle(.inline)
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .accessibilityHidden(true)
+
+                Text(selectionTitle)
+                    .lineLimit(1)
+
+                Image(systemName: "chevron.up.chevron.down")
+                    .font(.caption2.weight(.semibold))
+                    .accessibilityHidden(true)
+            }
+            .font(.footnote.weight(.medium))
+            .foregroundStyle(selection == nil ? Color.secondary : Color.accentColor)
+            .padding(.horizontal, 10)
+            .frame(minHeight: 32)
+            // Flat fill like the Projects "All" button: glass shadows clip in List rows.
+            .background(.thinMaterial, in: Capsule())
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(String(localized: "Profile filter"))
+        .accessibilityValue(selectionTitle)
+    }
+
+    private var selectionTitle: String {
+        selection.map(displayName) ?? String(localized: "All profiles")
+    }
+}
+
 struct ScheduledSessionsView: View {
     let viewModel: SessionListViewModel
     let showsCronSessions: Bool
+    let profileFilter: String?
     let showsMessageCount: Bool
     let showsWorkspace: Bool
     let selectedSessionID: String?
@@ -848,7 +917,7 @@ struct ScheduledSessionsView: View {
     private var sessions: [SessionSummary] {
         guard showsCronSessions else { return [] }
 
-        return viewModel.visibleSessions(searchText: searchText, selectedProjectID: nil)
+        return viewModel.visibleSessions(searchText: searchText, selectedProjectID: nil, profileFilter: profileFilter)
             .filter { $0.isCronSession && $0.archived != true }
     }
 }

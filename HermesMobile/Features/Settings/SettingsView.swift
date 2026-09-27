@@ -28,6 +28,9 @@ struct SettingsView: View {
         } writeClaudeCodeToServer: { value in
             let client = APIClient(baseURL: server)
             _ = try await client.updateSettings(showClaudeCodeSessions: value)
+        } writePreviousMessagingToServer: { value in
+            let client = APIClient(baseURL: server)
+            _ = try await client.updateSettings(showPreviousMessagingSessions: value)
         })
     }
 
@@ -482,6 +485,27 @@ struct SettingsView: View {
                     } else if cliSessionsSync.serverSyncsCliSessions
                         || cliSessionsSync.serverSyncsClaudeCodeSessions {
                         SettingsFootnote(String(localized: "Session visibility is synced with this server, so the WebUI follows it too."))
+                    }
+
+                    // The server alone applies this one, so it only appears once
+                    // the server reports it.
+                    if cliSessionsSync.serverSyncsPreviousMessagingSessions {
+                        SettingsDivider()
+
+                        SettingsToggleRow(
+                            title: String(localized: "Show previous messaging sessions"),
+                            systemImage: "bubble.left.and.text.bubble.right",
+                            isOn: Binding(
+                                get: { cliSessionsSync.showsPreviousMessagingSessions },
+                                set: { cliSessionsSync.setShowsPreviousMessagingSessions($0) }
+                            )
+                        )
+
+                        if let syncError = cliSessionsSync.previousMessagingSyncErrorMessage {
+                            SettingsErrorFootnote(syncError)
+                        } else {
+                            SettingsFootnote(String(localized: "Also lists the older Telegram, WhatsApp and other messaging chats that a newer session of the same chat replaced. This is a server setting, so it changes the WebUI sidebar too."))
+                        }
                     }
                 }
 
@@ -1147,6 +1171,7 @@ struct SettingsView: View {
             // truth, the local value is just its offline cache (#19).
             cliSessionsSync.adopt(serverValue: settings.showCliSessions)
             cliSessionsSync.adoptClaudeCode(serverValue: settings.showClaudeCodeSessions)
+            cliSessionsSync.adoptPreviousMessaging(serverValue: settings.showPreviousMessagingSessions)
             if serverVersion == nil {
                 serverSettingsError = String(localized: "Unknown")
             }

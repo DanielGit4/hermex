@@ -78,6 +78,10 @@ struct SessionListView: View {
     // Configured in `init`, where the server URL is known.
     @AppStorage private var showsCliSessions: Bool
     @AppStorage private var showsClaudeCodeSessions: Bool
+    // Per-server too: which messaging disclosures are open, and the profile
+    // filter (empty: all profiles).
+    @AppStorage private var expandedMessagingPlatforms: String
+    @AppStorage private var storedProfileFilter: String
     @AppStorage(HeaderLogoColor.storageKey) private var headerLogoColorHex = HeaderLogoColor.defaultHex
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
     @AppStorage(GlassPreference.isEnabledKey) private var isGlassEnabled = GlassPreference.defaultIsEnabled
@@ -126,6 +130,14 @@ struct SessionListView: View {
         _showsClaudeCodeSessions = AppStorage(
             wrappedValue: SessionRowDisplaySettings.showsClaudeCodeSessions(for: server),
             SessionRowDisplaySettings.showClaudeCodeSessionsKey(for: server)
+        )
+        _expandedMessagingPlatforms = AppStorage(
+            wrappedValue: "",
+            SessionSidebarDisclosureSettings.expandedMessagingPlatformsKey(for: server)
+        )
+        _storedProfileFilter = AppStorage(
+            wrappedValue: "",
+            SessionListProfileFilterSettings.key(for: server)
         )
     }
 
@@ -446,6 +458,14 @@ struct SessionListView: View {
             // Cold launch delivers the link before this view appears; a warm one after.
             .task { showBotsForPendingDestination() }
             .onChange(of: pendingBotDestination) { showBotsForPendingDestination() }
+            // A project from another profile would strand the list on no rows.
+            .onChange(of: storedProfileFilter) {
+                guard let selectedProjectID,
+                      !viewModel.visibleProjects(profileFilter: profileFilter)
+                        .contains(where: { $0.projectId == selectedProjectID })
+                else { return }
+                self.selectedProjectID = nil
+            }
     }
 
     /// A bot deep link opens this server's Bots inbox, which owns resolving it. Only
@@ -566,6 +586,7 @@ struct SessionListView: View {
                 ScheduledSessionsView(
                     viewModel: viewModel,
                     showsCronSessions: showsCronSessions,
+                    profileFilter: profileFilter,
                     showsMessageCount: showsSessionMessageCount,
                     showsWorkspace: showsSessionWorkspace,
                     selectedSessionID: horizontalSizeClass == .regular
@@ -590,7 +611,11 @@ struct SessionListView: View {
 
     private var content: some View {
         // Computed once per body: grouping filters and sorts every session.
-        let groups = scheduledSessionGroups
+        let profileFilter = self.profileFilter
+        let groups = sessionListGroups(profileFilter: profileFilter)
+        let expandedPlatforms = SessionSidebarDisclosureSettings.expandedMessagingPlatforms(
+            from: expandedMessagingPlatforms
+        )
         return List {
             header
                 .sessionsTopChromeListRow()
@@ -612,6 +637,7 @@ struct SessionListView: View {
                     topPadding: 10,
                     automatedVisibility: automatedSessionVisibility,
                     sectionVisibility: sidebarSectionVisibility,
+                    profileFilter: profileFilter,
                     profilesAreExpanded: $profilesAreExpanded,
                     projectsAreExpanded: $projectsAreExpanded,
                     selectedProjectID: $selectedProjectID,
@@ -627,21 +653,57 @@ struct SessionListView: View {
                 )
             }
 
+            if !viewModel.profileFilterOptions.isEmpty {
+                profileFilterRow(selection: profileFilter)
+                    .padding(.top, isSearchingSessions ? 12 : 8)
+                    .sessionsScreenListRow()
+            }
+
             if groups.showsDisclosure(isSearchActive: isSearchingSessions) {
-                ScheduledSessionsDisclosure(
+                SessionRowsDisclosure(
                     viewModel: viewModel,
+                    title: String(localized: "Scheduled sessions"),
+                    assetImage: "LucideCalendarClock",
+                    expandLabel: String(localized: "Expand scheduled sessions"),
+                    collapseLabel: String(localized: "Collapse scheduled sessions"),
                     searchText: searchText,
                     sessions: groups.scheduled,
                     totalCount: groups.totalScheduledCount,
                     isSearchActive: isSearchingSessions,
                     showsMessageCount: showsSessionMessageCount,
                     showsWorkspace: showsSessionWorkspace,
-                    selectedSessionID: horizontalSizeClass == .regular
-                        ? navigationState.selectedSessionID
-                        : nil,
-                    userIsExpanded: $scheduledSessionsAreExpanded,
+                    selectedSessionID: selectedSessionIDForRows,
+                    isExpandedByUser: scheduledSessionsAreExpanded,
+                    toggle: { scheduledSessionsAreExpanded.toggle() },
                     actions: sessionRowActions,
+                    previewLimit: 5,
                     viewAll: { selectDestination(.scheduled) }
+                )
+            }
+
+            ForEach(groups.messaging) { group in
+                SessionRowsDisclosure(
+                    viewModel: viewModel,
+                    title: group.title,
+                    assetImage: "LucideMessagesSquare",
+                    expandLabel: String(localized: "Expand \(group.title) sessions"),
+                    collapseLabel: String(localized: "Collapse \(group.title) sessions"),
+                    searchText: searchText,
+                    sessions: group.sessions,
+                    totalCount: group.totalCount,
+                    isSearchActive: isSearchingSessions,
+                    showsMessageCount: showsSessionMessageCount,
+                    showsWorkspace: showsSessionWorkspace,
+                    selectedSessionID: selectedSessionIDForRows,
+                    isExpandedByUser: expandedPlatforms.contains(group.platform),
+                    toggle: {
+                        expandedMessagingPlatforms = SessionSidebarDisclosureSettings.togglingMessagingPlatform(
+                            group.platform,
+                            in: expandedMessagingPlatforms
+                        )
+                    },
+                    actions: sessionRowActions,
+                    showsSourceBadges: false
                 )
             }
 
@@ -654,11 +716,9 @@ struct SessionListView: View {
                 isSearchActive: isSearchingSessions,
                 showsMessageCount: showsSessionMessageCount,
                 showsWorkspace: showsSessionWorkspace,
-                selectedSessionID: horizontalSizeClass == .regular
-                    ? navigationState.selectedSessionID
-                    : nil,
+                selectedSessionID: selectedSessionIDForRows,
                 actions: sessionRowActions,
-                suppressEmptyState: !groups.scheduled.isEmpty
+                suppressEmptyState: !groups.scheduled.isEmpty || !groups.messaging.isEmpty
             )
 
             if showsArchivedEntry {
@@ -691,6 +751,34 @@ struct SessionListView: View {
         .animation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion), value: profilesAreExpanded)
         .animation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion), value: projectsAreExpanded)
         .animation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion), value: scheduledSessionsAreExpanded)
+        .animation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion), value: expandedMessagingPlatforms)
+    }
+
+    private func profileFilterRow(selection: String?) -> some View {
+        HStack {
+            SessionProfileFilterMenu(
+                options: viewModel.profileFilterOptions,
+                selection: selection,
+                displayName: viewModel.profileDisplayName,
+                select: { profile in
+                    withAnimation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion)) {
+                        storedProfileFilter = profile ?? ""
+                    }
+                }
+            )
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 24)
+    }
+
+    private var selectedSessionIDForRows: String? {
+        horizontalSizeClass == .regular ? navigationState.selectedSessionID : nil
+    }
+
+    /// The stored profile filter while it still names a profile to filter by.
+    private var profileFilter: String? {
+        viewModel.effectiveProfileFilter(storedProfileFilter)
     }
 
     private var header: some View {
@@ -878,11 +966,12 @@ struct SessionListView: View {
         .accessibilityLabel("New Session")
     }
 
-    private var scheduledSessionGroups: ScheduledSessionGroups {
-        viewModel.scheduledSessionGroups(
+    private func sessionListGroups(profileFilter: String?) -> SessionListGroups {
+        viewModel.sessionListGroups(
             searchText: searchText,
             selectedProjectID: selectedProjectID,
-            automatedVisibility: automatedSessionVisibility
+            automatedVisibility: automatedSessionVisibility,
+            profileFilter: profileFilter
         )
     }
 
@@ -968,6 +1057,10 @@ struct SessionListView: View {
     }
 
     private var emptySessionsDescription: String? {
+        if profileFilter != nil {
+            return String(localized: "Try another search, project or profile filter.")
+        }
+
         if hasActiveSessionFilter {
             return String(localized: "Try another search or project filter.")
         }
@@ -976,7 +1069,7 @@ struct SessionListView: View {
     }
 
     private var hasActiveSessionFilter: Bool {
-        selectedProjectID != nil || !normalizedSearchText.isEmpty
+        selectedProjectID != nil || !normalizedSearchText.isEmpty || profileFilter != nil
     }
 
     private var showsSearchClearButton: Bool {
@@ -1069,7 +1162,8 @@ struct SessionListView: View {
         let activeSessions = viewModel.visibleActiveSessions(
             searchText: searchText,
             selectedProjectID: selectedProjectID,
-            automatedVisibility: automatedSessionVisibility
+            automatedVisibility: automatedSessionVisibility,
+            profileFilter: profileFilter
         )
         return ActiveSessionMonitorTaskID(
             streamIDs: SessionListViewModel.activeStreamIDs(in: activeSessions),
@@ -1428,12 +1522,9 @@ struct SessionListView: View {
         }
     }
 
+    /// A loaded row resolves without a request unless it lives on another
+    /// profile, which the server must move to before the chat opens.
     private func openDeepLinkedSession(id sessionID: String) async {
-        if let loadedSession = viewModel.sessions.first(where: { $0.sessionId == sessionID }) {
-            selectSession(loadedSession)
-            return
-        }
-
         let session = await viewModel.loadSessionForDeepLink(id: sessionID, modelContext: modelContext)
         // Re-checked post-await: the view (and this task) may have been torn down —
         // e.g. dismissed, or the active server changed under `.id(server)` — while

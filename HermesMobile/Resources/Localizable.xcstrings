@@ -112748,6 +112748,216 @@
         "zh-HK" : { "stringUnit" : { "state" : "translated", "value" : "已排程的工作階段" } }
       }
     },
+    "All profiles" : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "كل ملفات التعريف" } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Alle Profile" } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Todos los perfiles" } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Tous les profils" } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "כל הפרופילים" } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Tutti i profili" } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "すべてのプロファイル" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "모든 프로필" } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Alle profielen" } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Wszystkie profile" } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Todos os perfis" } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Все профили" } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "Tüm profiller" } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "تمام پروفائلز" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "所有配置文件" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "所有設定檔" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "所有設定檔" } }
+      }
+    },
+    "Also lists the older Telegram, WhatsApp and other messaging chats that a newer session of the same chat replaced. This is a server setting, so it changes the WebUI sidebar too." : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "يعرض أيضًا دردشات المراسلة الأقدم من Telegram وWhatsApp وغيرها التي استبدلتها جلسة أحدث للدردشة نفسها. هذا إعداد على الخادم، لذا يغيّر الشريط الجانبي في WebUI أيضًا." } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Zeigt auch ältere Telegram-, WhatsApp- und andere Messaging-Chats, die durch eine neuere Sitzung desselben Chats ersetzt wurden. Das ist eine Servereinstellung und ändert daher auch die Seitenleiste der WebUI." } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "También muestra los chats de mensajería más antiguos de Telegram, WhatsApp y otros que una sesión más reciente del mismo chat reemplazó. Es un ajuste del servidor, así que también cambia la barra lateral de la WebUI." } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Affiche aussi les anciennes discussions Telegram, WhatsApp et autres messageries remplacées par une session plus récente de la même discussion. C’est un réglage du serveur : il modifie aussi la barre latérale de la WebUI." } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "מציג גם צ׳אטים ישנים יותר מ-Telegram, WhatsApp ושירותי הודעות אחרים שהפעלה חדשה יותר של אותו צ׳אט החליפה. זו הגדרת שרת, ולכן היא משנה גם את סרגל הצד של WebUI." } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Mostra anche le chat di messaggistica più vecchie di Telegram, WhatsApp e altre app sostituite da una sessione più recente della stessa chat. È un'impostazione del server, quindi cambia anche la barra laterale della WebUI." } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "同じチャットの新しいセッションに置き換えられた、Telegram、WhatsApp などの古いメッセージングチャットも表示します。サーバーの設定のため、WebUI のサイドバーにも反映されます。" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "같은 채팅의 새 세션으로 대체된 이전 Telegram, WhatsApp 및 기타 메시징 채팅도 표시합니다. 서버 설정이므로 WebUI 사이드바도 함께 바뀝니다." } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Toont ook oudere Telegram-, WhatsApp- en andere berichtenchats die door een nieuwere sessie van dezelfde chat zijn vervangen. Dit is een serverinstelling, dus de zijbalk van de WebUI verandert ook." } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Pokazuje też starsze czaty z Telegrama, WhatsAppa i innych komunikatorów, które zastąpiła nowsza sesja tego samego czatu. To ustawienie serwera, więc zmienia też pasek boczny WebUI." } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Também lista as conversas mais antigas do Telegram, WhatsApp e outros apps de mensagens que uma sessão mais recente da mesma conversa substituiu. É uma configuração do servidor, então também muda a barra lateral da WebUI." } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Также показывает старые чаты Telegram, WhatsApp и других мессенджеров, которые заменил более новый сеанс того же чата. Это настройка сервера, поэтому она меняет и боковую панель WebUI." } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "Aynı sohbetin daha yeni bir oturumuyla değiştirilmiş eski Telegram, WhatsApp ve diğer mesajlaşma sohbetlerini de listeler. Bu bir sunucu ayarıdır, bu yüzden WebUI kenar çubuğunu da değiştirir." } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "Telegram، WhatsApp اور دیگر میسجنگ کی وہ پرانی چیٹس بھی دکھاتا ہے جنہیں اسی چیٹ کے نئے سیشن نے بدل دیا۔ یہ سرور کی ترتیب ہے، اس لیے یہ WebUI کی سائیڈ بار کو بھی بدل دیتی ہے۔" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "同时列出已被同一聊天的较新会话取代的旧 Telegram、WhatsApp 及其他消息聊天。这是服务器设置，因此也会改变 WebUI 侧边栏。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "同時列出已被同一聊天的較新工作階段取代的舊 Telegram、WhatsApp 及其他訊息聊天。這是伺服器設定，因此也會改變 WebUI 側邊欄。" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "同時列出已被同一聊天的較新工作階段取代的舊 Telegram、WhatsApp 及其他訊息聊天。這是伺服器設定，所以亦會改變 WebUI 側邊欄。" } }
+      }
+    },
+    "Collapse %@ sessions" : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "طي جلسات %@" } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "%@-Sitzungen einklappen" } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Contraer sesiones de %@" } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Réduire les sessions %@" } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "כיווץ הפעלות %@" } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Comprimi sessioni %@" } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ のセッションを折りたたむ" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ 세션 접기" } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "%@-sessies inklappen" } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Zwiń sesje %@" } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Recolher sessões do %@" } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Свернуть сеансы %@" } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ oturumlarını daralt" } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ سیشنز سمیٹیں" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "收起 %@ 会话" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "收合 %@ 工作階段" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "收起 %@ 工作階段" } }
+      }
+    },
+    "Could not switch to the “%@” profile: %@" : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "تعذّر التبديل إلى ملف التعريف “%1$@”: %2$@" } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Wechsel zum Profil „%1$@“ fehlgeschlagen: %2$@" } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "No se pudo cambiar al perfil “%1$@”: %2$@" } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Impossible de passer au profil « %1$@ » : %2$@" } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "לא ניתן לעבור לפרופיל “%1$@”: %2$@" } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Impossibile passare al profilo “%1$@”: %2$@" } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "プロファイル「%1$@」に切り替えられませんでした: %2$@" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "'%1$@' 프로필로 전환할 수 없습니다: %2$@" } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Kan niet overschakelen naar profiel ‘%1$@’: %2$@" } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Nie można przełączyć na profil „%1$@”: %2$@" } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Não foi possível mudar para o perfil “%1$@”: %2$@" } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Не удалось переключиться на профиль «%1$@»: %2$@" } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "“%1$@” profiline geçilemedi: %2$@" } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "پروفائل “%1$@” پر سوئچ نہیں ہو سکا: %2$@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "无法切换到配置文件“%1$@”：%2$@" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "無法切換至設定檔「%1$@」：%2$@" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "無法切換至設定檔「%1$@」：%2$@" } }
+      }
+    },
+    "Expand %@ sessions" : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "توسيع جلسات %@" } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "%@-Sitzungen ausklappen" } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Expandir sesiones de %@" } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Développer les sessions %@" } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "הרחבת הפעלות %@" } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Espandi sessioni %@" } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ のセッションを展開" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ 세션 펼치기" } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "%@-sessies uitklappen" } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Rozwiń sesje %@" } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Expandir sessões do %@" } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Развернуть сеансы %@" } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ oturumlarını genişlet" } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ سیشنز پھیلائیں" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "展开 %@ 会话" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "展開 %@ 工作階段" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "展開 %@ 工作階段" } }
+      }
+    },
+    "Handed off from %@" : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "تم التسليم من %@" } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Übergeben von %@" } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Transferido desde %@" } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Transféré depuis %@" } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "הועבר מ-%@" } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Passato da %@" } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ から引き継ぎ" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "%@에서 넘겨받음" } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Overgedragen vanuit %@" } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Przekazano z %@" } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Transferido do %@" } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Передано из %@" } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ üzerinden devredildi" } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "%@ سے منتقل کیا گیا" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "从 %@ 转交" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "從 %@ 轉交" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "從 %@ 轉交" } }
+      }
+    },
+    "Profile %@" : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "ملف التعريف %@" } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Profil %@" } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Perfil %@" } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Profil %@" } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "פרופיל %@" } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Profilo %@" } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "プロファイル %@" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "프로필 %@" } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Profiel %@" } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Profil %@" } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Perfil %@" } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Профиль %@" } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "Profil %@" } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "پروفائل %@" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "配置文件 %@" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "設定檔 %@" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "設定檔 %@" } }
+      }
+    },
+    "Profile filter" : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "عامل تصفية ملف التعريف" } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Profilfilter" } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Filtro de perfil" } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Filtre de profil" } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "מסנן פרופיל" } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Filtro profilo" } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "プロファイルフィルタ" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "프로필 필터" } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Profielfilter" } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Filtr profilu" } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Filtro de perfil" } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Фильтр профилей" } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "Profil filtresi" } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "پروفائل فلٹر" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "配置文件筛选" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "設定檔篩選" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "設定檔篩選" } }
+      }
+    },
+    "Show previous messaging sessions" : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "إظهار جلسات المراسلة السابقة" } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Frühere Messaging-Sitzungen anzeigen" } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Mostrar sesiones de mensajería anteriores" } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Afficher les sessions de messagerie précédentes" } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "הצגת הפעלות הודעות קודמות" } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Mostra sessioni di messaggistica precedenti" } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "以前のメッセージングセッションを表示" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "이전 메시징 세션 표시" } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Eerdere berichtensessies tonen" } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Pokaż wcześniejsze sesje komunikatorów" } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Mostrar sessões de mensagens anteriores" } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Показывать предыдущие сеансы мессенджеров" } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "Önceki mesajlaşma oturumlarını göster" } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "پچھلے میسجنگ سیشنز دکھائیں" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "显示之前的消息会话" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "顯示先前的訊息工作階段" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "顯示之前的訊息工作階段" } }
+      }
+    },
+    "Try another search, project or profile filter." : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "جرّب بحثًا آخر أو عامل تصفية مشروع أو ملف تعريف آخر." } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Versuche eine andere Suche, einen anderen Projekt- oder Profilfilter." } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "Prueba otra búsqueda o filtro de proyecto o de perfil." } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Essayez une autre recherche ou un autre filtre de projet ou de profil." } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "נסה חיפוש אחר, מסנן פרויקט או מסנן פרופיל אחר." } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Prova un'altra ricerca o un altro filtro di progetto o profilo." } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "別の検索、プロジェクトフィルタ、またはプロファイルフィルタをお試しください。" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "다른 검색, 프로젝트 필터 또는 프로필 필터를 시도하세요." } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Probeer een andere zoekopdracht, projectfilter of profielfilter." } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Spróbuj innego wyszukiwania, filtru projektu lub profilu." } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Tente outra busca ou filtro de projeto ou de perfil." } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Попробуйте другой поиск, фильтр проектов или профилей." } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "Başka bir arama, proje veya profil filtresi deneyin." } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "کوئی دوسری تلاش، پروجیکٹ یا پروفائل فلٹر آزمائیں۔" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "请尝试其他搜索、项目或配置文件筛选条件。" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "請嘗試其他搜尋、專案或設定檔篩選條件。" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "請嘗試其他搜尋、項目或設定檔篩選條件。" } }
+      }
+    },
     "Card ID" : {
       "localizations" : {
         "ar" : { "stringUnit" : { "state" : "translated", "value" : "معرّف البطاقة" } },
