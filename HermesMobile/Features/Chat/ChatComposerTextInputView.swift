@@ -488,6 +488,9 @@ private struct ComposerTextView: UIViewRepresentable {
                     try? await Task.sleep(nanoseconds: 60_000_000)
                 }
 
+                // A later update found the editor already where it asked and
+                // dropped this change; acting on it would undo that update.
+                guard self.pendingFocusTarget == target else { return }
                 self.pendingFocusTarget = nil
 
                 if target {
