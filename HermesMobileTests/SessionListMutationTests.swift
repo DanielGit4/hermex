@@ -2040,8 +2040,9 @@ final class SessionListMutationTests: XCTestCase {
     func testLoadStoresArchivedCountFromResponseForArchivedEntry() async throws {
         let viewModel = try makeViewModel { request in
             XCTAssertEqual(request.url?.path, "/api/sessions")
-            // The list asks for every profile's rows, and nothing else.
-            XCTAssertEqual(request.url?.query, "all_profiles=1")
+            // The list asks for every profile's rows without hidden ones, and
+            // nothing else; a response without `all_profiles` needs no second request.
+            XCTAssertEqual(request.url?.query, "all_profiles=1&exclude_hidden=1")
             return apiTestJSONResponse("""
             {
               "sessions": [

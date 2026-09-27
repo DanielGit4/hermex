@@ -36,6 +36,13 @@ final class ContractReadinessTests: XCTestCase {
                 query: ["all_profiles": "1"]
             ),
             .init(
+                name: "sessions across every profile without hidden rows",
+                method: "GET",
+                endpoint: .sessions(allProfiles: true, excludeHidden: true),
+                path: "/api/sessions",
+                query: ["all_profiles": "1", "exclude_hidden": "1"]
+            ),
+            .init(
                 name: "session search",
                 method: "GET",
                 endpoint: .sessionsSearch(query: "billing plan", content: true, depth: 5),

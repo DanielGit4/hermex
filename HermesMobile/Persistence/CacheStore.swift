@@ -380,6 +380,8 @@ private extension SessionSummary {
         matchPreview = nil
         handoffState = cachedSession.handoffState
         handoffPlatform = cachedSession.handoffPlatform
+        // Only the list request's merge reads it; the cache holds merged rows.
+        defaultHidden = nil
     }
 }
 

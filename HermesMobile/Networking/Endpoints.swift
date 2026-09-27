@@ -5,8 +5,15 @@ enum Endpoint {
     case authStatus
     case login
     case logout
-    /// `allProfiles` asks for every profile's rows (`all_profiles=1`).
-    case sessions(includeArchived: Bool = false, archivedLimit: Int? = nil, allProfiles: Bool = false)
+    /// `allProfiles` asks for every profile's rows (`all_profiles=1`);
+    /// `excludeHidden` drops the rows the server flags `default_hidden`
+    /// (`exclude_hidden=1`).
+    case sessions(
+        includeArchived: Bool = false,
+        archivedLimit: Int? = nil,
+        allProfiles: Bool = false,
+        excludeHidden: Bool = false
+    )
     case sessionsSearch(query: String, content: Bool, depth: Int, allProfiles: Bool = false)
     case session(id: String, includeMessages: Bool, messageLimit: Int?, messageBefore: Int?, expandRenderable: Bool = false)
     case sessionStatus(id: String)
@@ -408,7 +415,7 @@ enum Endpoint {
 
     var queryItems: [URLQueryItem] {
         switch self {
-        case let .sessions(includeArchived, archivedLimit, allProfiles):
+        case let .sessions(includeArchived, archivedLimit, allProfiles, excludeHidden):
             // Opt-in (issue #17): the server's default response excludes archived
             // rows, so the main list request stays byte-identical when off.
             // `archived_limit` only means something alongside `include_archived=1`
@@ -422,6 +429,9 @@ enum Endpoint {
             }
             if allProfiles {
                 items.append(URLQueryItem(name: "all_profiles", value: "1"))
+            }
+            if excludeHidden {
+                items.append(URLQueryItem(name: "exclude_hidden", value: "1"))
             }
             return items
         case let .sessionsSearch(query, content, depth, allProfiles):
