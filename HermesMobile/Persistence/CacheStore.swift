@@ -378,6 +378,8 @@ private extension SessionSummary {
         isReadOnly = cachedSession.isReadOnly
         matchType = nil
         matchPreview = nil
+        handoffState = cachedSession.handoffState
+        handoffPlatform = cachedSession.handoffPlatform
     }
 }
 

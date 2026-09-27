@@ -29,11 +29,25 @@ final class ContractReadinessTests: XCTestCase {
                 query: ["include_archived": "1"]
             ),
             .init(
+                name: "sessions across every profile",
+                method: "GET",
+                endpoint: .sessions(allProfiles: true),
+                path: "/api/sessions",
+                query: ["all_profiles": "1"]
+            ),
+            .init(
                 name: "session search",
                 method: "GET",
                 endpoint: .sessionsSearch(query: "billing plan", content: true, depth: 5),
                 path: "/api/sessions/search",
                 query: ["q": "billing plan", "content": "1", "depth": "5"]
+            ),
+            .init(
+                name: "session search across every profile",
+                method: "GET",
+                endpoint: .sessionsSearch(query: "billing plan", content: true, depth: 5, allProfiles: true),
+                path: "/api/sessions/search",
+                query: ["q": "billing plan", "content": "1", "depth": "5", "all_profiles": "1"]
             ),
             .init(
                 name: "session detail",
@@ -77,7 +91,14 @@ final class ContractReadinessTests: XCTestCase {
                 path: "/api/session/yolo",
                 query: ["session_id": "session-123"]
             ),
-            .init(name: "projects", method: "GET", endpoint: .projects, path: "/api/projects"),
+            .init(name: "projects", method: "GET", endpoint: .projects(), path: "/api/projects"),
+            .init(
+                name: "projects across every profile",
+                method: "GET",
+                endpoint: .projects(allProfiles: true),
+                path: "/api/projects",
+                query: ["all_profiles": "1"]
+            ),
             .init(name: "create project", method: "POST", endpoint: .createProject, path: "/api/projects/create"),
             .init(name: "rename project", method: "POST", endpoint: .renameProject, path: "/api/projects/rename"),
             .init(name: "delete project", method: "POST", endpoint: .deleteProject, path: "/api/projects/delete"),

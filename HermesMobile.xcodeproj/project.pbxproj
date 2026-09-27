@@ -75,6 +75,8 @@
 		CA7A00000000000000000B03 /* CatalogRefreshNote.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7A00000000000000000F03 /* CatalogRefreshNote.swift */; };
 		CA7A00000000000000000B04 /* ServerCatalogCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7A00000000000000000F04 /* ServerCatalogCacheTests.swift */; };
 		CA7A00000000000000000B05 /* DashboardModelStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CA7A00000000000000000F05 /* DashboardModelStoreTests.swift */; };
+		D36A916E00000000000000B1 /* SessionListAllProfilesTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D36A916E00000000000000F1 /* SessionListAllProfilesTests.swift */; };
+		D36A916E00000000000000B2 /* SessionListGroupingTimingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D36A916E00000000000000F2 /* SessionListGroupingTimingTests.swift */; };
 		C0415B0000000000000001 /* APIClient+ProviderQuota.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0415A0000000000000001 /* APIClient+ProviderQuota.swift */; };
 		C0415B0000000000000002 /* ProviderLimitsCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0415A0000000000000002 /* ProviderLimitsCard.swift */; };
 		C0415B0000000000000003 /* APIClientProviderQuotaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0415A0000000000000003 /* APIClientProviderQuotaTests.swift */; };
@@ -688,6 +690,8 @@
 		CA7A00000000000000000F03 /* CatalogRefreshNote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CatalogRefreshNote.swift; sourceTree = "<group>"; };
 		CA7A00000000000000000F04 /* ServerCatalogCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ServerCatalogCacheTests.swift; sourceTree = "<group>"; };
 		CA7A00000000000000000F05 /* DashboardModelStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardModelStoreTests.swift; sourceTree = "<group>"; };
+		D36A916E00000000000000F1 /* SessionListAllProfilesTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListAllProfilesTests.swift; sourceTree = "<group>"; };
+		D36A916E00000000000000F2 /* SessionListGroupingTimingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListGroupingTimingTests.swift; sourceTree = "<group>"; };
 		C0415A0000000000000001 /* APIClient+ProviderQuota.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "APIClient+ProviderQuota.swift"; sourceTree = "<group>"; };
 		C0415A0000000000000002 /* ProviderLimitsCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderLimitsCard.swift; sourceTree = "<group>"; };
 		C0415A0000000000000003 /* APIClientProviderQuotaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIClientProviderQuotaTests.swift; sourceTree = "<group>"; };
@@ -1330,6 +1334,8 @@
 				DA5B000000000000000000F8 /* DashboardClientTests.swift */,
 				CA7A00000000000000000F04 /* ServerCatalogCacheTests.swift */,
 				CA7A00000000000000000F05 /* DashboardModelStoreTests.swift */,
+				D36A916E00000000000000F1 /* SessionListAllProfilesTests.swift */,
+				D36A916E00000000000000F2 /* SessionListGroupingTimingTests.swift */,
 				DA5B000000000000000000F9 /* SkillsHubDecodingTests.swift */,
 				DA5B000000000000000000FA /* SkillsHubViewModelTests.swift */,
 				DA5C00000000000000000F08 /* MCPDashboardClientTests.swift */,
@@ -2707,6 +2713,8 @@
 				DA5B000000000000000000B8 /* DashboardClientTests.swift in Sources */,
 				CA7A00000000000000000B04 /* ServerCatalogCacheTests.swift in Sources */,
 				CA7A00000000000000000B05 /* DashboardModelStoreTests.swift in Sources */,
+				D36A916E00000000000000B1 /* SessionListAllProfilesTests.swift in Sources */,
+				D36A916E00000000000000B2 /* SessionListGroupingTimingTests.swift in Sources */,
 				DA5B000000000000000000B9 /* SkillsHubDecodingTests.swift in Sources */,
 				DA5B000000000000000000BA /* SkillsHubViewModelTests.swift in Sources */,
 				DA5C00000000000000000B08 /* MCPDashboardClientTests.swift in Sources */,

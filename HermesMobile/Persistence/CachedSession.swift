@@ -44,6 +44,8 @@ final class CachedSession {
     var relationshipType: String?
     var readOnly: Bool?
     var isReadOnly: Bool?
+    var handoffState: String?
+    var handoffPlatform: String?
     var cachedAt: Date
     var expiresAt: Date
 
@@ -92,6 +94,8 @@ final class CachedSession {
         relationshipType = session.relationshipType
         readOnly = session.readOnly
         isReadOnly = session.isReadOnly
+        handoffState = session.handoffState
+        handoffPlatform = session.handoffPlatform
         self.cachedAt = cachedAt
         expiresAt = cachedAt.addingTimeInterval(CachePolicy.ttl)
     }

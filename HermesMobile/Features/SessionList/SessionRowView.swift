@@ -17,6 +17,12 @@ struct SessionRowView: View {
     /// Set only while a remote content search is showing this row, so the row
     /// can say why it matched.
     var searchExcerpt: SessionSearchExcerpt?
+    /// The row's profile when the list shows it
+    /// (`SessionListViewModel.profileChipLabel(for:)`); nil hides the chip.
+    var profileLabel: String?
+    /// False inside a messaging platform's disclosure, whose header already
+    /// names the source. VoiceOver still reads it.
+    var showsSourceBadge = true
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -91,11 +97,18 @@ struct SessionRowView: View {
         )
     }
 
+    /// The source badge: where the row comes from, else the platform a
+    /// completed handoff brought it from.
+    static func sourceBadgeLabel(for session: SessionSummary) -> String? {
+        session.sourceDisplayLabel ?? session.handoffOriginLabel
+    }
+
     static func accessibilityStateLabels(
         for session: SessionSummary,
         isViewingCachedData: Bool,
         attentionState: SessionRowAttentionState? = nil,
-        isUnread: Bool = false
+        isUnread: Bool = false,
+        profileLabel: String? = nil
     ) -> [String] {
         var labels: [String] = []
 
@@ -119,6 +132,12 @@ struct SessionRowView: View {
 
         if let sourceLabel = session.sourceDisplayLabel {
             labels.append(sourceLabel)
+        } else if let origin = session.handoffOriginLabel {
+            labels.append(String(localized: "Handed off from \(origin)"))
+        }
+
+        if let profileLabel {
+            labels.append(String(localized: "Profile \(profileLabel)"))
         }
 
         if session.isSessionReadOnly {
@@ -284,9 +303,7 @@ struct SessionRowView: View {
 
                 Spacer(minLength: 8)
 
-                if let sourceLabel = session.sourceDisplayLabel {
-                    SessionSourceBadge(label: sourceLabel)
-                }
+                originBadges
             }
         } else {
             HStack(alignment: .firstTextBaseline, spacing: 7) {
@@ -300,11 +317,29 @@ struct SessionRowView: View {
 
                 Spacer(minLength: 8)
 
-                if let sourceLabel = session.sourceDisplayLabel {
-                    SessionSourceBadge(label: sourceLabel)
+                originBadges
+            }
+        }
+    }
+
+    /// Profile chip, then source badge, trailing.
+    @ViewBuilder
+    private var originBadges: some View {
+        if profileLabel != nil || sourceBadgeLabel != nil {
+            HStack(spacing: 5) {
+                if let profileLabel {
+                    SessionProfileChip(label: profileLabel)
+                }
+
+                if let sourceBadgeLabel {
+                    SessionSourceBadge(label: sourceBadgeLabel)
                 }
             }
         }
+    }
+
+    private var sourceBadgeLabel: String? {
+        showsSourceBadge ? Self.sourceBadgeLabel(for: session) : nil
     }
 
     private var stateBadgesRow: some View {
@@ -341,7 +376,7 @@ struct SessionRowView: View {
     }
 
     private var showsStateBadges: Bool {
-        session.sourceDisplayLabel != nil || !visibleStateBadges.isEmpty
+        sourceBadgeLabel != nil || profileLabel != nil || !visibleStateBadges.isEmpty
     }
 
     private var showsSupplementalContent: Bool {
@@ -394,7 +429,8 @@ struct SessionRowView: View {
             for: session,
             isViewingCachedData: isViewingCachedData,
             attentionState: attentionState,
-            isUnread: isUnread
+            isUnread: isUnread,
+            profileLabel: profileLabel
         ))
 
         if let metadataLabel {
@@ -509,6 +545,23 @@ private struct SessionSourceBadge: View {
     }
 }
 
+/// The row's profile, in the source badge's style but neutral, so it reads as
+/// secondary to where the chat came from.
+private struct SessionProfileChip: View {
+    let label: String
+
+    var body: some View {
+        Text(verbatim: label)
+            .font(AppFont.caption2(weight: .semibold))
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(Color.secondary.opacity(0.12), in: Capsule())
+            .accessibilityHidden(true)
+    }
+}
+
 private struct SessionRowStateBadge: View {
     let badge: SessionRowStateBadgeKind
 
@@ -586,6 +639,7 @@ enum SessionRowDisplaySettings {
     // only as the migration seed for servers with no per-server value yet.
     static let showCliSessionsKey = "sessionRow.showCliSessions"
     static let showClaudeCodeSessionsKey = "sessionRow.showClaudeCodeSessions"
+    static let showPreviousMessagingSessionsKey = "sessionRow.showPreviousMessagingSessions"
 
     /// Per-server storage key for the CLI-sessions toggle (#19). Keyed by the
     /// active server's absolute URL, matching how the offline cache scopes rows.
@@ -595,6 +649,19 @@ enum SessionRowDisplaySettings {
 
     static func showClaudeCodeSessionsKey(for server: URL) -> String {
         "\(showClaudeCodeSessionsKey)|\(server.absoluteString)"
+    }
+
+    static func showPreviousMessagingSessionsKey(for server: URL) -> String {
+        "\(showPreviousMessagingSessionsKey)|\(server.absoluteString)"
+    }
+
+    /// The last value this server reported for `show_previous_messaging_sessions`.
+    /// Off until it says otherwise, matching the server default.
+    static func showsPreviousMessagingSessions(
+        for server: URL,
+        in defaults: UserDefaults = .standard
+    ) -> Bool {
+        defaults.object(forKey: showPreviousMessagingSessionsKey(for: server)) as? Bool ?? false
     }
 
     /// Effective CLI-sessions visibility for `server`: the per-server value if
@@ -660,6 +727,33 @@ enum SessionSidebarDisclosureSettings {
         }
 
         return value
+    }
+
+    /// Per-server key for the expanded messaging disclosures, stored as the
+    /// comma-separated platform ids (`telegram,whatsapp`). All start collapsed.
+    static func expandedMessagingPlatformsKey(for server: URL) -> String {
+        "sessionSidebar.expandedMessagingPlatforms|\(server.absoluteString)"
+    }
+
+    static func expandedMessagingPlatforms(from stored: String) -> Set<String> {
+        Set(stored.split(separator: ",").map(String.init))
+    }
+
+    /// `stored` with `platform` flipped between expanded and collapsed.
+    static func togglingMessagingPlatform(_ platform: String, in stored: String) -> String {
+        var platforms = expandedMessagingPlatforms(from: stored)
+        if platforms.remove(platform) == nil {
+            platforms.insert(platform)
+        }
+        return platforms.sorted().joined(separator: ",")
+    }
+}
+
+/// The session list's profile filter, remembered per server. Empty means all
+/// profiles.
+enum SessionListProfileFilterSettings {
+    static func key(for server: URL) -> String {
+        "sessionList.profileFilter|\(server.absoluteString)"
     }
 }
 
