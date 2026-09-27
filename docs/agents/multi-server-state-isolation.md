@@ -41,6 +41,8 @@ to `CacheStore`. Two consequences:
 | Browsed Kanban Board | UserDefaults, per-server key (`KanbanBoardPreference.key(for:)` = `kanban.selectedBoard|<server absoluteString>`) | Per-server since #259: `KanbanFeatureState` restores the last locally browsed Board on load after validating it against the server's fresh Board list, and drops a stale slug silently. Local browsing never calls the server's switch endpoint. Tested in `KanbanFeatureStateTests` (`testBrowsedBoardIsRestoredForTheSameServerAndIsolatedFromOthers`). |
 | "Show CLI sessions" toggle | UserDefaults, per-server key (`SessionRowDisplaySettings.showCliSessionsKey(for:)` = `sessionRow.showCliSessions|<server absoluteString>`) | Per-server since #19: the toggle mirrors the server's own `show_cli_sessions` setting (adopted on Settings load, written back via `POST /api/settings`), so an adopted value on one server cannot leak to another. Reads fall back to the pre-#19 global key as a migration seed, then to shown-by-default. Tested in `CliSessionsSyncModelTests`. |
 | Bots inbox section order | UserDefaults (`BotSectionOrderStore`) | Per-server and per-Bot-connection key `bot-inbox-section-order.<connection UUID>|<server absoluteString>`, holding the Desktop section ids the user placed from "Reorder Sections…". Never sent to Desktop; removing the Bot connection deletes it. Tested in `BotInboxTests.testPlacedSectionsKeepTheirOrderPerConnectionAndResetReturnsToAToZ`. |
+| Last-known providers / models catalogs | `ServerCatalogCache` (`Networking/ServerCatalogCache.swift`): memory in front of `Caches/ServerCatalog/<server hash>/<profile hash>-{models,providers}.json` | Keyed by the server URL plus the client's `hermes_profile` cookie, because both answers depend on the server's active profile; another server or profile misses. `APIClient.models()` / `providers()` write through on success; screens read `lastKnownModels()` / `lastKnownProviders()` to fill lists and read-only labels while the fresh request runs. Nothing the app sends or seeds into a chat comes from it. `/api/models` is stored as sent; `/api/providers` as a projection without `base_url` and `auth_error`, which can carry credentials. Cleared by Clear Offline Cache (`CacheStore.clearOfflineData`), sign-out and server removal; a fetch that started before a clear cannot write back. |
+| Dashboard lists (Skills Hub, MCP, Plugins) | In-memory `DashboardModelStore` (one bundle of view models) | Keyed by server URL plus the whole saved `BotConnection`, so another server, connection, address or password builds a new bundle. Dropped on server switch, sign-out, server removal and Bot connection replace/remove. Never written to disk: the MCP list carries unredacted commands and URLs. |
 | Chat attachment thumbnails | In-memory `AttachmentImageCache` (process-wide) | Keyed by `AttachmentImageCacheKey(namespace, path)` where `namespace` is `server.absoluteString|session`, matching `TranscriptMediaImageCache`. The cache survives `.id(server)` teardown, so the key—not view identity—is the isolation. Callers cannot default to an empty namespace. Tested in `TranscriptMediaParserTests.testAttachmentImageCacheKeySeparatesSamePathAcrossServersAndSessions`. |
 
 ### Offline cache keying (`Persistence/CacheStore.swift`)
@@ -96,8 +98,9 @@ long-press menu) — there is no separate on-screen server label.
 ## Clear-cache behavior (issue #18 change)
 
 "Clear Offline Cache" (Settings → Offline Data) is **scoped to the active
-server**: `CacheStore.clearCache(for: server, in:)` deletes only that server's
-cached sessions/messages. Other configured servers' offline data and the Hermes
+server**: `CacheStore.clearOfflineData(for: server, in:)` deletes only that
+server's cached sessions/messages, Bot history index and last-known
+providers/models catalogs. Other configured servers' offline data and the Hermes
 server itself are untouched. The footnote and confirmation copy state this
 explicitly, matching the implemented behavior.
 
@@ -123,8 +126,10 @@ server's content even if the purge fails.
 | Per-server browsed Kanban Board | `KanbanFeatureStateTests.testBrowsedBoardIsRestoredForTheSameServerAndIsolatedFromOthers`, `testStaleSavedBoardIsDroppedAndColdStartFallsBackToCurrentBoard` |
 | Per-server custom headers | `CustomHeaderInjectionTests` (`testSSEStreamSourcesHeadersFromActiveServerStore`, `testLaunchMigratesLegacyGlobalHeadersToActiveServerScope`), `AuthManagerStateTests` (`testSignOutLeavesOtherServerHeadersAndRegistryIntact`, `testAddServerFailureKeepsActiveServerAndItsHeaders`) |
 | Per-server cookies | `AuthManagerStateTests` (`testSignOutClearsOnlyActiveServerCookies`, `testRemoveNonActiveServerClearsOnlyItsCookies`, `testUnauthorizedClearsOnlyActiveServerCookies`) |
-| Default model/profile | No persisted state to leak (server-fresh per active server); covered by the switch mechanism + `9.3` Settings tests. |
+| Default model/profile | Server-fresh per active server; the last-known default model only labels the Settings row while it loads (catalog keying above). Covered by the switch mechanism + `9.3` Settings tests. |
 | Chat attachment thumbnail cache (same path, two servers/sessions) | `TranscriptMediaParserTests.testAttachmentImageCacheKeySeparatesSamePathAcrossServersAndSessions` |
+| Providers/models catalogs (server + profile keying, disk projection, clear/sign-out/removal) | `ServerCatalogCacheTests` (`testCatalogsNeverCrossServersOrProfiles`, `testAfterRelaunchProvidersAndModelsComeFromDiskBeforeTheNetworkAnswers`, `testClearOfflineDataDeletesOnlyThatServersCatalogs`, `testSignOutAndServerRemovalDeleteOnlyTheirCatalogsAndSwitchDropsTheDashboard`, `testAFetchThatStartedBeforeAClearCannotWriteItBack`, `testTheComposerSeedsItsModelOnlyFromTheFreshResponse`) |
+| Dashboard lists (server + Bot connection keying, memory only) | `DashboardModelStoreTests` (`testAnotherServerOrConnectionNeverSeesTheKeptRows`, `testDashboardListsNeverReachTheDisk`) |
 
 ## Bot connection and drafts
 
