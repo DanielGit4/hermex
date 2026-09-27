@@ -481,7 +481,7 @@ final class SessionListViewModel {
         }
 
         do {
-            let response = try await client.sessions(allProfiles: true)
+            let response = try await client.sessionList()
             guard revision == returnRevision else { return false }
             listsAllProfiles = response.allProfiles ?? false
             if let serverProfile = Self.nonEmpty(response.activeProfile) {

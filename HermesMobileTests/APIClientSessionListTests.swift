@@ -271,4 +271,174 @@ final class APIClientSessionListTests: APIClientTestCase {
             "A numeric id is coerced rather than dropped."
         )
     }
+
+    // MARK: - Session list (every profile + the cookie profile's hidden rows)
+
+    /// The all-profiles list comes without hidden rows; the cookie profile's
+    /// plain list adds back the rows it lacks that are hidden or in a project,
+    /// and nothing else. The first response keeps its rows and fields.
+    func testSessionListAddsOnlyTheCookieProfilesHiddenAndProjectRows() async throws {
+        var queries: [String?] = []
+        let client = makeClient { request in
+            XCTAssertEqual(request.httpMethod, "GET")
+            XCTAssertEqual(request.url?.path, "/api/sessions")
+            queries.append(request.url?.query)
+            if queries.count == 1 {
+                return try Self.sessionListResponse([
+                    ["session_id": "shared", "title": "From every profile", "profile": "default"],
+                    ["session_id": "elsewhere", "title": "Another profile", "profile": "opensource"]
+                ], ["all_profiles": true, "active_profile": "default", "archived_count": 3, "cli_count": 4], for: request)
+            }
+            return try Self.sessionListResponse([
+                ["session_id": "shared", "title": "Cookie copy", "project_id": "p-hermex"],
+                Self.hiddenCronRun("cron_job_1", at: 50),
+                ["session_id": "cli-assigned", "is_cli_session": true, "project_id": "p-hermex", "default_hidden": true],
+                ["session_id": "project-row", "project_id": "p-hermex"],
+                ["session_id": "unassigned", "title": "Past the shared recent window"],
+                ["session_id": "tg-older", "raw_source": "telegram", "session_source": "messaging", "is_cli_session": true],
+                ["session_id": "blank-project", "project_id": "  "]
+            ], ["all_profiles": false, "active_profile": "default", "archived_count": 99], for: request)
+        }
+
+        let response = try await client.sessionList()
+
+        XCTAssertEqual(queries, ["all_profiles=1&exclude_hidden=1", nil])
+        XCTAssertEqual(
+            response.sessions?.compactMap(\.sessionId),
+            ["shared", "elsewhere", "cron_job_1", "cli-assigned", "project-row"]
+        )
+        XCTAssertEqual(response.sessions?.first?.title, "From every profile")
+        XCTAssertEqual(response.allProfiles, true)
+        XCTAssertEqual(response.activeProfile, "default")
+        XCTAssertEqual(response.archivedCount, 3)
+        XCTAssertEqual(response.cliCount, 4)
+    }
+
+    /// A server without `all_profiles` predates both flags: it ignored them
+    /// and already sent the whole single-profile list.
+    func testSessionListAsksOnceWhenTheServerOmitsAllProfiles() async throws {
+        var requestCount = 0
+        let client = makeClient { request in
+            requestCount += 1
+            return try Self.sessionListResponse(
+                [["session_id": "webui-1"], Self.hiddenCronRun("cron_job_1", at: 50)],
+                [:],
+                for: request
+            )
+        }
+
+        let response = try await client.sessionList()
+
+        XCTAssertEqual(requestCount, 1)
+        XCTAssertEqual(response.sessions?.compactMap(\.sessionId), ["webui-1", "cron_job_1"])
+        XCTAssertNil(response.allProfiles)
+    }
+
+    /// An isolated-profile server answers `all_profiles: false`: it still
+    /// honors `exclude_hidden`, so the plain list brings the hidden rows back.
+    func testSessionListStillAsksTheCookieProfileWhenTheServerListsOneProfile() async throws {
+        var queries: [String?] = []
+        let client = makeClient { request in
+            queries.append(request.url?.query)
+            let rows: [[String: Any]] = queries.count == 1
+                ? [["session_id": "webui-1"]]
+                : [["session_id": "webui-1"], Self.hiddenCronRun("cron_job_1", at: 50)]
+            return try Self.sessionListResponse(rows, ["all_profiles": false], for: request)
+        }
+
+        let response = try await client.sessionList()
+
+        XCTAssertEqual(queries, ["all_profiles=1&exclude_hidden=1", nil])
+        XCTAssertEqual(response.sessions?.compactMap(\.sessionId), ["webui-1", "cron_job_1"])
+        XCTAssertEqual(response.allProfiles, false)
+    }
+
+    /// The backstop for a response that carries every run (`show_cron_sessions`
+    /// on, or an older server): the newest runs by the list's timestamp rule,
+    /// plus any pinned run, in their original places.
+    func testSessionListKeepsTheNewestCronRunsAndEveryPinnedOne() {
+        XCTAssertEqual(SessionsResponse.cronRunLimit, 200, "upstream CRON_PROJECT_CHIP_LIMIT")
+        // Oldest first, so the server's order is not the answer.
+        let runs = (0..<250).map { index in
+            SessionSummary(
+                sessionId: "cron_job_\(index)",
+                updatedAt: Double(index),
+                pinned: index == 3 ? true : nil,
+                sourceTag: "cron"
+            )
+        }
+        // `lastMessageAt` wins over an old `updatedAt`, as in the list's sort.
+        let late = SessionSummary(sessionId: "cron_late", updatedAt: 0, lastMessageAt: 10_000, sourceTag: "cron")
+        let webUI = SessionSummary(sessionId: "webui-old", lastMessageAt: 1)
+        let telegram = SessionSummary(sessionId: "tg-1", isCliSession: true, rawSource: "telegram")
+
+        let list = SessionsResponse.sessionList(
+            SessionsResponse(sessions: [webUI, late] + runs + [telegram], allProfiles: true),
+            addingHiddenRowsFrom: nil
+        )
+
+        XCTAssertEqual(
+            list.sessions?.compactMap(\.sessionId),
+            ["webui-old", "cron_late", "cron_job_3"] + (51..<250).map { "cron_job_\($0)" } + ["tg-1"]
+        )
+        XCTAssertEqual(list.allProfiles, true)
+
+        let atTheLimit = Array(runs.prefix(200))
+        XCTAssertEqual(
+            SessionsResponse.sessionList(SessionsResponse(sessions: atTheLimit), addingHiddenRowsFrom: nil).sessions,
+            atTheLimit
+        )
+    }
+
+    func testDefaultHiddenDecodesTolerantly() async throws {
+        let client = makeClient { request in
+            apiTestJSONResponse("""
+            {"sessions": [
+              {"session_id": "flag", "default_hidden": true},
+              {"session_id": "string", "default_hidden": "true"},
+              {"session_id": "absent"},
+              {"session_id": "garbage", "default_hidden": {"nested": 1}, "title": "Still listed"}
+            ]}
+            """, for: request)
+        }
+
+        let response = try await client.sessions()
+
+        XCTAssertEqual(response.sessions?.map(\.defaultHidden), [true, true, nil, nil])
+        XCTAssertEqual(response.sessions?.last?.title, "Still listed")
+    }
+
+    /// A cron run as upstream's cron pass writes it: hidden under the default
+    /// `show_cron_sessions: false`, in the profile's Cron project.
+    private static func hiddenCronRun(_ id: String, at time: Double) -> [String: Any] {
+        [
+            "session_id": id,
+            "title": "Nightly digest",
+            "source_tag": "cron",
+            "project_id": "p-cron",
+            "message_count": 2,
+            "created_at": time,
+            "updated_at": time,
+            "default_hidden": true
+        ]
+    }
+
+    private static func sessionListResponse(
+        _ rows: [[String: Any]],
+        _ fields: [String: Any],
+        for request: URLRequest
+    ) throws -> (HTTPURLResponse, Data) {
+        var object = fields
+        object["sessions"] = rows
+        let data = try JSONSerialization.data(withJSONObject: object)
+        return (
+            try XCTUnwrap(HTTPURLResponse(
+                url: try XCTUnwrap(request.url),
+                statusCode: 200,
+                httpVersion: nil,
+                headerFields: ["Content-Type": "application/json"]
+            )),
+            data
+        )
+    }
 }
