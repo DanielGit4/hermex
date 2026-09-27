@@ -2,6 +2,28 @@
 
 Canonical language for Hermex concepts that need consistent names across the product, planning, and support.
 
+## Session list
+
+**All**:
+The session list without a project filter. It shows every profile's chats (`all_profiles=1`).
+_Avoid_: All sessions, everything
+
+**Active Profile**:
+The profile New Chat starts on, picked in the session list (or Settings). Opening a chat from another profile never changes it.
+_Avoid_: current profile, default profile
+
+**Server profile**:
+The profile this client's `hermes_profile` cookie selects on the server. Session-scoped requests only work for that profile's sessions, so opening another profile's chat moves it there first, and New Chat moves it back to the Active Profile.
+_Avoid_: active profile, cookie profile
+
+**Profile filter**:
+Narrows All to one profile's chats, Scheduled rows, messaging chats and Projects. Independent of the Active Profile.
+_Avoid_: profile picker, profile switch
+
+**Messaging chats**:
+Sessions that arrived through a messaging platform (Telegram, WhatsApp, Signal, ...). They group in one disclosure per platform, below Scheduled.
+_Avoid_: Gateway sessions, external sessions
+
 ## Kanban
 
 **Kanban**:
