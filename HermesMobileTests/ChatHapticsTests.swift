@@ -1,7 +1,7 @@
 import XCTest
 @testable import HermesMobile
 
-final class ChatHapticsTests: XCTestCase {
+final class ChatHapticsTests: APIClientTestCase {
     @MainActor
     func testHapticsRespectEnabledSetting() {
         var feedback: [ChatHapticFeedback] = []
@@ -111,6 +111,58 @@ final class ChatHapticsTests: XCTestCase {
         viewModel.streamCoordinatorDidStartConnection(isReplay: true)
         XCTAssertTrue(viewModel.streamCoordinatorAppendToken(" continued"))
         XCTAssertEqual(viewModel.streamingHapticPulseTrigger, 2, "a replay continues the same reply and keeps its window")
+    }
+
+    /// With no throttle window, every live token bumps the pulse trigger once.
+    /// After a stale stream reconnects with replay, the text it re-sends is
+    /// catch-up and never bumps it. The first new text ends the replay and
+    /// pulses like any live token.
+    @MainActor
+    func testReplayedTextNeverBumpsThePulseTrigger() async throws {
+        defer { ChatViewModel.resetActiveStreamSnapshotsForTesting() }
+        let stream = ScriptedSSEStreamingClient()
+        let client = makeClient { request in
+            switch request.url?.path {
+            case "/api/chat/start":
+                return apiTestJSONResponse(#"{"session_id": "pulse-replay", "stream_id": "stream-1"}"#, for: request)
+            case "/api/chat/stream/status":
+                return apiTestJSONResponse(#"{"active": true, "stream_id": "stream-1", "replay_available": true}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        let viewModel = ChatViewModel(
+            session: SessionSummary(sessionId: "pulse-replay"),
+            server: URL(string: "https://example.test")!,
+            client: client,
+            streamClient: stream,
+            approvalStreamClient: ScriptedSSEStreamingClient(),
+            clarifyStreamClient: ScriptedSSEStreamingClient(),
+            btwStreamClient: ScriptedSSEStreamingClient(),
+            streamingHapticPulseInterval: 0
+        )
+        stream.flushPendingStreamingContent = { [weak viewModel] in viewModel?.flushPendingStreamingContent() }
+
+        let didStart = await viewModel.sendMessage("Keep working")
+        XCTAssertTrue(didStart)
+        stream.emit(.token("Alpha "))
+        stream.emit(.token("bravo "))
+        XCTAssertEqual(viewModel.streamingHapticPulseTrigger, 2, "each live token bumps once")
+
+        await viewModel.recoverStaleActiveStreamIfNeeded(now: Date().addingTimeInterval(20))
+        let replayURL = try XCTUnwrap(stream.startedURLs.last)
+        let replayQuery = URLComponents(url: replayURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(replayQuery.first { $0.name == "replay" }?.value, "1", "recovery must reconnect with replay")
+
+        stream.emit(.token("Alpha "))
+        stream.emit(.token("bravo "))
+        XCTAssertEqual(viewModel.streamingHapticPulseTrigger, 2, "replayed text must not pulse")
+
+        stream.emit(.token("charlie."))
+        let reply = viewModel.messages.last { $0.role == "assistant" }
+        XCTAssertEqual(reply?.content, "Alpha bravo charlie.", "the replay must append its new text")
+        XCTAssertEqual(viewModel.streamingHapticPulseTrigger, 3, "new text after the catch-up is live and pulses")
     }
 
     @MainActor

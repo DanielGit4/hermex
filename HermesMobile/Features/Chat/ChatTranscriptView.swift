@@ -520,12 +520,12 @@ struct ChatTranscriptView: View {
     }
 }
 
-/// Runs `onFire` each time the stream's scroll trigger bumps.
+/// Runs `onFire` each time a stream trigger bumps: the follow scroll's, once
+/// per drain tick, and the streaming haptic pulse's, once per throttle window.
 ///
-/// The trigger bumps once per drain tick while a reply streams and feeds only
-/// this scroll. Reading it in a leaf keeps each bump from re-running the chat
+/// Reading a trigger in a leaf keeps each bump from re-running the chat
 /// screen's content (transcript derivations, every row's equality check, the
-/// composer) just to scroll.
+/// composer) just to scroll or to play a pulse.
 struct StreamingFollowTrigger: View {
     let trigger: () -> Int
     let onFire: () -> Void

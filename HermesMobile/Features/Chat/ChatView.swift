@@ -857,7 +857,16 @@ struct ChatView: View {
                 guard viewModel.responseCompletionHapticTrigger > 0 else { return }
                 handleResponseCompletionSideEffects()
             }
-            .onChange(of: viewModel.streamingHapticPulseTrigger, handleStreamingHapticPulse)
+            .background {
+                // Mounted only while the pulse can play: with it off, nothing
+                // observes the trigger, so a bump re-runs no view at all.
+                if isHapticsEnabled && isStreamingPulseEnabled {
+                    StreamingFollowTrigger(
+                        trigger: { viewModel.streamingHapticPulseTrigger },
+                        onFire: handleStreamingHapticPulse
+                    )
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     ChatToolbarTitleLabel(
@@ -2966,7 +2975,11 @@ struct ChatView: View {
 
     /// One tick per view-model bump; the view model already throttles and skips replay.
     private func handleStreamingHapticPulse() {
-        ChatHaptics.streamingPulse(isEnabled: isHapticsEnabled && isStreamingPulseEnabled)
+        let isEnabled = isHapticsEnabled && isStreamingPulseEnabled
+        if isEnabled {
+            ViewBodyProbe.hit(.streamingHapticPulse)
+        }
+        ChatHaptics.streamingPulse(isEnabled: isEnabled)
     }
 
     private func suspendBottomAnchorForDisclosure() {
