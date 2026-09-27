@@ -71,15 +71,16 @@ import XCTest
     }
 
     /// Scrolling away from the bottom far enough to show the scroll-to-bottom
-    /// button, and back, re-runs neither the screen, the transcript nor a row.
-    /// Both used to re-run all of them (about 400 ms in a 500-message chat).
-    /// A reply the scroll carries into or out of view still re-runs its own
-    /// bubble, once, to start or stop collecting glyphs for selection.
+    /// button, tapping it, and scrolling back re-run neither the screen, the
+    /// transcript nor a row. Crossing used to re-run all of them (about 400 ms
+    /// in a 500-message chat). A reply the scroll carries into or out of view
+    /// still re-runs its own bubble, once, to start or stop collecting glyphs
+    /// for selection.
     func testCrossingTheNearBottomThresholdReRunsNeitherScreenNorTranscript() async throws {
         let crossings = try await crossNearBottomInHostedChat(messageCount: 40)
         report(crossings, scenario: "regression40")
 
-        XCTAssertEqual(crossings.map(\.direction), ["away", "back"])
+        XCTAssertEqual(crossings.map(\.direction), ["away", "tap", "away", "back"])
         for crossing in crossings {
             for site in [ViewBodyProbe.Site.chatView, .chatViewport, .transcript, .transcriptBlock, .transcriptRow] {
                 XCTAssertEqual(crossing.passes[site] ?? 0, 0, "Scrolling \(crossing.direction) re-ran \(site.rawValue)")
@@ -146,12 +147,14 @@ import XCTest
         defer { fixture.tearDown() }
 
         ViewBodyProbe.isScrollToBottomButtonVisible = false
+        ViewBodyProbe.scrollToBottomButtonAction = nil
         let window = try fixture.show()
         defer { close(window) }
         ViewBodyProbe.counts = [:]
         defer {
             ViewBodyProbe.counts = nil
             ViewBodyProbe.isScrollToBottomButtonVisible = false
+            ViewBodyProbe.scrollToBottomButtonAction = nil
         }
 
         try await settle(window, fixture: fixture) {
@@ -215,18 +218,24 @@ import XCTest
     static let scrollAwayDistance: CGFloat = 600
 
     struct Crossing {
-        /// `away` from the bottom or `back` to it.
+        /// `away` from the bottom, `back` to it with a plain scroll, or `tap`
+        /// on the scroll-to-bottom button.
         var direction: String
-        /// Main-thread milliseconds from `setContentOffset` until the update
+        /// Main-thread milliseconds from the scroll or tap until the update
         /// and its deferred main-queue work have drained.
         var ms: Double
         /// Body passes, by view, including the button's transition frames.
         var passes: [ViewBodyProbe.Site: Int]
+        /// For a tap: milliseconds until its scroll has landed at the bottom
+        /// and the button has gone, animation included.
+        var landedMs: Double?
     }
 
-    /// Hosts the chat at the bottom, scrolls the transcript `scrollAwayDistance`
-    /// above it without a gesture, then back to the bottom, and records what
-    /// each crossing of the near-bottom threshold cost.
+    /// Hosts the chat at the bottom and records what each crossing of the
+    /// near-bottom threshold costs: scrolling the transcript
+    /// `scrollAwayDistance` above the bottom without a gesture, tapping the
+    /// scroll-to-bottom button, scrolling away again, and scrolling back.
+    /// Scrolling away and the tap flip auto-follow; scrolling back does not.
     func crossNearBottomInHostedChat(messageCount: Int) async throws -> [Crossing] {
         try await withHostedChat(messageCount: messageCount) { _, window in
             let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
@@ -236,14 +245,46 @@ import XCTest
 
             let away = await scroll(scrollView, toY: bottom - Self.scrollAwayDistance, in: window, direction: "away")
             XCTAssertTrue(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling away must show the scroll-to-bottom button")
+            let tap = try await tapScrollToBottomButton(scrollView, in: window)
+            XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "Tapping the button must hide it")
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "Tapping the button must land at the bottom")
+            let awayAgain = await scroll(scrollView, toY: bottomOffsetY(of: scrollView) - Self.scrollAwayDistance, in: window, direction: "away")
+            XCTAssertTrue(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling away must show the scroll-to-bottom button")
             let back = await scroll(scrollView, toY: bottomOffsetY(of: scrollView), in: window, direction: "back")
             XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling back must hide the scroll-to-bottom button")
-            return [away, back]
+            return [away, tap, awayAgain, back]
         }
     }
 
     private func bottomOffsetY(of scrollView: UIScrollView) -> CGFloat {
         scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+    }
+
+    func distanceFromBottom(of scrollView: UIScrollView) -> CGFloat {
+        bottomOffsetY(of: scrollView) - scrollView.contentOffset.y
+    }
+
+    /// Runs the on-screen button's own action, drained like a keystroke, then
+    /// renders frames until its scroll has landed and the button has gone.
+    private func tapScrollToBottomButton(_ scrollView: UIScrollView, in window: UIWindow) async throws -> Crossing {
+        let tap = try XCTUnwrap(ViewBodyProbe.scrollToBottomButtonAction, "The scroll-to-bottom button must be on screen")
+        let before = ViewBodyProbe.counts ?? [:]
+        let start = CACurrentMediaTime()
+        tap()
+        await drainKeystroke(in: window)
+        let end = CACurrentMediaTime()
+        var frames = 0
+        while ViewBodyProbe.isScrollToBottomButtonVisible || distanceFromBottom(of: scrollView) > 1, frames < 120 {
+            await renderFrames(2)
+            frames += 2
+        }
+        let landed = CACurrentMediaTime()
+        await renderFrames(4)
+        let after = ViewBodyProbe.counts ?? [:]
+        return Crossing(
+            direction: "tap", ms: (end - start) * 1000,
+            passes: after.merging(before) { $0 - $1 }, landedMs: (landed - start) * 1000
+        )
     }
 
     /// One programmatic scroll, drained like a keystroke. Then frames render
@@ -274,12 +315,15 @@ import XCTest
                 "SCROLL-PERF scenario=\(scenario)",
                 "direction=\(crossing.direction)",
                 "ms=\(format(crossing.ms))",
+                "landedMs=\(crossing.landedMs.map(format) ?? "-")",
                 "chatView=\(passes[.chatView] ?? 0)",
                 "chatViewport=\(passes[.chatViewport] ?? 0)",
                 "transcript=\(passes[.transcript] ?? 0)",
                 "rows=\(rows)",
                 "bubbles=\(passes[.messageBubble] ?? 0)",
                 "replyVisibility=\(passes[.replyVisibility] ?? 0)",
+                "responseHostUpdate=\(passes[.responseHostUpdate] ?? 0)",
+                "responseHostMeasure=\(passes[.responseHostMeasure] ?? 0)",
                 "composer=\(passes[.composer] ?? 0)"
             ]
             print(fields.joined(separator: " "))

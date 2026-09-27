@@ -962,8 +962,14 @@ struct ChatScrollToBottomButton: View {
         .padding(.bottom, bottomPadding)
         .accessibilityLabel("Scroll to latest message")
         #if DEBUG
-        .onAppear { ViewBodyProbe.isScrollToBottomButtonVisible = true }
-        .onDisappear { ViewBodyProbe.isScrollToBottomButtonVisible = false }
+        .onAppear {
+            ViewBodyProbe.isScrollToBottomButtonVisible = true
+            ViewBodyProbe.scrollToBottomButtonAction = onTap
+        }
+        .onDisappear {
+            ViewBodyProbe.isScrollToBottomButtonVisible = false
+            ViewBodyProbe.scrollToBottomButtonAction = nil
+        }
         #endif
     }
 }

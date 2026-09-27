@@ -1201,6 +1201,9 @@ enum ViewBodyProbe {
         /// Not a body: a reply scrolling into or out of the viewport, which
         /// re-runs its bubble once to start or stop collecting glyphs.
         case replyVisibility
+        /// Not bodies: a reply's selection host rewriting its hosted content
+        /// and being measured, which SwiftUI can do without a body pass.
+        case responseHostUpdate, responseHostMeasure
     }
 
     #if DEBUG
@@ -1208,6 +1211,8 @@ enum ViewBodyProbe {
     /// Whether the scroll-to-bottom button is on screen, so a test can tell
     /// its scroll really crossed the near-bottom threshold.
     @MainActor static var isScrollToBottomButtonVisible = false
+    /// The on-screen scroll-to-bottom button's action, so a test can tap it.
+    @MainActor static var scrollToBottomButtonAction: (() -> Void)?
     #endif
 
     @MainActor @inline(__always)

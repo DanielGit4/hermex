@@ -16,6 +16,7 @@ struct ResponseTextSelection<Content: View>: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ controller: ResponseSelectionController, context: Context) {
+        ViewBodyProbe.hit(.responseHostUpdate)
         controller.scope.collectsGlyphs = collectsGlyphs
         controller.input.onAskHermex = onAskHermex
         if controller.identity != identity {
@@ -29,6 +30,7 @@ struct ResponseTextSelection<Content: View>: UIViewControllerRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, uiViewController: ResponseSelectionController, context: Context) -> CGSize? {
+        ViewBodyProbe.hit(.responseHostMeasure)
         guard let width = proposal.width, width > 0 else { return nil }
         return uiViewController.host.sizeThatFits(in: CGSize(width: width, height: .greatestFiniteMagnitude))
     }
