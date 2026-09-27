@@ -96,7 +96,7 @@ struct BackgroundResult: Decodable, Equatable {
     let completedAt: Double?
 }
 
-struct ModelsResponse: Decodable, Equatable {
+struct ModelsResponse: Decodable, Equatable, Sendable {
     let groups: [JSONValue]?
     let models: [JSONValue]?
     let defaultModel: String?
@@ -169,7 +169,7 @@ struct AgentCommand: Decodable, Equatable, Identifiable, Sendable {
 /// from `custom_providers` in config.yaml (`is_custom == true`) omit `is_oauth`,
 /// `auth_error`, `is_self_hosted`, `base_url`, and `is_plugin_provider` — so every
 /// field stays optional and decoding never fails on a partial entry.
-struct ProvidersResponse: Decodable, Equatable {
+struct ProvidersResponse: Decodable, Equatable, Sendable {
     let providers: [ProviderSummary]?
     let activeProvider: String?
 

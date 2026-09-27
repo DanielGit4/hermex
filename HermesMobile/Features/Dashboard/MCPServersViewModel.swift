@@ -16,6 +16,8 @@ import Observation
 
     private(set) var servers: [MCPServer] = []
     private(set) var listState: DashboardLoadState = .idle
+    /// When the rows on screen were read from the host.
+    private(set) var lastLoadedAt: Date?
     private(set) var tests: [String: TestState] = [:]
     /// The value each running toggle asked for. The server keeps its saved value until the host answers.
     private(set) var pendingToggles: [String: Bool] = [:]
@@ -48,7 +50,9 @@ import Observation
         guard listState != .loading, force || listState != .loaded else { return }
         listState = .loading
         do {
+            let startedAt = Date()
             servers = try await client.mcpServers()
+            lastLoadedAt = startedAt
             listState = .loaded
         } catch {
             listState = DashboardProblem.isCancellation(error)
@@ -59,8 +63,10 @@ import Observation
     /// A fresh read that confirms a change on the host. It throws rather than keep stale rows.
     @discardableResult
     func refresh() async throws -> [MCPServer] {
+        let startedAt = Date()
         let fresh = try await client.mcpServers()
         servers = fresh
+        lastLoadedAt = startedAt
         listState = .loaded
         return fresh
     }

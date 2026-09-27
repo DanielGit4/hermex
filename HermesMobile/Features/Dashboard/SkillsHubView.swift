@@ -85,7 +85,9 @@ struct SkillsHubView: View {
             }
         } else {
             List {
-                if case .failed(let problem) = model.installedState {
+                if let note = model.installedState.refreshNote(rowsLoadedAt: model.installedLoadedAt) {
+                    CatalogRefreshNote(state: note)
+                } else if case .failed(let problem) = model.installedState {
                     Label(problem.message, systemImage: problem.isOffline ? "wifi.slash" : "exclamationmark.triangle")
                         .font(.footnote)
                         .foregroundStyle(.secondary)

@@ -63,7 +63,9 @@ struct PluginsView: View {
                     .accessibilityLabel(Text("Loading"))
             }
         } else {
-            if case .failed(let problem) = model.listState {
+            if let note = model.listState.refreshNote(rowsLoadedAt: model.lastLoadedAt) {
+                CatalogRefreshNote(state: note)
+            } else if case .failed(let problem) = model.listState {
                 Label(problem.message, systemImage: problem.isOffline ? "wifi.slash" : "exclamationmark.triangle")
                     .font(.footnote)
                     .foregroundStyle(.secondary)

@@ -6,13 +6,9 @@ import SwiftUI
 struct DashboardView: View {
     let server: URL
 
-    /// Built once per visit and sharing one signed-in client, so leaving a section and
-    /// coming back keeps a running install on screen.
-    @State private var skillsHub: SkillsHubViewModel?
-    @State private var mcpServers: MCPServersViewModel?
-    @State private var mcpCatalog: MCPCatalogViewModel?
-    @State private var plugins: PluginsViewModel?
-    @State private var pluginCatalog: PluginCatalogViewModel?
+    /// Kept by `DashboardModelStore` across visits and sharing one signed-in client, so
+    /// coming back shows the previous lists and keeps a running install on screen.
+    @State private var models: DashboardModelStore.Bundle?
     @State private var didLoadConnection = false
 
     var body: some View {
@@ -21,14 +17,10 @@ struct DashboardView: View {
             .task {
                 guard !didLoadConnection else { return }
                 if let connection = try? BotConnectionStore().load(server: server) {
-                    let client = DashboardClient(connection: connection)
-                    let servers = MCPServersViewModel(client: client)
-                    let installed = PluginsViewModel(client: client)
-                    skillsHub = SkillsHubViewModel(client: client)
-                    mcpServers = servers
-                    mcpCatalog = MCPCatalogViewModel(client: client, servers: servers)
-                    plugins = installed
-                    pluginCatalog = PluginCatalogViewModel(client: client, plugins: installed)
+                    let bundle = DashboardModelStore.shared.bundle(server: server, connection: connection)
+                    // Each visit refreshes the three lists at once, so a section opens with rows.
+                    bundle.refreshLists()
+                    models = bundle
                 }
                 didLoadConnection = true
             }
@@ -36,7 +28,9 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var content: some View {
-        if let skillsHub, let mcpServers, let mcpCatalog, let plugins, let pluginCatalog {
+        if let models {
+            let skillsHub = models.skillsHub, mcpServers = models.mcpServers, mcpCatalog = models.mcpCatalog
+            let plugins = models.plugins, pluginCatalog = models.pluginCatalog
             List {
                 Section {
                     NavigationLink {

@@ -1,8 +1,39 @@
 import Foundation
 
 extension APIClient {
+    /// Always asks the server; a success also replaces the last-known catalog.
     func models() async throws -> ModelsResponse {
-        try await send(endpoint: .models, method: "GET")
+        let scope = catalogScope
+        let startedAt = Date()
+        let data = try await sendData(endpoint: .models, method: "GET")
+        let response = try decode(ModelsResponse.self, from: data)
+        await catalogCache.storeModels(response, raw: data, scope: scope, fetchedAt: startedAt)
+        return response
+    }
+
+    /// The last successful `models()` answer for this server and profile, to fill
+    /// lists while a fresh one loads. Never seed a value the app sends from it.
+    /// `profile` is the profile the caller needs; a different active profile misses.
+    func lastKnownModels(profile: String? = nil) async -> ServerCatalogCache.Entry<ModelsResponse>? {
+        let scope = catalogScope
+        if let profile, !profile.isEmpty, profile != activeProfileCookie { return nil }
+        return await catalogCache.models(for: scope)
+    }
+
+    /// The last successful `providers()` answer for this server and profile.
+    func lastKnownProviders() async -> ServerCatalogCache.Entry<ProvidersResponse>? {
+        await catalogCache.providers(for: catalogScope)
+    }
+
+    /// Both catalogs depend on the server's active profile, which it reads from
+    /// the `hermes_profile` cookie `switchProfile` leaves in this client's jar.
+    nonisolated var catalogScope: ServerCatalogCache.Scope {
+        ServerCatalogCache.Scope(server: baseURL, profile: activeProfileCookie)
+    }
+
+    private nonisolated var activeProfileCookie: String? {
+        session.configuration.httpCookieStorage?.cookies(for: baseURL)?
+            .first { $0.name == "hermes_profile" }?.value
     }
 
     /// Live (uncached) model list for the active provider. The server resolves
@@ -106,8 +137,13 @@ extension APIClient {
         )
     }
 
+    /// Always asks the server; a success also replaces the last-known providers.
     func providers() async throws -> ProvidersResponse {
-        try await send(endpoint: .providers, method: "GET")
+        let scope = catalogScope
+        let startedAt = Date()
+        let response: ProvidersResponse = try await send(endpoint: .providers, method: "GET")
+        await catalogCache.storeProviders(response, scope: scope, fetchedAt: startedAt)
+        return response
     }
 
     func settings() async throws -> SettingsResponse {

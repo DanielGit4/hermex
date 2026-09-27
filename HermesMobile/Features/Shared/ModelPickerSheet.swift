@@ -21,6 +21,8 @@ struct ModelPickerSheet: View {
     let isSelected: (ModelCatalogOption) -> Bool
     /// Catalog load state, for surfaces that load inside the sheet.
     var loadStatus: ModelPickerLoadStatus = .loaded
+    /// Shown above a last-known catalog while the owner refreshes it.
+    var refreshNote: CatalogRefreshNote.State?
     /// The row showing a spinner in place of its checkmark, identified by the
     /// `(modelID, providerID)` pair so two providers spelling a model the same
     /// way cannot both spin.
@@ -68,6 +70,12 @@ struct ModelPickerSheet: View {
                         .foregroundStyle(.red)
                         .frame(maxWidth: .infinity, minHeight: rowContentMinHeight(verticalInsets: 8), alignment: .leading)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 0, trailing: 12))
+                        .listRowSeparator(.hidden)
+                }
+
+                if let refreshNote, !modelGroups.isEmpty {
+                    CatalogRefreshNote(state: refreshNote)
+                        .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 4, trailing: 12))
                         .listRowSeparator(.hidden)
                 }
 

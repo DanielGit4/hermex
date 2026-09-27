@@ -29,8 +29,10 @@ struct ProvidersView: View {
                     .listRowInsets(EdgeInsets())
                     .listRowSeparator(.hidden)
             } else {
-                if let errorMessage = viewModel.errorMessage {
-                    refreshFailureBanner(detail: errorMessage)
+                // Rows can be the last-known answer while the fresh one loads,
+                // so the list says so rather than looking freshly loaded.
+                if let note = viewModel.refreshNote {
+                    CatalogRefreshNote(state: note)
                         .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 4, trailing: 16))
                         .listRowSeparator(.hidden)
                 }
@@ -98,36 +100,6 @@ struct ProvidersView: View {
                 Label("No providers reported by this server.", systemImage: "key.horizontal")
             }
         }
-    }
-
-    /// Shown above cached rows when a pull-to-refresh fails: the list would
-    /// otherwise look freshly loaded even though the request errored (#42 review).
-    private func refreshFailureBanner(detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(.caption)
-                    .foregroundStyle(.orange)
-                    .accessibilityHidden(true)
-
-                Text("Couldn't refresh. Showing previously loaded providers.")
-                    .font(.footnote.weight(.medium))
-                    .foregroundStyle(.primary)
-                    .multilineTextAlignment(.leading)
-            }
-
-            Text(verbatim: detail)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-        .padding(12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color.orange.opacity(0.14))
-        )
-        .accessibilityElement(children: .combine)
     }
 
     /// Expansion is keyed by the provider's stable id so refreshes that reorder

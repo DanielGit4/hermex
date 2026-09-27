@@ -53,6 +53,16 @@ struct DashboardProblem: Equatable {
 enum DashboardLoadState: Equatable {
     case idle, loading, loaded
     case failed(DashboardProblem)
+
+    /// The note above rows a list already shows: refreshing while it reloads, and the
+    /// failure with the rows' time when the reload failed. Nil when rows are current.
+    func refreshNote(rowsLoadedAt: Date?) -> CatalogRefreshNote.State? {
+        switch self {
+        case .loading: return .refreshing
+        case .failed(let problem): return rowsLoadedAt.map { .failed(since: $0, detail: problem.message) }
+        case .idle, .loaded: return nil
+        }
+    }
 }
 
 extension Optional where Wrapped == String {

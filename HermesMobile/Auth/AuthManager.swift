@@ -72,6 +72,8 @@ final class AuthManager {
     private let headerStore: CustomHeaderStore
     private let logoutTimeout: Duration
     private let serverRegistry: ServerRegistry
+    private let catalogCache: ServerCatalogCache
+    private let dashboardModels: DashboardModelStore
 
     init(
         keychain: any KeychainStoring = KeychainStore(),
@@ -81,7 +83,9 @@ final class AuthManager {
         },
         headerStore: CustomHeaderStore = .shared,
         logoutTimeout: Duration = .seconds(5),
-        serverRegistry: ServerRegistry = .shared
+        serverRegistry: ServerRegistry = .shared,
+        catalogCache: ServerCatalogCache = .shared,
+        dashboardModels: DashboardModelStore? = nil
     ) {
         self.keychain = keychain
         self.clientFactory = clientFactory
@@ -89,6 +93,8 @@ final class AuthManager {
         self.headerStore = headerStore
         self.logoutTimeout = logoutTimeout
         self.serverRegistry = serverRegistry
+        self.catalogCache = catalogCache
+        self.dashboardModels = dashboardModels ?? .shared
         restoreSavedServer()
         refreshServers()
     }
@@ -308,6 +314,8 @@ final class AuthManager {
         }
 
         try? await BotHistoryCache.shared.removeServer(active, activeConnectionID: (try? BotConnectionStore(keychain: keychain).load(server: active))?.id)
+        try? await catalogCache.remove(server: active)
+        dashboardModels.drop(server: active)
         SessionUnreadStore().remove(for: active)
         await ChatDraftStore.shared.discardBotDrafts(server: active)
         await PushRegistrar.shared?.forget(for: active)
@@ -321,6 +329,8 @@ final class AuthManager {
     func removeServer(_ account: ServerAccount) async {
         guard let serverURL = URL(string: account.urlString) else { return }
         try? await BotHistoryCache.shared.removeServer(serverURL, activeConnectionID: (try? BotConnectionStore(keychain: keychain).load(server: serverURL))?.id)
+        try? await catalogCache.remove(server: serverURL)
+        dashboardModels.drop(server: serverURL)
         SessionUnreadStore().remove(for: serverURL)
         await ChatDraftStore.shared.discardBotDrafts(server: serverURL)
         await PushRegistrar.shared?.forget(for: serverURL)
@@ -355,6 +365,8 @@ final class AuthManager {
         // profiles, which would leak into Shortcuts / Siri if the new server's fetch is
         // delayed or fails. The new server's profiles reload on the next foreground fetch.
         ProfileEntityCache.shared.save([])
+        // Dashboard lists are kept for one server's visits only.
+        dashboardModels.dropAll()
         lastErrorMessage = nil
         state = .loggedIn(server: serverURL)
     }
