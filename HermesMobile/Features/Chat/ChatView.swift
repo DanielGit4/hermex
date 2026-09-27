@@ -310,11 +310,13 @@ struct ChatView: View {
         nonmutating set { composerDraft.revision = newValue }
     }
 
-    @State private var isScrolledNearBottom = true
-    @State private var followLatch = ChatScrollPolicy.FollowLatch()
+    /// Never read it in `body` outside an active run: hand it to the views
+    /// that need it, so scrolling across the near-bottom threshold re-runs
+    /// those and not this screen and its transcript.
+    @State private var scrollFollow = ChatScrollFollowState()
     @State private var followScrollGeneration = 0
-    /// While true the transcript's bottom size-change anchor and follow-driven
-    /// scrolls are suspended so a disclosure toggle grows or shrinks in place.
+    /// While true the transcript's bottom pin and follow-driven scrolls are
+    /// suspended so a disclosure toggle grows or shrinks in place.
     @State private var isDisclosureSettling = false
     @State private var disclosureSettleGeneration = 0
     /// Settled turns the user has opened, plus failed or stopped turns, which
@@ -1422,11 +1424,9 @@ struct ChatView: View {
             hidesRunStatusAccessibility: activeRunStatusPresentation != nil,
             showsThinkingAndToolCards: showsThinkingAndToolCards,
             workingRowStartedAt: workingRowStartedAt,
-            showsScrollToBottomButton: showsScrollToBottomButton,
-            shouldFollowLatestMessage: shouldFollowLatestMessage,
+            scrollFollow: scrollFollow,
             isDisclosureSettling: isDisclosureSettling,
             latestTranscriptMessageRole: latestTranscriptMessageRole,
-            isScrolledNearBottom: isScrolledNearBottom,
             activeStreamID: viewModel.activeStreamID,
             streamingScrollTrigger: { viewModel.streamingScrollTrigger },
             transcriptRelayoutScrollToken: viewModel.transcriptRelayoutScrollToken,
@@ -1588,21 +1588,10 @@ struct ChatView: View {
         ChatTranscriptDisplaySettings.chatLayoutDirection(rtlEnabled: rtlChatLayoutEnabled)
     }
 
-    private var shouldFollowLatestMessage: Bool {
-        followLatch.isFollowing
-    }
-
     /// Automatic follows run only while the latch is on and no disclosure
     /// toggle is mid-animation.
     private var isFollowingLatestContent: Bool {
-        shouldFollowLatestMessage && !isDisclosureSettling
-    }
-
-    private var showsScrollToBottomButton: Bool {
-        ChatScrollPolicy.showsScrollToBottomButton(
-            isNearBottom: isScrolledNearBottom,
-            isStreaming: viewModel.activeStreamID != nil, isFollowing: shouldFollowLatestMessage
-        )
+        scrollFollow.latch.isFollowing && !isDisclosureSettling
     }
 
     private var workingRowStartedAt: Date? {
@@ -1638,7 +1627,15 @@ struct ChatView: View {
         return notices
     }
 
+    /// Reads the scroll position only while a run is in progress. Every other
+    /// case is nil wherever the reader is, so an idle chat never re-runs this
+    /// screen when the reader crosses the near-bottom threshold.
     private var activeRunStatusPresentation: ChatActiveRunStatusPresentation? {
+        guard runStatusPresentation(isScrolledNearBottom: false) != nil else { return nil }
+        return runStatusPresentation(isScrolledNearBottom: scrollFollow.isNearBottom)
+    }
+
+    private func runStatusPresentation(isScrolledNearBottom: Bool) -> ChatActiveRunStatusPresentation? {
         ChatActiveRunStatusPolicy.presentation(
             isStartingChat: viewModel.isStartingChat,
             hasActiveStream: viewModel.activeStreamID != nil,
@@ -1865,7 +1862,9 @@ struct ChatView: View {
     }
 
     private func loadOlderMessages() async -> Bool {
-        followLatch.isFollowing = false
+        if scrollFollow.latch.isFollowing {
+            scrollFollow.latch.isFollowing = false
+        }
 
         let didLoad = await viewModel.loadOlderMessages(modelContext: modelContext)
         if let lastError = viewModel.lastError {
@@ -2987,13 +2986,10 @@ struct ChatView: View {
     }
 
     private func handleFollowEvent(_ event: ChatScrollPolicy.FollowEvent) {
-        let resolved = ChatScrollPolicy.resolveFollow(current: followLatch, event: event)
-        if resolved != followLatch {
-            followLatch = resolved
-        }
+        scrollFollow.apply(event)
     }
 
-    /// Suspends follow scrolls and the bottom anchor through a disclosure
+    /// Suspends follow scrolls and the bottom pin through a disclosure
     /// animation; the transcript view pins the offset itself. The latch is
     /// untouched, so the next streaming trigger catches up once the toggle has
     /// settled.
@@ -3020,19 +3016,7 @@ struct ChatView: View {
     }
 
     private func updateScrollMetrics(_ metrics: ChatScrollMetrics) {
-        let isStreaming = viewModel.activeStreamID != nil
-        let isNearBottom = ChatScrollPolicy.isNearBottom(
-            distanceFromBottom: metrics.distanceFromBottom,
-            isStreaming: isStreaming
-        )
-        let wasNearBottom = isScrolledNearBottom
-        isScrolledNearBottom = isNearBottom
-        handleFollowEvent(.contentScrolled(
-            isAtBottom: ChatScrollPolicy.isAtBottom(distanceFromBottom: metrics.distanceFromBottom),
-            isUserScrolling: metrics.isUserInteracting,
-            movedAwayFromBottom: metrics.movedAwayFromBottom,
-            wasNearBottom: wasNearBottom
-        ))
+        scrollFollow.update(with: metrics, isStreaming: viewModel.activeStreamID != nil)
     }
 
     private func prepareTranscriptForExplicitSend() {
@@ -3264,6 +3248,46 @@ final class ChatComposerDraft {
 @MainActor @Observable
 final class ChatComposerHeight {
     var value: CGFloat = 52
+}
+
+/// Where the reader is in the transcript: within the near-bottom band, and
+/// whether auto-follow is latched on. A reference for the same reason as
+/// `ChatComposerHeight`: read in `ChatView.body`, scrolling across the
+/// near-bottom threshold re-ran the whole screen and the transcript (about
+/// 450 ms in a 500-message chat). Only the scroll-to-bottom button and,
+/// during a run, the run-status pill read it in a body; the transcript's
+/// bottom pin reads it from scroll callbacks.
+@MainActor @Observable
+final class ChatScrollFollowState {
+    var isNearBottom = true
+    var latch = ChatScrollPolicy.FollowLatch()
+
+    /// Writes the latch only when the event changes it, so its readers re-run
+    /// only then.
+    func apply(_ event: ChatScrollPolicy.FollowEvent) {
+        let resolved = ChatScrollPolicy.resolveFollow(current: latch, event: event)
+        if resolved != latch {
+            latch = resolved
+        }
+    }
+
+    /// Folds one scroll report into the near-bottom band and the latch.
+    func update(with metrics: ChatScrollMetrics, isStreaming: Bool) {
+        let isNearBottom = ChatScrollPolicy.isNearBottom(
+            distanceFromBottom: metrics.distanceFromBottom,
+            isStreaming: isStreaming
+        )
+        let wasNearBottom = self.isNearBottom
+        if isNearBottom != wasNearBottom {
+            self.isNearBottom = isNearBottom
+        }
+        apply(.contentScrolled(
+            isAtBottom: ChatScrollPolicy.isAtBottom(distanceFromBottom: metrics.distanceFromBottom),
+            isUserScrolling: metrics.isUserInteracting,
+            movedAwayFromBottom: metrics.movedAwayFromBottom,
+            wasNearBottom: wasNearBottom
+        ))
+    }
 }
 
 /// Hands `content` the composer's current height, so only this view re-runs

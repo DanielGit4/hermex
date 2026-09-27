@@ -50,9 +50,7 @@ import XCTest
     /// draft onto a new line and grows the composer, which used to re-run the
     /// screen and re-measure every row (about 400 ms in a 500-message chat).
     ///
-    /// Typed a word at a time to stay quick. Two grown lines stay well inside
-    /// the near-bottom band; pushing the reader past it does re-run the screen,
-    /// on purpose, to show the scroll-to-bottom button.
+    /// Typed a word at a time to stay quick.
     func testTypingAndWrappingReRunOnlyTheComposer() async throws {
         let words = Self.wrappingText.prefix(215).split(separator: " ").map { String($0) + " " }
         let run = try await typeIntoHostedChat(messageCount: 40, keystrokes: words)
@@ -64,6 +62,76 @@ import XCTest
         }
         XCTAssertGreaterThanOrEqual(run.total(.composer), words.count, "Every keystroke must reach the composer")
         XCTAssertLessThanOrEqual(run.total(.composer), 2 * words.count, "At most two composer passes per keystroke")
+    }
+
+    func testReportsScrollCrossingCostInALongChat() async throws {
+        try requireReportOptIn()
+        let crossings = try await crossNearBottomInHostedChat(messageCount: 500)
+        report(crossings, scenario: "long500")
+    }
+
+    /// Scrolling away from the bottom far enough to show the scroll-to-bottom
+    /// button, tapping it, and scrolling back re-run neither the screen, the
+    /// transcript nor a row. Crossing used to re-run all of them (about 400 ms
+    /// in a 500-message chat). A reply the scroll carries into or out of view
+    /// still re-runs its own bubble, once, to start or stop collecting glyphs
+    /// for selection.
+    ///
+    /// Scrolling away and the tap also flip auto-follow, which must not
+    /// re-update every reply's selection host either: a scroll anchor that
+    /// changed with follow did (about 500 ms in a 500-message chat).
+    func testCrossingTheNearBottomThresholdReRunsNeitherScreenNorTranscript() async throws {
+        let crossings = try await crossNearBottomInHostedChat(messageCount: 40)
+        report(crossings, scenario: "regression40")
+
+        XCTAssertEqual(crossings.map(\.direction), ["away", "tap", "away", "back"])
+        for crossing in crossings {
+            for site in [ViewBodyProbe.Site.chatView, .chatViewport, .transcript, .transcriptBlock, .transcriptRow] {
+                XCTAssertEqual(crossing.passes[site] ?? 0, 0, "Scrolling \(crossing.direction) re-ran \(site.rawValue)")
+            }
+            XCTAssertLessThanOrEqual(
+                crossing.passes[.messageBubble] ?? 0, crossing.passes[.replyVisibility] ?? 0,
+                "Scrolling \(crossing.direction) re-ran a bubble whose visibility did not change"
+            )
+            XCTAssertLessThanOrEqual(
+                crossing.passes[.responseHostUpdate] ?? 0, crossing.passes[.replyVisibility] ?? 0,
+                "Scrolling \(crossing.direction) re-updated a selection host whose visibility did not change"
+            )
+        }
+    }
+
+    /// Tapping the scroll-to-bottom button lands at the bottom, hides the
+    /// button and turns follow back on, so content that changes height next
+    /// stays pinned to the bottom. The change here is settled turns unfolding,
+    /// which moves nothing but the transcript's height and scrolls nothing.
+    func testTappingScrollToBottomLandsThereAndResumesFollow() async throws {
+        let foldsKey = ChatTranscriptDisplaySettings.foldsSettledTurnsKey
+        let savedFolds = UserDefaults.standard.object(forKey: foldsKey)
+        defer { UserDefaults.standard.set(savedFolds, forKey: foldsKey) }
+        UserDefaults.standard.set(true, forKey: foldsKey)
+
+        try await withHostedChat(messageCount: 40) { fixture, window in
+            let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
+            let observer = try XCTUnwrap(
+                descendants(window).compactMap { ($0 as? ChatScrollObserver.ObserverView)?.coordinator }.first
+            )
+            _ = await scroll(scrollView, toY: bottomOffsetY(of: scrollView) - Self.scrollAwayDistance, in: window, direction: "away")
+            XCTAssertTrue(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling away must show the scroll-to-bottom button")
+            XCTAssertEqual(observer.followsLatestContent?(), false, "Scrolling away must switch follow off")
+
+            _ = try await tapScrollToBottomButton(scrollView, in: window)
+            XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "Tapping the button must hide it")
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "Tapping the button must land at the bottom")
+            XCTAssertEqual(observer.followsLatestContent?(), true, "Tapping the button must turn follow back on")
+
+            let height = scrollView.contentSize.height
+            UserDefaults.standard.set(false, forKey: foldsKey)
+            await drainKeystroke(in: window)
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "The first relayout after the tap left the bottom")
+            try await settle(window, fixture: fixture) { true }
+            XCTAssertGreaterThan(abs(scrollView.contentSize.height - height), 20, "Unfolding must change the transcript's height")
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "Content that changed after the tap must stay pinned to the bottom")
+        }
     }
 
     // MARK: - Harness
@@ -105,19 +173,40 @@ import XCTest
         keystrokes: [String] = ChatViewTypingPerformanceTests.typedText.map(String.init)
     ) async throws -> TypingRun {
         XCTAssertEqual(Self.typedText.count, 60)
+        return try await withHostedChat(messageCount: messageCount) { fixture, window in
+            try await type(keystrokes, into: window, fixture: fixture)
+        }
+    }
+
+    /// Hosts `ChatView` over a transcript of `messageCount` messages, waits for
+    /// it to settle at the bottom with the probes counting, runs `body`, and
+    /// tears everything down again so the next hosted test starts clean.
+    private func withHostedChat<Result>(
+        messageCount: Int,
+        _ body: (ChatTypingFixture, UIWindow) async throws -> Result
+    ) async throws -> Result {
         let fixture = try ChatTypingFixture(messageCount: messageCount)
         defer { fixture.tearDown() }
 
+        ViewBodyProbe.isScrollToBottomButtonVisible = false
+        ViewBodyProbe.scrollToBottomButtonAction = nil
         let window = try fixture.show()
         defer { close(window) }
         ViewBodyProbe.counts = [:]
-        defer { ViewBodyProbe.counts = nil }
+        defer {
+            ViewBodyProbe.counts = nil
+            ViewBodyProbe.isScrollToBottomButtonVisible = false
+            ViewBodyProbe.scrollToBottomButtonAction = nil
+        }
 
         try await settle(window, fixture: fixture) {
             fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
         }
         XCTAssertGreaterThanOrEqual(fixture.sessionRequestCount, 1, "The transcript must come from the mocked server")
+        return try await body(fixture, window)
+    }
 
+    private func type(_ keystrokes: [String], into window: UIWindow, fixture: ChatTypingFixture) async throws -> TypingRun {
         let editor = try XCTUnwrap(descendants(window).compactMap { $0 as? ComposerChipTextView }.first)
         XCTAssertTrue(editor.isEditable, "The composer must be editable, not the cached read-only state")
         XCTAssertTrue(editor.becomeFirstResponder())
@@ -164,6 +253,123 @@ import XCTest
         }
         window.layoutIfNeeded()
         CATransaction.flush()
+    }
+
+    /// How far above the bottom the reader scrolls: well past the 160 pt
+    /// streaming threshold, so the scroll-to-bottom button must appear.
+    static let scrollAwayDistance: CGFloat = 600
+
+    struct Crossing {
+        /// `away` from the bottom, `back` to it with a plain scroll, or `tap`
+        /// on the scroll-to-bottom button.
+        var direction: String
+        /// Main-thread milliseconds from the scroll or tap until the update
+        /// and its deferred main-queue work have drained.
+        var ms: Double
+        /// Body passes, by view, including the button's transition frames.
+        var passes: [ViewBodyProbe.Site: Int]
+        /// For a tap: milliseconds until its scroll has landed at the bottom
+        /// and the button has gone, animation included.
+        var landedMs: Double?
+    }
+
+    /// Hosts the chat at the bottom and records what each crossing of the
+    /// near-bottom threshold costs: scrolling the transcript
+    /// `scrollAwayDistance` above the bottom without a gesture, tapping the
+    /// scroll-to-bottom button, scrolling away again, and scrolling back.
+    /// Scrolling away and the tap flip auto-follow; scrolling back does not.
+    func crossNearBottomInHostedChat(messageCount: Int) async throws -> [Crossing] {
+        try await withHostedChat(messageCount: messageCount) { _, window in
+            let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
+            XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "A settled chat starts at the bottom")
+            let bottom = bottomOffsetY(of: scrollView)
+            XCTAssertGreaterThan(bottom - Self.scrollAwayDistance, 0, "The transcript must be tall enough to scroll away")
+
+            let away = await scroll(scrollView, toY: bottom - Self.scrollAwayDistance, in: window, direction: "away")
+            XCTAssertTrue(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling away must show the scroll-to-bottom button")
+            let tap = try await tapScrollToBottomButton(scrollView, in: window)
+            XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "Tapping the button must hide it")
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "Tapping the button must land at the bottom")
+            let awayAgain = await scroll(scrollView, toY: bottomOffsetY(of: scrollView) - Self.scrollAwayDistance, in: window, direction: "away")
+            XCTAssertTrue(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling away must show the scroll-to-bottom button")
+            let back = await scroll(scrollView, toY: bottomOffsetY(of: scrollView), in: window, direction: "back")
+            XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling back must hide the scroll-to-bottom button")
+            return [away, tap, awayAgain, back]
+        }
+    }
+
+    private func bottomOffsetY(of scrollView: UIScrollView) -> CGFloat {
+        scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+    }
+
+    func distanceFromBottom(of scrollView: UIScrollView) -> CGFloat {
+        bottomOffsetY(of: scrollView) - scrollView.contentOffset.y
+    }
+
+    /// Runs the on-screen button's own action, drained like a keystroke, then
+    /// renders frames until its scroll has landed and the button has gone.
+    private func tapScrollToBottomButton(_ scrollView: UIScrollView, in window: UIWindow) async throws -> Crossing {
+        let tap = try XCTUnwrap(ViewBodyProbe.scrollToBottomButtonAction, "The scroll-to-bottom button must be on screen")
+        let before = ViewBodyProbe.counts ?? [:]
+        let start = CACurrentMediaTime()
+        tap()
+        await drainKeystroke(in: window)
+        let end = CACurrentMediaTime()
+        var frames = 0
+        while ViewBodyProbe.isScrollToBottomButtonVisible || distanceFromBottom(of: scrollView) > 1, frames < 120 {
+            await renderFrames(2)
+            frames += 2
+        }
+        let landed = CACurrentMediaTime()
+        await renderFrames(4)
+        let after = ViewBodyProbe.counts ?? [:]
+        return Crossing(
+            direction: "tap", ms: (end - start) * 1000,
+            passes: after.merging(before) { $0 - $1 }, landedMs: (landed - start) * 1000
+        )
+    }
+
+    /// One programmatic scroll, drained like a keystroke. Then frames render
+    /// until the button's transition has finished, so the passes it causes
+    /// count toward the crossing.
+    private func scroll(_ scrollView: UIScrollView, toY offsetY: CGFloat, in window: UIWindow, direction: String) async -> Crossing {
+        let showsButton = direction == "away"
+        let before = ViewBodyProbe.counts ?? [:]
+        let start = CACurrentMediaTime()
+        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: offsetY), animated: false)
+        await drainKeystroke(in: window)
+        let end = CACurrentMediaTime()
+        var frames = 0
+        while ViewBodyProbe.isScrollToBottomButtonVisible != showsButton, frames < 60 {
+            await renderFrames(2)
+            frames += 2
+        }
+        await renderFrames(4)
+        let after = ViewBodyProbe.counts ?? [:]
+        return Crossing(direction: direction, ms: (end - start) * 1000, passes: after.merging(before) { $0 - $1 })
+    }
+
+    func report(_ crossings: [Crossing], scenario: String) {
+        for crossing in crossings {
+            let passes = crossing.passes
+            let rows = (passes[.transcriptBlock] ?? 0) + (passes[.transcriptRow] ?? 0) + (passes[.messageBubble] ?? 0)
+            let fields = [
+                "SCROLL-PERF scenario=\(scenario)",
+                "direction=\(crossing.direction)",
+                "ms=\(format(crossing.ms))",
+                "landedMs=\(crossing.landedMs.map(format) ?? "-")",
+                "chatView=\(passes[.chatView] ?? 0)",
+                "chatViewport=\(passes[.chatViewport] ?? 0)",
+                "transcript=\(passes[.transcript] ?? 0)",
+                "rows=\(rows)",
+                "bubbles=\(passes[.messageBubble] ?? 0)",
+                "replyVisibility=\(passes[.replyVisibility] ?? 0)",
+                "responseHostUpdate=\(passes[.responseHostUpdate] ?? 0)",
+                "responseHostMeasure=\(passes[.responseHostMeasure] ?? 0)",
+                "composer=\(passes[.composer] ?? 0)"
+            ]
+            print(fields.joined(separator: " "))
+        }
     }
 
     /// Renders frames until `isReady` holds and the screen has stopped changing

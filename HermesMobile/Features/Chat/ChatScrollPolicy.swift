@@ -30,6 +30,9 @@ enum ChatScrollPolicy {
     /// layout. Keep those size changes bottom-pinned only while follow is
     /// latched on and no disclosure toggle is settling; otherwise return nil so
     /// the reader's offset, and the row they just tapped, stay where they are.
+    /// The Bot transcripts anchor with this. The Sessions transcript keeps a
+    /// constant nil anchor (`chatTranscriptScrollAnchors()`) and pins the
+    /// bottom in `ChatScrollObserver` by the same rule.
     static func sizeChangeAnchor(
         shouldFollowLatestMessage: Bool,
         isDisclosureSettling: Bool = false
@@ -56,8 +59,8 @@ enum ChatScrollPolicy {
     /// Gap between momentum ticks that means deceleration has stopped.
     static let momentumSettleDelay: TimeInterval = 0.05
 
-    /// How long follow scrolls and the bottom size-change anchor stay suspended
-    /// after a disclosure toggle. Covers the disclosure animation plus a frame.
+    /// How long follow scrolls and the bottom pin stay suspended after a
+    /// disclosure toggle. Covers the disclosure animation plus a frame.
     static let disclosureAnchorSuspension: TimeInterval = 0.25
 
     /// The offset pin armed by a disclosure toggle releases once the content
@@ -108,11 +111,12 @@ enum ChatScrollPolicy {
 
     /// True when a report without a gesture shows the reader farther from the
     /// bottom than the last one, past the streaming threshold, in the same
-    /// viewport. While follow is on the bottom anchor snaps every size change
-    /// back to zero distance, so only an actual scroll (status-bar tap,
-    /// VoiceOver, hardware keyboard) can move the reader out that far. Keyboard
-    /// insets change the viewport and are excluded; the scroll observer
-    /// suppresses the check while a disclosure pin holds the offset.
+    /// viewport. While follow is on, size changes keep the reader at the
+    /// bottom (a bottom size-change anchor, or `ChatScrollObserver`'s pin), so
+    /// only an actual scroll (status-bar tap, VoiceOver, hardware keyboard) can
+    /// move the reader out that far. Keyboard insets change the viewport and
+    /// are excluded; the scroll observer suppresses the check while a
+    /// disclosure pin holds the offset.
     static func isScrollingAwayFromBottom(previous: ScrollGeometry?, current: ScrollGeometry) -> Bool {
         guard let previous, previous.visibleHeight == current.visibleHeight else { return false }
         let distance = current.distanceFromBottom

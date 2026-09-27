@@ -13,20 +13,29 @@ struct ChatScrollMetrics: Equatable {
 /// the follow latch (`ChatScrollPolicy.FollowEvent`). Metrics arrive on every
 /// offset or size change; follow events arrive only when a drag begins and when
 /// the gesture, including any momentum, has settled.
+///
+/// Given `followsLatestContent`, it also keeps the bottom pinned while that
+/// returns true: when the content or the scroll view changes height, a reader
+/// at the bottom stays there, as with SwiftUI's bottom size-change anchor. A
+/// reader above the bottom and inset changes (composer, keyboard) are left
+/// alone, as that anchor leaves them.
 struct ChatScrollObserver: UIViewRepresentable {
     let isStreaming: Bool
     let scrollPositionController: ChatScrollPositionController?
+    let followsLatestContent: (@MainActor () -> Bool)?
     let onFollowEvent: @MainActor (ChatScrollPolicy.FollowEvent) -> Void
     let onMetrics: @MainActor (ChatScrollMetrics) -> Void
 
     init(
         isStreaming: Bool,
         scrollPositionController: ChatScrollPositionController? = nil,
+        followsLatestContent: (@MainActor () -> Bool)? = nil,
         onFollowEvent: @escaping @MainActor (ChatScrollPolicy.FollowEvent) -> Void = { _ in },
         onMetrics: @escaping @MainActor (ChatScrollMetrics) -> Void
     ) {
         self.isStreaming = isStreaming
         self.scrollPositionController = scrollPositionController
+        self.followsLatestContent = followsLatestContent
         self.onFollowEvent = onFollowEvent
         self.onMetrics = onMetrics
     }
@@ -36,12 +45,14 @@ struct ChatScrollObserver: UIViewRepresentable {
     }
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(
+        let coordinator = Coordinator(
             metricContext: metricContext,
             scrollPositionController: scrollPositionController,
             onFollowEvent: onFollowEvent,
             onMetrics: onMetrics
         )
+        coordinator.followsLatestContent = followsLatestContent
+        return coordinator
     }
 
     func makeUIView(context: Context) -> ObserverView {
@@ -51,6 +62,7 @@ struct ChatScrollObserver: UIViewRepresentable {
     func updateUIView(_ uiView: ObserverView, context: Context) {
         context.coordinator.onMetrics = onMetrics
         context.coordinator.onFollowEvent = onFollowEvent
+        context.coordinator.followsLatestContent = followsLatestContent
         context.coordinator.scrollPositionController = scrollPositionController
         uiView.coordinator = context.coordinator
         context.coordinator.updateMetricContext(metricContext)
@@ -65,6 +77,30 @@ struct ChatScrollObserver: UIViewRepresentable {
 
     struct MetricContext: Equatable {
         let isStreaming: Bool
+    }
+
+    struct BottomPinBaseline {
+        var contentHeight: CGFloat
+        var boundsHeight: CGFloat
+        var offsetY: CGFloat
+    }
+
+    /// The new bottom offset for a reader who was at the bottom at `previous`,
+    /// now that the content or the scroll view changed height. Nil when
+    /// neither changed, or when the reader was above the bottom: SwiftUI's
+    /// bottom size-change anchor leaves that offset alone too, and so does not
+    /// cut short a scroll animating toward the bottom.
+    nonisolated static func bottomPinnedOffsetY(
+        previous: BottomPinBaseline,
+        contentHeight: CGFloat,
+        boundsHeight: CGFloat,
+        adjustedInset: UIEdgeInsets
+    ) -> CGFloat? {
+        guard contentHeight != previous.contentHeight || boundsHeight != previous.boundsHeight else { return nil }
+        let previousBottomY = previous.contentHeight - previous.boundsHeight + adjustedInset.bottom
+        guard previous.offsetY >= previousBottomY - 1 else { return nil }
+
+        return max(-adjustedInset.top, contentHeight - boundsHeight + adjustedInset.bottom)
     }
 
     @MainActor
@@ -108,8 +144,13 @@ struct ChatScrollObserver: UIViewRepresentable {
 
         var onMetrics: @MainActor (ChatScrollMetrics) -> Void
         var onFollowEvent: @MainActor (ChatScrollPolicy.FollowEvent) -> Void
+        /// Nil leaves size changes to the owner's SwiftUI anchors.
+        var followsLatestContent: (@MainActor () -> Bool)?
 
         private weak var scrollView: UIScrollView?
+        /// The scroll view as of the last callback: where the reader was
+        /// before a height changed.
+        private var pinBaseline: BottomPinBaseline?
         private weak var observedPanGesture: UIPanGestureRecognizer?
         private var observations: [NSKeyValueObservation] = []
         private var metricContext: MetricContext
@@ -167,6 +208,7 @@ struct ChatScrollObserver: UIViewRepresentable {
             observations.removeAll()
             lastMetrics = nil
             deliveredGeometry = nil
+            pinBaseline = nil
             endUserScrollSessionSilently()
             self.scrollView = scrollView
             scrollPositionController?.attach(to: scrollView)
@@ -195,6 +237,7 @@ struct ChatScrollObserver: UIViewRepresentable {
             scrollPositionController?.detach()
             lastMetrics = nil
             deliveredGeometry = nil
+            pinBaseline = nil
             pendingMetrics = nil
             pendingGeometry = nil
             hasScheduledMetricDelivery = false
@@ -295,8 +338,37 @@ struct ChatScrollObserver: UIViewRepresentable {
             geometry(of: scrollView)?.distanceFromBottom
         }
 
+        // MARK: Bottom pin
+
+        /// Runs before each report, so a size change the pin absorbs never
+        /// reaches the transcript as the reader moving away from the bottom.
+        private func pinBottomIfFollowing(_ scrollView: UIScrollView) {
+            guard let followsLatestContent else { return }
+            let previous = pinBaseline
+            pinBaseline = BottomPinBaseline(
+                contentHeight: scrollView.contentSize.height,
+                boundsHeight: scrollView.bounds.height,
+                offsetY: scrollView.contentOffset.y
+            )
+            guard let previous,
+                  let targetY = ChatScrollObserver.bottomPinnedOffsetY(
+                      previous: previous,
+                      contentHeight: scrollView.contentSize.height,
+                      boundsHeight: scrollView.bounds.height,
+                      adjustedInset: scrollView.adjustedContentInset
+                  ),
+                  abs(scrollView.contentOffset.y - targetY) > 0.5,
+                  followsLatestContent(),
+                  scrollPositionController?.isHoldingPosition != true
+            else { return }
+
+            pinBaseline?.offsetY = targetY
+            scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: targetY), animated: false)
+        }
+
         func reportMetrics(delivery: MetricDelivery) {
             guard let scrollView else { return }
+            pinBottomIfFollowing(scrollView)
             trackMomentum(scrollView)
 
             guard let geometry = geometry(of: scrollView) else { return }
@@ -1198,10 +1270,21 @@ struct PinnedLocalNoticeStack: View {
 enum ViewBodyProbe {
     enum Site: String, CaseIterable {
         case chatView, chatViewport, transcript, transcriptBlock, transcriptRow, messageBubble, composer
+        /// Not a body: a reply scrolling into or out of the viewport, which
+        /// re-runs its bubble once to start or stop collecting glyphs.
+        case replyVisibility
+        /// Not bodies: a reply's selection host rewriting its hosted content
+        /// and being measured, which SwiftUI can do without a body pass.
+        case responseHostUpdate, responseHostMeasure
     }
 
     #if DEBUG
     @MainActor static var counts: [Site: Int]?
+    /// Whether the scroll-to-bottom button is on screen, so a test can tell
+    /// its scroll really crossed the near-bottom threshold.
+    @MainActor static var isScrollToBottomButtonVisible = false
+    /// The on-screen scroll-to-bottom button's action, so a test can tap it.
+    @MainActor static var scrollToBottomButtonAction: (() -> Void)?
     #endif
 
     @MainActor @inline(__always)
