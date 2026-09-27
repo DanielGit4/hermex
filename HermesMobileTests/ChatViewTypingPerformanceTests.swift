@@ -142,8 +142,8 @@ import XCTest
 
     /// A `ChatView` pass that changes no row's data, the kind a button
     /// appearing or a status changing causes, neither rewrites nor re-measures
-    /// a reply's selection host. It did both for every reply (about 400 ms in
-    /// a 500-message chat).
+    /// a reply's selection host. It did both for every reply (about 200 ms of
+    /// a 300 ms pass in a 500-message chat).
     func testAnOwnerPassWithUnchangedRowsLeavesEveryReplyHostAlone() async throws {
         let passes = try await forceOwnerPassesInHostedChat(messageCount: 40, count: 2)
         report(passes, scenario: "regression40", label: "OWNER-PASS-PERF")
