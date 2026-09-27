@@ -66,6 +66,27 @@ import XCTest
         XCTAssertLessThanOrEqual(run.total(.composer), 2 * words.count, "At most two composer passes per keystroke")
     }
 
+    func testReportsScrollCrossingCostInALongChat() async throws {
+        try requireReportOptIn()
+        let crossings = try await crossNearBottomInHostedChat(messageCount: 500)
+        report(crossings, scenario: "long500")
+    }
+
+    /// Scrolling away from the bottom far enough to show the scroll-to-bottom
+    /// button, and back, re-runs neither the screen, the transcript nor a row.
+    /// Both used to re-run all of them (about 400 ms in a 500-message chat).
+    func testCrossingTheNearBottomThresholdReRunsNeitherScreenNorTranscript() async throws {
+        let crossings = try await crossNearBottomInHostedChat(messageCount: 40)
+        report(crossings, scenario: "regression40")
+
+        XCTAssertEqual(crossings.map(\.direction), ["away", "back"])
+        for crossing in crossings {
+            for site in [ViewBodyProbe.Site.chatView, .chatViewport, .transcript, .transcriptBlock, .transcriptRow, .messageBubble] {
+                XCTAssertEqual(crossing.passes[site] ?? 0, 0, "Scrolling \(crossing.direction) re-ran \(site.rawValue)")
+            }
+        }
+    }
+
     // MARK: - Harness
 
     private func requireReportOptIn() throws {
@@ -105,19 +126,38 @@ import XCTest
         keystrokes: [String] = ChatViewTypingPerformanceTests.typedText.map(String.init)
     ) async throws -> TypingRun {
         XCTAssertEqual(Self.typedText.count, 60)
+        return try await withHostedChat(messageCount: messageCount) { fixture, window in
+            try await type(keystrokes, into: window, fixture: fixture)
+        }
+    }
+
+    /// Hosts `ChatView` over a transcript of `messageCount` messages, waits for
+    /// it to settle at the bottom with the probes counting, runs `body`, and
+    /// tears everything down again so the next hosted test starts clean.
+    private func withHostedChat<Result>(
+        messageCount: Int,
+        _ body: (ChatTypingFixture, UIWindow) async throws -> Result
+    ) async throws -> Result {
         let fixture = try ChatTypingFixture(messageCount: messageCount)
         defer { fixture.tearDown() }
 
+        ViewBodyProbe.isScrollToBottomButtonVisible = false
         let window = try fixture.show()
         defer { close(window) }
         ViewBodyProbe.counts = [:]
-        defer { ViewBodyProbe.counts = nil }
+        defer {
+            ViewBodyProbe.counts = nil
+            ViewBodyProbe.isScrollToBottomButtonVisible = false
+        }
 
         try await settle(window, fixture: fixture) {
             fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
         }
         XCTAssertGreaterThanOrEqual(fixture.sessionRequestCount, 1, "The transcript must come from the mocked server")
+        return try await body(fixture, window)
+    }
 
+    private func type(_ keystrokes: [String], into window: UIWindow, fixture: ChatTypingFixture) async throws -> TypingRun {
         let editor = try XCTUnwrap(descendants(window).compactMap { $0 as? ComposerChipTextView }.first)
         XCTAssertTrue(editor.isEditable, "The composer must be editable, not the cached read-only state")
         XCTAssertTrue(editor.becomeFirstResponder())
@@ -164,6 +204,80 @@ import XCTest
         }
         window.layoutIfNeeded()
         CATransaction.flush()
+    }
+
+    /// How far above the bottom the reader scrolls: well past the 160 pt
+    /// streaming threshold, so the scroll-to-bottom button must appear.
+    static let scrollAwayDistance: CGFloat = 600
+
+    struct Crossing {
+        /// `away` from the bottom or `back` to it.
+        var direction: String
+        /// Main-thread milliseconds from `setContentOffset` until the update
+        /// and its deferred main-queue work have drained.
+        var ms: Double
+        /// Body passes, by view, including the button's transition frames.
+        var passes: [ViewBodyProbe.Site: Int]
+    }
+
+    /// Hosts the chat at the bottom, scrolls the transcript `scrollAwayDistance`
+    /// above it without a gesture, then back to the bottom, and records what
+    /// each crossing of the near-bottom threshold cost.
+    func crossNearBottomInHostedChat(messageCount: Int) async throws -> [Crossing] {
+        try await withHostedChat(messageCount: messageCount) { _, window in
+            let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
+            XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "A settled chat starts at the bottom")
+            let bottom = bottomOffsetY(of: scrollView)
+            XCTAssertGreaterThan(bottom - Self.scrollAwayDistance, 0, "The transcript must be tall enough to scroll away")
+
+            let away = await scroll(scrollView, toY: bottom - Self.scrollAwayDistance, in: window, direction: "away")
+            XCTAssertTrue(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling away must show the scroll-to-bottom button")
+            let back = await scroll(scrollView, toY: bottomOffsetY(of: scrollView), in: window, direction: "back")
+            XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "Scrolling back must hide the scroll-to-bottom button")
+            return [away, back]
+        }
+    }
+
+    private func bottomOffsetY(of scrollView: UIScrollView) -> CGFloat {
+        scrollView.contentSize.height - scrollView.bounds.height + scrollView.adjustedContentInset.bottom
+    }
+
+    /// One programmatic scroll, drained like a keystroke. Then frames render
+    /// until the button's transition has finished, so the passes it causes
+    /// count toward the crossing.
+    private func scroll(_ scrollView: UIScrollView, toY offsetY: CGFloat, in window: UIWindow, direction: String) async -> Crossing {
+        let showsButton = direction == "away"
+        let before = ViewBodyProbe.counts ?? [:]
+        let start = CACurrentMediaTime()
+        scrollView.setContentOffset(CGPoint(x: scrollView.contentOffset.x, y: offsetY), animated: false)
+        await drainKeystroke(in: window)
+        let end = CACurrentMediaTime()
+        var frames = 0
+        while ViewBodyProbe.isScrollToBottomButtonVisible != showsButton, frames < 60 {
+            await renderFrames(2)
+            frames += 2
+        }
+        await renderFrames(4)
+        let after = ViewBodyProbe.counts ?? [:]
+        return Crossing(direction: direction, ms: (end - start) * 1000, passes: after.merging(before) { $0 - $1 })
+    }
+
+    func report(_ crossings: [Crossing], scenario: String) {
+        for crossing in crossings {
+            let passes = crossing.passes
+            let rows = (passes[.transcriptBlock] ?? 0) + (passes[.transcriptRow] ?? 0) + (passes[.messageBubble] ?? 0)
+            let fields = [
+                "SCROLL-PERF scenario=\(scenario)",
+                "direction=\(crossing.direction)",
+                "ms=\(format(crossing.ms))",
+                "chatView=\(passes[.chatView] ?? 0)",
+                "chatViewport=\(passes[.chatViewport] ?? 0)",
+                "transcript=\(passes[.transcript] ?? 0)",
+                "rows=\(rows)",
+                "composer=\(passes[.composer] ?? 0)"
+            ]
+            print(fields.joined(separator: " "))
+        }
     }
 
     /// Renders frames until `isReady` holds and the screen has stopped changing

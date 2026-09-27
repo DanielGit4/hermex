@@ -1202,6 +1202,9 @@ enum ViewBodyProbe {
 
     #if DEBUG
     @MainActor static var counts: [Site: Int]?
+    /// Whether the scroll-to-bottom button is on screen, so a test can tell
+    /// its scroll really crossed the near-bottom threshold.
+    @MainActor static var isScrollToBottomButtonVisible = false
     #endif
 
     @MainActor @inline(__always)
