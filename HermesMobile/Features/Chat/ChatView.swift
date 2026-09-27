@@ -857,7 +857,16 @@ struct ChatView: View {
                 guard viewModel.responseCompletionHapticTrigger > 0 else { return }
                 handleResponseCompletionSideEffects()
             }
-            .onChange(of: viewModel.streamingHapticPulseTrigger, handleStreamingHapticPulse)
+            .background {
+                // Mounted only while the pulse can play: with it off, nothing
+                // observes the trigger, so a bump re-runs no view at all.
+                if isHapticsEnabled && isStreamingPulseEnabled {
+                    StreamingFollowTrigger(
+                        trigger: { viewModel.streamingHapticPulseTrigger },
+                        onFire: handleStreamingHapticPulse
+                    )
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .principal) {
                     ChatToolbarTitleLabel(
