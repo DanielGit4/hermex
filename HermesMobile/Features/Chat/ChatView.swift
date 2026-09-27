@@ -408,7 +408,9 @@ struct ChatView: View {
         onConversationStarted: @escaping () -> Void = {},
         onReplaceEmptySession: ((SessionSummary) -> Void)? = nil,
         // Tests only: serves the chat from a mocked client. Nil uses the server's.
-        client: APIClient? = nil
+        client: APIClient? = nil,
+        // Tests only: drives the chat from a view model with scripted streams.
+        viewModel: ChatViewModel? = nil
     ) {
         self.session = session
         self.server = server
@@ -424,7 +426,7 @@ struct ChatView: View {
         _composerDraft = State(initialValue: ChatComposerDraft(text: initialDraft))
         _draftQuotes = State(initialValue: initialQuotes)
         _initialAttachments = State(initialValue: initialAttachments)
-        _viewModel = State(initialValue: ChatViewModel(
+        _viewModel = State(initialValue: viewModel ?? ChatViewModel(
             session: session,
             server: server,
             client: client,
@@ -1712,6 +1714,7 @@ struct ChatView: View {
     private func turnFolds(reasoningGroups: [ReasoningGroup]) -> TranscriptTurnFolds {
         guard foldsSettledTurns else { return .none }
 
+        ViewBodyProbe.hit(.turnFoldsDerive)
         let activityAnchorIDs: Set<String> = showsThinkingAndToolCards
             ? Set(reasoningGroups.compactMap(\.anchorMessageID))
                 .union(viewModel.completedToolCallGroups.compactMap(\.anchorMessageID))
@@ -1731,7 +1734,8 @@ struct ChatView: View {
 
     /// Rows that get the time + copy row as the reply closing a settled turn.
     private var terminalReplyRenderIDs: Set<String> {
-        TranscriptMessageMetaPolicy.terminalReplyRenderIDs(
+        ViewBodyProbe.hit(.terminalRepliesDerive)
+        return TranscriptMessageMetaPolicy.terminalReplyRenderIDs(
             transcriptMessages: transcriptMessages,
             messages: viewModel.messages,
             messageOffset: viewModel.messagesOffset,
