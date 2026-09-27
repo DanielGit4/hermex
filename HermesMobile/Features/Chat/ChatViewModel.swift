@@ -692,7 +692,8 @@ final class ChatViewModel {
         listenRemoteControlCenter: (any ListenRemoteControlControlling)? = nil,
         serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
         draftAttachmentStore: any ChatDraftAttachmentStoring = ChatDraftAttachmentStore.shared,
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        followSessionProfile: (@Sendable (String) async -> Bool)? = nil
     ) {
         sessionID = session.sessionId
         currentWorkspace = session.workspace
@@ -701,7 +702,18 @@ final class ChatViewModel {
         currentProfile = session.profile
         isCLISession = session.isCliSession == true
         self.server = server
-        let resolvedClient = client ?? APIClient(baseURL: server)
+        // Every session and stream request of this chat follows its session
+        // once to the profile that owns it: through the list that lends the
+        // chat its profile, or directly where no list opened the chat.
+        let resolvedClient = client ?? APIClient(
+            baseURL: server,
+            followSessionProfile: followSessionProfile ?? { owner in
+                guard let response = try? await APIClient(baseURL: server).switchProfile(name: owner) else {
+                    return false
+                }
+                return response.error?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+            }
+        )
         let resolvedStreamClient = streamClient ?? SSEClient()
         let resolvedLiveActivityManager = liveActivityManager ?? AgentLiveActivityManager.shared
         self.client = resolvedClient

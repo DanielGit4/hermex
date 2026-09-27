@@ -99,6 +99,13 @@ enum ActiveSessionStateRefreshResult: Equatable {
     case failed
 }
 
+/// Why the list could not move the server's profile. `message` is nil when
+/// the switch was cancelled; `error` is the thrown error, if one was.
+struct ProfileSwitchFailure: Sendable {
+    let message: String?
+    let error: Error?
+}
+
 @MainActor
 @Observable
 final class SessionListViewModel {
@@ -127,7 +134,8 @@ final class SessionListViewModel {
     private(set) var profileOptions: [ProfileSummary] = []
     /// The profile this client's server cookie (`hermes_profile`) selects, as
     /// last reported. `activeProfileName` is the user's pick, which New Chat
-    /// uses; the two differ after a row from another profile was opened.
+    /// and every screen reached from the list use; the two differ only while
+    /// the list lends the cookie to a chat or row action from another profile.
     private(set) var serverProfileName: String?
     /// False when the last live load listed only the active profile (an
     /// isolated-profile server, or one older than `all_profiles`); nil before
@@ -158,11 +166,26 @@ final class SessionListViewModel {
     private var activeRemoteSearchQuery: String?
     private var sessionOpenGeneration = 0
     /// The profile the list moved the server to, away from the pick, to reach
-    /// a row. A profile reload that still finds the server there keeps the pick.
+    /// a row or follow a chat. A profile reload that still finds the server
+    /// there keeps the pick.
     private var profileMovedForRow: String?
     /// Set while a switch is in flight or after one ended without an answer,
     /// so the next row re-sends it instead of trusting `serverProfileName`.
     private var serverProfileIsUncertain = false
+    /// The list's profile switch or read in flight. Each later one waits for
+    /// it, so a return never lands before the loan it ends and a read never
+    /// overtakes a switch. Bookkeeping only: no view observes it.
+    @ObservationIgnored private var profileWork: Task<Void, Never>?
+    /// Counts queued profile switches and reads, so a list load that
+    /// overlapped one does not report a profile the server has since left.
+    @ObservationIgnored private var profileWorkCount = 0
+    /// Whether a chat is on screen, and the profile it needs (nil: the pick).
+    /// When a loan ends, the server profile returns there, else to the pick.
+    @ObservationIgnored private var isChatInForeground = false
+    @ObservationIgnored private var foregroundChatProfile: String?
+    /// Set when a chat closes: its own profile picker may have moved the
+    /// server since the list lent it, so the return reads the profile first.
+    @ObservationIgnored private var chatMayHaveMovedProfile = false
 
     private let client: APIClient
     private let sessionMutator: SessionMutator
@@ -480,11 +503,15 @@ final class SessionListViewModel {
             isLoading = activeLoadCount > 0
         }
 
+        // A profile switch that overlaps this load may land after the server
+        // answered, so only a load clear of switches reports the profile.
+        let profileWorkBefore = profileWork == nil ? profileWorkCount : nil
         do {
             let response = try await client.sessions(allProfiles: true)
             guard revision == returnRevision else { return false }
             listsAllProfiles = response.allProfiles ?? false
-            if let serverProfile = Self.nonEmpty(response.activeProfile) {
+            if profileWork == nil, profileWorkBefore == profileWorkCount,
+               let serverProfile = Self.nonEmpty(response.activeProfile) {
                 serverProfileName = serverProfile
                 serverProfileIsUncertain = false
             }
@@ -550,13 +577,18 @@ final class SessionListViewModel {
         activeProfileErrorMessage = nil
         defer { isLoadingActiveProfile = false }
 
-        do {
-            let response = try await client.profiles()
-            applyActiveProfile(response)
-        } catch {
-            guard !isCancellationError(error) else { return }
-
-            activeProfileErrorMessage = error.localizedDescription
+        // Queued behind the list's switches: a read that overtook a return
+        // would take the profile lent to a chat for the user's pick.
+        let failure: Error? = await afterProfileWork { [self] in
+            do {
+                applyActiveProfile(try await client.profiles())
+                return nil
+            } catch {
+                return error
+            }
+        }
+        if let failure, !isCancellationError(failure) {
+            activeProfileErrorMessage = failure.localizedDescription
         }
     }
 
@@ -584,35 +616,37 @@ final class SessionListViewModel {
             switchingActiveProfileName = nil
         }
 
-        do {
-            let response = try await client.switchProfile(name: profileName)
-            if let error = Self.nonEmpty(response.error) {
-                activeProfileErrorMessage = error
+        return await afterProfileWork { [self] in
+            do {
+                let response = try await client.switchProfile(name: profileName)
+                if let error = Self.nonEmpty(response.error) {
+                    activeProfileErrorMessage = error
+                    return false
+                }
+
+                let resolvedName = Self.nonEmpty(response.active) ?? profileName
+                // A pick is never a move for a row, even onto the profile a row moved to.
+                profileMovedForRow = nil
+                // The switch response has no `single_profile_mode` field; carry the
+                // last known value forward so the switcher visibility doesn't flap.
+                let profileResponse = ProfilesResponse(
+                    profiles: response.profiles ?? profileOptions,
+                    active: resolvedName,
+                    singleProfileMode: isSingleProfileMode
+                )
+                applyActiveProfile(
+                    profileResponse,
+                    fallbackProfile: profile,
+                    fallbackDefaultModel: response.defaultModel
+                )
+                return true
+            } catch {
+                guard !isCancellationError(error) else { return false }
+
+                lastError = error
+                activeProfileErrorMessage = error.localizedDescription
                 return false
             }
-
-            let resolvedName = Self.nonEmpty(response.active) ?? profileName
-            // A pick is never a move for a row, even onto the profile a row moved to.
-            profileMovedForRow = nil
-            // The switch response has no `single_profile_mode` field; carry the
-            // last known value forward so the switcher visibility doesn't flap.
-            let profileResponse = ProfilesResponse(
-                profiles: response.profiles ?? profileOptions,
-                active: resolvedName,
-                singleProfileMode: isSingleProfileMode
-            )
-            applyActiveProfile(
-                profileResponse,
-                fallbackProfile: profile,
-                fallbackDefaultModel: response.defaultModel
-            )
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
-
-            lastError = error
-            activeProfileErrorMessage = error.localizedDescription
-            return false
         }
     }
 
@@ -1109,6 +1143,8 @@ final class SessionListViewModel {
         actionErrorMessage = (error as? APIError)?.serverMessage ?? error.localizedDescription
     }
 
+    // MARK: - Lending the server profile
+
     /// Moves the server to `session`'s profile before a session-scoped
     /// request; see `moveServerProfile(to:)`.
     private func moveServerProfile(toProfileOf session: SessionSummary) async -> Bool {
@@ -1116,41 +1152,173 @@ final class SessionListViewModel {
         return await moveServerProfile(to: profile)
     }
 
-    /// Switches this client's server profile (the `hermes_profile` cookie) to
-    /// `profile` when it is elsewhere, because the server answers any
-    /// session-scoped request for another profile's session with 409. The pick
-    /// stays: New Chat moves the server back to it. Returns false after
-    /// surfacing a failed switch. Nothing to do in single-profile mode,
-    /// offline, or before the server's profile is known, unless the server
-    /// has just said the profile is elsewhere (`force`).
+    /// Lends this client's server profile (the `hermes_profile` cookie) to
+    /// `profile`, because the server answers any session-scoped request for
+    /// another profile's session with 409. The pick stays, and the profile
+    /// returns when the chat closes or the row action ends. Returns false
+    /// after surfacing a failed switch.
     private func moveServerProfile(to profile: String, force: Bool = false) async -> Bool {
-        if !force {
-            guard !isSingleProfileMode, !isViewingCachedData,
-                  let current = serverProfileName ?? activeProfileName,
-                  current != profile || serverProfileIsUncertain
-            else { return true }
+        let failure = await afterProfileWork { [self] in
+            await performProfileSwitch(to: profile, force: force)
         }
+        guard let failure else { return true }
+        if let error = failure.error { lastError = error }
+        if let message = failure.message { actionErrorMessage = message }
+        return false
+    }
+
+    /// Runs a row action on `profile` (nil: wherever the server is): the list
+    /// lends the server profile to it first and returns it to the chat on
+    /// screen, or to the pick, once `action` has finished. `failure` is the
+    /// result when the loan fails.
+    private func onServerProfile<T>(
+        _ profile: String?,
+        failure: T,
+        _ action: @MainActor () async -> T
+    ) async -> T {
+        if let profile {
+            guard await moveServerProfile(to: profile) else { return failure }
+        }
+        let result = await action()
+        await returnServerProfile()
+        return result
+    }
+
+    /// Follows the navigation. Called on every destination change, it records
+    /// whether a chat is on screen and which profile it needs, then moves the
+    /// server profile there, or back to the pick when the list, New Chat or a
+    /// utility screen replaced a chat. Rows, deep links, pushes, App Intents
+    /// and Live Activity taps all change the destination, so this one hook
+    /// ends every loan a chat held.
+    @discardableResult
+    func destinationDidChange(
+        from oldDestination: SessionNavigationDestination?,
+        to newDestination: SessionNavigationDestination?
+    ) -> Task<Void, Never> {
+        switch oldDestination {
+        case .session?, .newChat?:
+            if oldDestination != newDestination { chatMayHaveMovedProfile = true }
+        case .utility?, nil:
+            break
+        }
+        switch newDestination {
+        case .session(let session)?:
+            isChatInForeground = true
+            foregroundChatProfile = Self.nonEmpty(session.profile)
+        case .newChat(let route)?:
+            isChatInForeground = true
+            foregroundChatProfile = Self.nonEmpty(route.profileName)
+        case .utility?, nil:
+            isChatInForeground = false
+            foregroundChatProfile = nil
+        }
+        return Task { await returnServerProfile() }
+    }
+
+    /// Whether screens that read the pick's data can load right away: no
+    /// switch in flight and the server known to be on the pick.
+    var isServerOnPick: Bool {
+        profileWork == nil && (activeProfileName.map(switchIsMoot(to:)) ?? true)
+    }
+
+    /// The gate for screens that read or write the pick's data (Settings,
+    /// Tasks, Skills, …): waits for any switch in flight, then returns the
+    /// server to the pick if a chat or row still has it. Returns the failure
+    /// to show instead of the screen, or nil once the server is on the pick.
+    func ensureServerOnPick() async -> ProfileSwitchFailure? {
+        await returnServerProfile(toPick: true)
+    }
+
+    /// Moves the server profile to `owner` after the server refused a request
+    /// of the chat on screen for belonging to it (409
+    /// `session_profile_mismatch`), so the chat can send it once more. A closed
+    /// chat's late request gets false: it must not take the profile from the
+    /// screen that replaced it.
+    func followSessionProfile(_ owner: String) async -> Bool {
+        guard isChatInForeground else { return false }
+        foregroundChatProfile = owner
+        let failure = await afterProfileWork { [self] in
+            await performProfileSwitch(to: owner, force: true)
+        }
+        return failure == nil
+    }
+
+    /// Ends the list's loan once earlier switches end: moves the server
+    /// profile to the chat on screen, or to the pick when none is (always the
+    /// pick with `toPick`). A return never changes the pick itself.
+    @discardableResult
+    private func returnServerProfile(toPick: Bool = false) async -> ProfileSwitchFailure? {
+        await afterProfileWork { [self] in
+            if chatMayHaveMovedProfile, profileMovedForRow != nil,
+               let response = try? await client.profiles() {
+                // A move to anywhere but the lent profile was the closed
+                // chat's own profile picker: the user's pick, which stays.
+                applyActiveProfile(response)
+            }
+            chatMayHaveMovedProfile = false
+            guard let owner = toPick ? activeProfileName : foregroundChatProfile ?? activeProfileName
+            else { return nil }
+            return await performProfileSwitch(to: owner, force: false)
+        }
+    }
+
+    /// Runs `operation` once every earlier profile switch or read of this
+    /// list has ended, so they reach the server in the order they were asked.
+    private func afterProfileWork<T: Sendable>(
+        _ operation: @escaping @MainActor @Sendable () async -> T
+    ) async -> T {
+        let previous = profileWork
+        profileWorkCount &+= 1
+        let work = Task { @MainActor in
+            await previous?.value
+            return await operation()
+        }
+        let tail = Task { @MainActor in _ = await work.value }
+        profileWork = tail
+        let result = await work.value
+        if profileWork == tail { profileWork = nil }
+        return result
+    }
+
+    /// Whether a switch to `profile` has nothing to do: the server is known to
+    /// be there, or the list cannot switch (single-profile mode, offline, or
+    /// before the server's profile is known).
+    private func switchIsMoot(to profile: String) -> Bool {
+        guard !isSingleProfileMode, !isViewingCachedData,
+              let current = serverProfileName ?? activeProfileName
+        else { return true }
+        return current == profile && !serverProfileIsUncertain
+    }
+
+    /// Switches the server profile to `profile` unless that is moot; `force`
+    /// sends it anyway because the server has just said the profile is
+    /// elsewhere. Runs only inside `afterProfileWork`. Returns nil on success.
+    private func performProfileSwitch(to profile: String, force: Bool) async -> ProfileSwitchFailure? {
+        guard force || !switchIsMoot(to: profile) else { return nil }
 
         serverProfileIsUncertain = true
         do {
             let response = try await client.switchProfile(name: profile)
             if let message = Self.nonEmpty(response.error) {
-                actionErrorMessage = String(localized: "Could not switch to the “\(profile)” profile: \(message)")
-                return false
+                return ProfileSwitchFailure(
+                    message: String(localized: "Could not switch to the “\(profile)” profile: \(message)"),
+                    error: nil
+                )
             }
 
             let serverProfile = Self.nonEmpty(response.active) ?? profile
             serverProfileName = serverProfile
             serverProfileIsUncertain = false
             profileMovedForRow = serverProfile == activeProfileName ? nil : serverProfile
-            return true
+            return nil
         } catch {
-            guard !isCancellationError(error) else { return false }
+            guard !isCancellationError(error) else { return ProfileSwitchFailure(message: nil, error: nil) }
 
-            lastError = error
             let detail = (error as? APIError)?.serverMessage ?? error.localizedDescription
-            actionErrorMessage = String(localized: "Could not switch to the “\(profile)” profile: \(detail)")
-            return false
+            return ProfileSwitchFailure(
+                message: String(localized: "Could not switch to the “\(profile)” profile: \(detail)"),
+                error: error
+            )
         }
     }
 
@@ -1171,10 +1339,11 @@ final class SessionListViewModel {
 
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
-        guard await moveServerProfile(toProfileOf: session) else { return false }
 
-        return await mutate(modelContext: modelContext, animation: animation) {
-            try await sessionMutator.setPinned(pinned, sessionID: sessionId)
+        return await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
+            await mutate(modelContext: modelContext, animation: animation) {
+                try await sessionMutator.setPinned(pinned, sessionID: sessionId)
+            }
         }
     }
 
@@ -1190,10 +1359,11 @@ final class SessionListViewModel {
 
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
-        guard await moveServerProfile(toProfileOf: session) else { return false }
 
-        return await mutate(modelContext: modelContext, animation: animation) {
-            try await sessionMutator.archive(sessionID: sessionId)
+        return await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
+            await mutate(modelContext: modelContext, animation: animation) {
+                try await sessionMutator.archive(sessionID: sessionId)
+            }
         }
     }
 
@@ -1209,10 +1379,11 @@ final class SessionListViewModel {
 
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
-        guard await moveServerProfile(toProfileOf: session) else { return false }
 
-        return await mutate(modelContext: modelContext, animation: animation) {
-            try await sessionMutator.delete(sessionID: sessionId)
+        return await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
+            await mutate(modelContext: modelContext, animation: animation) {
+                try await sessionMutator.delete(sessionID: sessionId)
+            }
         }
     }
 
@@ -1241,37 +1412,38 @@ final class SessionListViewModel {
         actionErrorMessage = nil
         lastError = nil
         defer { isRenamingSession = false }
-        guard await moveServerProfile(toProfileOf: session) else { return false }
 
-        do {
-            let response = try await sessionMutator.rename(sessionID: sessionId, title: title)
-            if let error = Self.nonEmpty(response.error) {
-                actionErrorMessage = error
+        return await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
+            do {
+                let response = try await sessionMutator.rename(sessionID: sessionId, title: title)
+                if let error = Self.nonEmpty(response.error) {
+                    actionErrorMessage = error
+                    return false
+                }
+
+                let resolvedTitle = Self.nonEmpty(response.session?.title) ?? title
+                let baseSession = sessions.first(where: { $0.sessionId == sessionId }) ?? session
+                let updatedSession = baseSession.replacingTitle(with: resolvedTitle)
+                if let existingIndex = sessions.firstIndex(where: { $0.sessionId == sessionId }) {
+                    sessions[existingIndex] = updatedSession
+                }
+
+                if let modelContext {
+                    do {
+                        try CacheStore.cacheSession(updatedSession, serverURL: server, in: modelContext)
+                    } catch {
+                        cacheErrorMessage = error.localizedDescription
+                    }
+                }
+
+                return true
+            } catch {
+                guard !isCancellationError(error) else { return false }
+
+                lastError = error
+                actionErrorMessage = error.localizedDescription
                 return false
             }
-
-            let resolvedTitle = Self.nonEmpty(response.session?.title) ?? title
-            let baseSession = sessions.first(where: { $0.sessionId == sessionId }) ?? session
-            let updatedSession = baseSession.replacingTitle(with: resolvedTitle)
-            if let existingIndex = sessions.firstIndex(where: { $0.sessionId == sessionId }) {
-                sessions[existingIndex] = updatedSession
-            }
-
-            if let modelContext {
-                do {
-                    try CacheStore.cacheSession(updatedSession, serverURL: server, in: modelContext)
-                } catch {
-                    cacheErrorMessage = error.localizedDescription
-                }
-            }
-
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
-
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return false
         }
     }
 
@@ -1298,8 +1470,12 @@ final class SessionListViewModel {
 
             guard let duplicatedSession = result.session else {
                 actionErrorMessage = result.errorMessage
+                await returnServerProfile()
                 return nil
             }
+
+            // No return on success: the list opens the copy, a chat on the
+            // same profile, which keeps the loan.
 
             await load(modelContext: modelContext)
             if !sessions.contains(where: { $0.sessionId == duplicatedSession.sessionId }) {
@@ -1317,6 +1493,7 @@ final class SessionListViewModel {
         } catch {
             lastError = error
             actionErrorMessage = error.localizedDescription
+            await returnServerProfile()
             return nil
         }
     }
@@ -1345,28 +1522,29 @@ final class SessionListViewModel {
 
         actionErrorMessage = nil
         lastError = nil
-        guard await moveServerProfile(toProfileOf: session) else { return nil }
 
-        do {
-            let file = try await client.exportSession(
-                id: sessionId,
-                format: format,
-                fallbackTitle: session.title
-            )
+        return await onServerProfile(Self.nonEmpty(session.profile), failure: nil) {
+            do {
+                let file = try await client.exportSession(
+                    id: sessionId,
+                    format: format,
+                    fallbackTitle: session.title
+                )
 
-            let directory = Self.exportsRootDirectory
-                .appendingPathComponent(UUID().uuidString, isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+                let directory = Self.exportsRootDirectory
+                    .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
-            let fileURL = directory.appendingPathComponent(file.filename)
-            try file.data.write(to: fileURL, options: .atomic)
-            return fileURL
-        } catch {
-            guard !isCancellationError(error) else { return nil }
+                let fileURL = directory.appendingPathComponent(file.filename)
+                try file.data.write(to: fileURL, options: .atomic)
+                return fileURL
+            } catch {
+                guard !isCancellationError(error) else { return nil }
 
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return nil
+                lastError = error
+                actionErrorMessage = error.localizedDescription
+                return nil
+            }
         }
     }
 
@@ -1398,10 +1576,11 @@ final class SessionListViewModel {
 
         isMovingSession = true
         defer { isMovingSession = false }
-        guard await moveServerProfile(toProfileOf: session) else { return }
 
-        _ = await mutate(modelContext: modelContext) {
-            try await sessionMutator.move(sessionID: sessionId, to: projectID)
+        _ = await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
+            await mutate(modelContext: modelContext) {
+                try await sessionMutator.move(sessionID: sessionId, to: projectID)
+            }
         }
     }
 
@@ -1432,28 +1611,32 @@ final class SessionListViewModel {
             isMovingSession = false
         }
 
-        do {
-            let createResponse = try await client.createProject(name: name, color: color)
-            guard let project = createResponse.project else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
+        // On the session's profile: the move is session-scoped, and the new
+        // project belongs to the profile whose cookie creates it.
+        return await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
+            do {
+                let createResponse = try await client.createProject(name: name, color: color)
+                guard let project = createResponse.project else {
+                    actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
+                    return false
+                }
+
+                guard let projectID = project.projectId, !projectID.isEmpty else {
+                    actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project ID.")
+                    return false
+                }
+
+                upsertProject(project)
+                try await sessionMutator.move(sessionID: sessionId, to: projectID)
+                await load(modelContext: modelContext)
+                return true
+            } catch {
+                guard !isCancellationError(error) else { return false }
+
+                lastError = error
+                actionErrorMessage = error.localizedDescription
                 return false
             }
-
-            guard let projectID = project.projectId, !projectID.isEmpty else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project ID.")
-                return false
-            }
-
-            upsertProject(project)
-            try await sessionMutator.move(sessionID: sessionId, to: projectID)
-            await load(modelContext: modelContext)
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
-
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return false
         }
     }
 
@@ -1479,27 +1662,30 @@ final class SessionListViewModel {
         isCreatingProject = true
         defer { isCreatingProject = false }
 
-        do {
-            let createResponse = try await client.createProject(name: name, color: color)
-            guard let project = createResponse.project else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
+        // The cookie's profile owns the new project, so it must be the pick.
+        return await onServerProfile(activeProfileName, failure: false) {
+            do {
+                let createResponse = try await client.createProject(name: name, color: color)
+                guard let project = createResponse.project else {
+                    actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project.")
+                    return false
+                }
+
+                guard let projectID = project.projectId, !projectID.isEmpty else {
+                    actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project ID.")
+                    return false
+                }
+
+                upsertProject(project)
+                await load(modelContext: modelContext)
+                return true
+            } catch {
+                guard !isCancellationError(error) else { return false }
+
+                lastError = error
+                actionErrorMessage = error.localizedDescription
                 return false
             }
-
-            guard let projectID = project.projectId, !projectID.isEmpty else {
-                actionErrorMessage = createResponse.error ?? String(localized: "The server did not return the new project ID.")
-                return false
-            }
-
-            upsertProject(project)
-            await load(modelContext: modelContext)
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
-
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return false
         }
     }
 
@@ -1514,17 +1700,20 @@ final class SessionListViewModel {
         lastError = nil
         defer { isDeletingProject = false }
 
-        do {
-            _ = try await client.deleteProject(id: projectID)
-            projects.removeAll { $0.projectId == projectID }
-            await load(modelContext: modelContext)
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
+        // Only the owning profile's cookie may delete a project.
+        return await onServerProfile(Self.nonEmpty(project.profile) ?? activeProfileName, failure: false) {
+            do {
+                _ = try await client.deleteProject(id: projectID)
+                projects.removeAll { $0.projectId == projectID }
+                await load(modelContext: modelContext)
+                return true
+            } catch {
+                guard !isCancellationError(error) else { return false }
 
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return false
+                lastError = error
+                actionErrorMessage = error.localizedDescription
+                return false
+            }
         }
     }
 
@@ -1546,26 +1735,29 @@ final class SessionListViewModel {
         isRenamingProject = true
         defer { isRenamingProject = false }
 
-        do {
-            let response = try await client.renameProject(id: projectID, name: name, color: color)
-            guard let renamedProject = response.project else {
-                actionErrorMessage = response.error ?? String(localized: "The server did not return the renamed project.")
+        // Only the owning profile's cookie may rename a project.
+        return await onServerProfile(Self.nonEmpty(project.profile) ?? activeProfileName, failure: false) {
+            do {
+                let response = try await client.renameProject(id: projectID, name: name, color: color)
+                guard let renamedProject = response.project else {
+                    actionErrorMessage = response.error ?? String(localized: "The server did not return the renamed project.")
+                    return false
+                }
+
+                guard renamedProject.projectId?.isEmpty == false else {
+                    actionErrorMessage = response.error ?? String(localized: "The server did not return the renamed project ID.")
+                    return false
+                }
+
+                upsertProject(renamedProject)
+                return true
+            } catch {
+                guard !isCancellationError(error) else { return false }
+
+                lastError = error
+                actionErrorMessage = error.localizedDescription
                 return false
             }
-
-            guard renamedProject.projectId?.isEmpty == false else {
-                actionErrorMessage = response.error ?? String(localized: "The server did not return the renamed project ID.")
-                return false
-            }
-
-            upsertProject(renamedProject)
-            return true
-        } catch {
-            guard !isCancellationError(error) else { return false }
-
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return false
         }
     }
 
@@ -1573,10 +1765,10 @@ final class SessionListViewModel {
     /// or on the list's active profile for the "+" button / plain New Chat. The profile is
     /// sent explicitly so the session never depends on the client's active-profile cookie,
     /// which an opened chat may have moved; only a list that never loaded its profile
-    /// leaves the choice to the server. Plain New Chat also moves the server back to
-    /// the list's profile first when opening a row left it elsewhere: the new chat's
-    /// own requests would otherwise be refused, and its workspace comes from the
-    /// server's profile.
+    /// leaves the choice to the server. Plain New Chat also waits for the server to be
+    /// back on the list's profile, moving it there if a chat or row still has it: the
+    /// new chat's own requests would otherwise be refused, and its workspace comes
+    /// from the server's profile.
     func createSession(modelContext: ModelContext? = nil, profile: String? = nil) async -> SessionSummary? {
         isCreatingSession = true
         actionErrorMessage = nil

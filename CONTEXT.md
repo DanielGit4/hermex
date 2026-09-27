@@ -13,7 +13,7 @@ The profile New Chat starts on, picked in the session list (or Settings). Openin
 _Avoid_: current profile, default profile
 
 **Server profile**:
-The profile this client's `hermes_profile` cookie selects on the server. Session-scoped requests only work for that profile's sessions, so opening another profile's chat moves it there first, and New Chat moves it back to the Active Profile.
+The profile this client's `hermes_profile` cookie selects on the server. Session-scoped requests only work for that profile's sessions, so opening another profile's chat, or acting on its row, lends the server profile to it first. Closing that chat or finishing the row action returns it to the Active Profile, and every screen reached from the list (Settings, Tasks, Skills, Memory, Insights, Kanban, Archived, New Chat) waits for that return.
 _Avoid_: active profile, cookie profile
 
 **Profile filter**:

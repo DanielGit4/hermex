@@ -292,6 +292,10 @@ struct ChatView: View {
     /// Receives the session that replaces this empty chat after a profile pick;
     /// the owner moves the draft to it and shows it in place. Nil pushes it.
     let onReplaceEmptySession: ((SessionSummary) -> Void)?
+    /// Moves the server profile to a session's owner after the server refused
+    /// one of this chat's requests for it; the session list passes its own,
+    /// which chats pushed from here inherit. Nil switches directly.
+    let followSessionProfile: (@Sendable (String) async -> Bool)?
 
     /// The composer's draft and its edit count. Never read `draftMessage` in
     /// `body` or build a binding to it there (a binding reads its value when it
@@ -407,6 +411,7 @@ struct ChatView: View {
         restoresDraftSettings: Bool = false,
         onConversationStarted: @escaping () -> Void = {},
         onReplaceEmptySession: ((SessionSummary) -> Void)? = nil,
+        followSessionProfile: (@Sendable (String) async -> Bool)? = nil,
         // Tests only: serves the chat from a mocked client. Nil uses the server's.
         client: APIClient? = nil,
         // Tests only: drives the chat from a view model with scripted streams.
@@ -423,6 +428,7 @@ struct ChatView: View {
         self.restoresDraftSettings = restoresDraftSettings
         self.onConversationStarted = onConversationStarted
         self.onReplaceEmptySession = onReplaceEmptySession
+        self.followSessionProfile = followSessionProfile
         _composerDraft = State(initialValue: ChatComposerDraft(text: initialDraft))
         _draftQuotes = State(initialValue: initialQuotes)
         _initialAttachments = State(initialValue: initialAttachments)
@@ -433,7 +439,8 @@ struct ChatView: View {
             showsLiveActivityResponseExcerpts: UserDefaults.standard.bool(
                 forKey: AgentRunLiveActivityPrivacy.showsResponseExcerptsKey
             ),
-            draftAttachmentStore: resolvedDraftAttachmentStore
+            draftAttachmentStore: resolvedDraftAttachmentStore,
+            followSessionProfile: followSessionProfile
         ))
         _gitAvailabilityViewModel = State(initialValue: GitWorkspaceAvailabilityViewModel(
             session: session,
@@ -895,7 +902,13 @@ struct ChatView: View {
                 }
             }
             .navigationDestination(item: $forkedSession) { session in
-                ChatView(session: session, server: server, onAPIError: onAPIError, draftStore: draftStore)
+                ChatView(
+                    session: session,
+                    server: server,
+                    onAPIError: onAPIError,
+                    draftStore: draftStore,
+                    followSessionProfile: followSessionProfile
+                )
             }
             .sheet(item: $attachmentPreviewItem) { item in
                 ChatAttachmentPreviewView(

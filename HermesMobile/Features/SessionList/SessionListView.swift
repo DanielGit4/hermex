@@ -371,6 +371,7 @@ struct SessionListView: View {
                 if case .session(let current)? = newValue {
                     viewModel.beginViewing(current)
                 }
+                viewModel.destinationDidChange(from: oldValue, to: newValue)
                 ratingRequestID = nil
                 if oldValue != nil, newValue == nil {
                     ratingMoment = .returnedToSessionList
@@ -539,7 +540,8 @@ struct SessionListView: View {
                 session: session,
                 server: server,
                 onAPIError: authManager.handleAPIError,
-                draftStore: draftStore
+                draftStore: draftStore,
+                followSessionProfile: { [viewModel] owner in await viewModel.followSessionProfile(owner) }
             )
                 .id(session.id)
         case .newChat(let route):
@@ -560,28 +562,45 @@ struct SessionListView: View {
         }
     }
 
+    /// Screens that read or write the picked profile's data wait behind
+    /// `PickedProfileGate`. Bots and Dashboard use the Bot connection, and
+    /// Scheduled lists every profile, so they open at once.
     @ViewBuilder
     private func utilityDestination(_ destination: SessionListUtilityDestination) -> some View {
         Group {
             switch destination {
             case .settings(let scrollTo):
-                SettingsView(authManager: authManager, server: server, initialScrollTarget: scrollTo)
+                PickedProfileGate(viewModel: viewModel) {
+                    SettingsView(authManager: authManager, server: server, initialScrollTarget: scrollTo)
+                }
             case .bots:
                 BotsInboxView(server: server, pendingDestination: $pendingBotDestination)
             case .tasks:
-                TasksView(server: server, onAPIError: authManager.handleAPIError)
+                PickedProfileGate(viewModel: viewModel) {
+                    TasksView(server: server, onAPIError: authManager.handleAPIError)
+                }
             case .kanban:
-                KanbanView(server: server, onAPIError: authManager.handleAPIError)
+                PickedProfileGate(viewModel: viewModel) {
+                    KanbanView(server: server, onAPIError: authManager.handleAPIError)
+                }
             case .skills:
-                SkillsView(server: server, onAPIError: authManager.handleAPIError)
+                PickedProfileGate(viewModel: viewModel) {
+                    SkillsView(server: server, onAPIError: authManager.handleAPIError)
+                }
             case .dashboard:
                 DashboardView(server: server)
             case .memory:
-                MemoryView(server: server, onAPIError: authManager.handleAPIError)
+                PickedProfileGate(viewModel: viewModel) {
+                    MemoryView(server: server, onAPIError: authManager.handleAPIError)
+                }
             case .insights:
-                InsightsView(server: server, onAPIError: authManager.handleAPIError)
+                PickedProfileGate(viewModel: viewModel) {
+                    InsightsView(server: server, onAPIError: authManager.handleAPIError)
+                }
             case .archived:
-                ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
+                PickedProfileGate(viewModel: viewModel) {
+                    ArchivedSessionsView(server: server, onAPIError: authManager.handleAPIError)
+                }
             case .scheduled:
                 ScheduledSessionsView(
                     viewModel: viewModel,
@@ -1865,6 +1884,55 @@ struct ActiveSessionMonitorTaskID: Hashable {
     }
 }
 
+/// Shows a screen that reads or writes the picked profile's data only once
+/// the server is on the pick. A chat or row from another profile may still
+/// hold this client's profile cookie, or be returning it; a screen that loaded
+/// meanwhile would show and save that profile's data instead.
+private struct PickedProfileGate<Content: View>: View {
+    private enum Phase: Equatable {
+        case waiting
+        case ready
+        case failed(String?)
+    }
+
+    let viewModel: SessionListViewModel
+    let content: () -> Content
+    @State private var phase: Phase
+
+    init(viewModel: SessionListViewModel, @ViewBuilder content: @escaping () -> Content) {
+        self.viewModel = viewModel
+        self.content = content
+        _phase = State(initialValue: viewModel.isServerOnPick ? .ready : .waiting)
+    }
+
+    var body: some View {
+        switch phase {
+        case .ready:
+            content()
+        case .waiting:
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .task { await returnServerToPick() }
+        case .failed(let message):
+            ContentUnavailableView {
+                Label("Could Not Switch Profiles", systemImage: "person.crop.circle.badge.exclamationmark")
+            } description: {
+                if let message {
+                    Text(message)
+                }
+            } actions: {
+                Button("Try Again") { phase = .waiting }
+            }
+        }
+    }
+
+    private func returnServerToPick() async {
+        let failure = await viewModel.ensureServerOnPick()
+        guard !Task.isCancelled else { return }
+        phase = failure.map { .failed($0.message) } ?? .ready
+    }
+}
+
 private struct PendingNewChatView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
@@ -1930,7 +1998,8 @@ private struct PendingNewChatView: View {
                     draftStore: draftStore,
                     restoresDraftSettings: true,
                     onConversationStarted: markConversationStarted,
-                    onReplaceEmptySession: replaceCreatedSession
+                    onReplaceEmptySession: replaceCreatedSession,
+                    followSessionProfile: { [viewModel] owner in await viewModel.followSessionProfile(owner) }
                 )
                 .id(createdSession.id)
             } else {

@@ -20,17 +20,23 @@ actor APIClient {
     /// process-wide cache and a client on its own session gets its own, unless
     /// one is passed in.
     let catalogCache: ServerCatalogCache
+    /// Set on a chat's client: moves the profile cookie to a session's owner
+    /// after a 409 `session_profile_mismatch`, and reports whether it did, so
+    /// the refused request is sent once more. Nil surfaces the 409.
+    private let followSessionProfile: (@Sendable (String) async -> Bool)?
 
     init(
         baseURL: URL,
         session: URLSession? = nil,
         publicMediaSession: URLSession? = nil,
         customHeaderProvider: @escaping @Sendable () -> [CustomHeader] = { CustomHeaderStore.shared.snapshot() },
-        catalogCache: ServerCatalogCache? = nil
+        catalogCache: ServerCatalogCache? = nil,
+        followSessionProfile: (@Sendable (String) async -> Bool)? = nil
     ) {
         self.baseURL = baseURL
         self.customHeaderProvider = customHeaderProvider
         self.catalogCache = catalogCache ?? (session == nil ? .shared : ServerCatalogCache())
+        self.followSessionProfile = followSessionProfile
 
         // One redirect guard per client (its origin + header provider), attached
         // to each request as a per-task delegate so a server-issued same-origin →
@@ -189,10 +195,27 @@ actor APIClient {
         return try await sendPreparedRequest(request, requireSuccess: requireSuccess)
     }
 
-    /// Shared URLSession hop + status mapping for JSON and multipart sends.
+    /// Shared URLSession hop + status mapping for JSON and multipart sends. A
+    /// chat's client follows a session on another profile once: the retry
+    /// carries the moved cookie, and a second refusal surfaces.
     private func sendPreparedRequest(
         _ request: URLRequest,
         requireSuccess: Bool = true
+    ) async throws -> (Data, HTTPURLResponse) {
+        do {
+            return try await sendPreparedRequestOnce(request, requireSuccess: requireSuccess)
+        } catch let error as APIError {
+            guard let owner = error.mismatchedSessionProfile,
+                  let followSessionProfile,
+                  await followSessionProfile(owner)
+            else { throw error }
+            return try await sendPreparedRequestOnce(request, requireSuccess: requireSuccess)
+        }
+    }
+
+    private func sendPreparedRequestOnce(
+        _ request: URLRequest,
+        requireSuccess: Bool
     ) async throws -> (Data, HTTPURLResponse) {
         let data: Data
         let response: URLResponse
