@@ -12,20 +12,42 @@ extension APIClient {
     /// (merged with the visible ones; each row carries an `archived` flag) and
     /// `archivedLimit` optionally caps how many archived rows the server appends
     /// (issue #17). `allProfiles` asks for every profile's rows, each carrying
-    /// its `profile`. Defaults keep today's request untouched.
+    /// its `profile`; `excludeHidden` leaves out `default_hidden` rows.
+    /// Defaults keep today's request untouched.
     func sessions(
         includeArchived: Bool = false,
         archivedLimit: Int? = nil,
-        allProfiles: Bool = false
+        allProfiles: Bool = false,
+        excludeHidden: Bool = false
     ) async throws -> SessionsResponse {
         try await send(
             endpoint: .sessions(
                 includeArchived: includeArchived,
                 archivedLimit: archivedLimit,
-                allProfiles: allProfiles
+                allProfiles: allProfiles,
+                excludeHidden: excludeHidden
             ),
             method: "GET"
         )
+    }
+
+    /// The session list: every profile's rows, plus the hidden and project
+    /// rows of the profile this client's cookie selects, with cron runs
+    /// bounded.
+    ///
+    /// The all-profiles list carries every cron run of every profile (upstream
+    /// passes no cron limit there), so it is asked for without hidden rows,
+    /// which leaves out the cron runs under the server's default settings. The
+    /// cookie profile's plain list, whose cron runs the server caps at
+    /// `CRON_PROJECT_CHIP_LIMIT`, then brings back its hidden and project rows.
+    /// A server that omits `all_profiles` predates both flags and already sent
+    /// that full list, so it is asked only once.
+    func sessionList() async throws -> SessionsResponse {
+        let visible = try await sessions(allProfiles: true, excludeHidden: true)
+        guard visible.allProfiles != nil else {
+            return .sessionList(visible, addingHiddenRowsFrom: nil)
+        }
+        return .sessionList(visible, addingHiddenRowsFrom: try await sessions())
     }
 
     func searchSessions(
@@ -216,6 +238,53 @@ extension APIClient {
             method: "POST",
             body: SessionYoloRequest(sessionId: sessionID, enabled: enabled)
         )
+    }
+}
+
+extension SessionsResponse {
+    /// How many cron runs the list keeps: upstream `CRON_PROJECT_CHIP_LIMIT`
+    /// (`api/models.py`), the cap a single-profile list puts on its cron runs.
+    static let cronRunLimit = 200
+
+    /// `visible` plus the rows of `cookieProfile` it lacks that are hidden or
+    /// assigned to a project, with cron runs bounded. `visible` wins on a
+    /// shared id and keeps its other fields. The cookie profile's unassigned
+    /// rows stay out: `visible` dropped those on purpose (the shared recent
+    /// window, messaging dedupe across profiles).
+    static func sessionList(
+        _ visible: SessionsResponse,
+        addingHiddenRowsFrom cookieProfile: SessionsResponse?
+    ) -> SessionsResponse {
+        var rows = visible.sessions ?? []
+        var listedIDs = Set(rows.compactMap(\.sessionId))
+        for row in cookieProfile?.sessions ?? [] {
+            guard let sessionID = row.sessionId,
+                  !listedIDs.contains(sessionID),
+                  row.defaultHidden == true
+                    || row.projectId?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+            else { continue }
+            rows.append(row)
+            listedIDs.insert(sessionID)
+        }
+        var list = visible
+        list.sessions = boundingCronRuns(rows)
+        return list
+    }
+
+    /// Keeps the newest `cronRunLimit` cron runs, newest by the list's own
+    /// order (`lastMessageAt ?? updatedAt ?? createdAt`), and every pinned one,
+    /// so a pin never disappears. Other rows and the row order are untouched.
+    private static func boundingCronRuns(_ rows: [SessionSummary]) -> [SessionSummary] {
+        let cronIndices = rows.indices.filter { rows[$0].isCronSession }
+        guard cronIndices.count > cronRunLimit else { return rows }
+        func timestamp(_ index: Int) -> Double {
+            rows[index].lastMessageAt ?? rows[index].updatedAt ?? rows[index].createdAt ?? 0
+        }
+        let newestFirst = cronIndices.sorted { left, right in
+            timestamp(left) != timestamp(right) ? timestamp(left) > timestamp(right) : left < right
+        }
+        let dropped = Set(newestFirst.dropFirst(cronRunLimit).filter { rows[$0].pinned != true })
+        return rows.indices.filter { !dropped.contains($0) }.map { rows[$0] }
     }
 }
 

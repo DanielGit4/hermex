@@ -1,7 +1,7 @@
 import Foundation
 
 struct SessionsResponse: Decodable {
-    let sessions: [SessionSummary]?
+    var sessions: [SessionSummary]?
     let cliCount: Int?
     /// Total archived sessions in the active profile (`archived_count`), present
     /// on every response regardless of `include_archived` (issue #17). Optional so
@@ -248,6 +248,11 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
     /// a row shows its origin once it does.
     let handoffState: String?
     let handoffPlatform: String?
+    /// True on rows the server keeps out of its default sidebar but sends so
+    /// a project chip can reveal them (`default_hidden`): project-assigned
+    /// cron and webhook runs, and assigned CLI rows past the recent window.
+    /// Absent on every other row. `exclude_hidden=1` drops these rows.
+    let defaultHidden: Bool?
 
     init(
         sessionId: String? = nil,
@@ -284,7 +289,8 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         matchType: String? = nil,
         matchPreview: String? = nil,
         handoffState: String? = nil,
-        handoffPlatform: String? = nil
+        handoffPlatform: String? = nil,
+        defaultHidden: Bool? = nil
     ) {
         self.sessionId = sessionId
         self.title = title
@@ -321,6 +327,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         self.matchPreview = matchPreview
         self.handoffState = handoffState
         self.handoffPlatform = handoffPlatform
+        self.defaultHidden = defaultHidden
     }
 
     enum CodingKeys: String, CodingKey {
@@ -332,7 +339,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         case userMessageCount, hasPendingUserMessage, pendingStartedAt, worktreePath
         case sourceTag, rawSource, sessionSource, sourceLabel
         case parentSessionId, relationshipType, readOnly, isReadOnly, matchType, matchPreview
-        case handoffState, handoffPlatform
+        case handoffState, handoffPlatform, defaultHidden
     }
 
     /// Lossy field by field, like `SessionDetail` and `ProjectSummary` already
@@ -382,6 +389,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         matchPreview = container.decodeLossyStringIfPresent(forKey: .matchPreview)
         handoffState = container.decodeLossyStringIfPresent(forKey: .handoffState)
         handoffPlatform = container.decodeLossyStringIfPresent(forKey: .handoffPlatform)
+        defaultHidden = container.decodeLossyBoolIfPresent(forKey: .defaultHidden)
     }
 
     /// Decodes a session array a row at a time, so one unreadable row costs that
@@ -447,6 +455,7 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
         matchPreview = nil
         handoffState = nil
         handoffPlatform = nil
+        defaultHidden = nil
     }
 
     /// Applies the import response without dropping list metadata that the
@@ -488,7 +497,8 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
             matchType: imported.matchType ?? matchType,
             matchPreview: imported.matchPreview ?? matchPreview,
             handoffState: imported.handoffState ?? handoffState,
-            handoffPlatform: imported.handoffPlatform ?? handoffPlatform
+            handoffPlatform: imported.handoffPlatform ?? handoffPlatform,
+            defaultHidden: defaultHidden
         )
     }
 
@@ -530,7 +540,8 @@ struct SessionSummary: Decodable, Equatable, Hashable, Identifiable {
             matchType: matchType,
             matchPreview: matchPreview,
             handoffState: handoffState,
-            handoffPlatform: handoffPlatform
+            handoffPlatform: handoffPlatform,
+            defaultHidden: defaultHidden
         )
     }
 }

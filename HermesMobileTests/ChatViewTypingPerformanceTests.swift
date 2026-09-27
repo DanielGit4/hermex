@@ -707,6 +707,49 @@ import XCTest
         }
     }
 
+    /// With the streaming pulse off (the default), a live word still bumps the
+    /// pulse trigger, but nothing on screen observes it: the word re-runs no
+    /// pass of the whole chat screen and plays no pulse. With no throttle
+    /// window every word bumps, so none can slip past the check.
+    func testStreamedWordsWithThePulseOffRunNoChatScreenPass() async throws {
+        let run = try await streamWithUnthrottledPulse(isEnabled: false)
+
+        XCTAssertEqual(run.passes.count, 8)
+        for (word, passes) in run.passes.enumerated() {
+            XCTAssertEqual(passes[.chatView] ?? 0, 0, "Word \(word) re-ran the whole chat screen")
+            XCTAssertEqual(passes[.streamingHapticPulse] ?? 0, 0, "Word \(word) played a pulse that is off")
+        }
+    }
+
+    /// With the pulse on, each bump still plays exactly one pulse, and playing
+    /// it re-runs no pass of the whole chat screen either.
+    func testStreamedWordsWithThePulseOnPulseOncePerBump() async throws {
+        let run = try await streamWithUnthrottledPulse(isEnabled: true)
+
+        XCTAssertEqual(run.passes.count, 8)
+        for (word, passes) in run.passes.enumerated() {
+            XCTAssertEqual(passes[.streamingHapticPulse] ?? 0, 1, "Word \(word) must play one pulse")
+            XCTAssertEqual(passes[.chatView] ?? 0, 0, "Word \(word) re-ran the whole chat screen")
+        }
+    }
+
+    /// Streams eight words into a 40-message chat with haptics on, the
+    /// streaming pulse set to `isEnabled` and no throttle window, then
+    /// restores both settings.
+    private func streamWithUnthrottledPulse(isEnabled: Bool) async throws -> StreamRun {
+        let keys = [AppHaptics.isEnabledKey, AppHaptics.streamingPulseIsEnabledKey]
+        let saved = keys.map { UserDefaults.standard.object(forKey: $0) }
+        defer {
+            for (key, value) in zip(keys, saved) {
+                UserDefaults.standard.set(value, forKey: key)
+            }
+        }
+        UserDefaults.standard.set(true, forKey: AppHaptics.isEnabledKey)
+        UserDefaults.standard.set(isEnabled, forKey: AppHaptics.streamingPulseIsEnabledKey)
+
+        return try await streamIntoHostedChat(messageCount: 40, ticks: 8, streamingHapticPulseInterval: 0)
+    }
+
     struct StreamRun {
         /// Main-thread milliseconds per streamed word: the flush and its update
         /// drained, plus the coalesced follow scroll it scheduled, drained.
@@ -736,11 +779,18 @@ import XCTest
     ///
     /// Cadences are chosen so no timer flushes on its own: each word is
     /// flushed explicitly, and only the follow scroll it schedules fires.
-    func streamIntoHostedChat(messageCount: Int, ticks: Int) async throws -> StreamRun {
+    func streamIntoHostedChat(
+        messageCount: Int,
+        ticks: Int,
+        streamingHapticPulseInterval: TimeInterval = ChatHaptics.StreamingPulseThrottle.defaultInterval
+    ) async throws -> StreamRun {
         let fixture = try ChatTypingFixture(messageCount: messageCount, answersChatStart: true)
         defer { fixture.tearDown() }
         let stream = ScriptedSSEStreamingClient()
-        let viewModel = fixture.makeStreamingViewModel(stream: stream)
+        let viewModel = fixture.makeStreamingViewModel(
+            stream: stream,
+            streamingHapticPulseInterval: streamingHapticPulseInterval
+        )
         fixture.viewModel = viewModel
         defer { fixture.viewModel = nil }
 
@@ -910,8 +960,12 @@ import XCTest
     /// A view model over this chat whose streams are scripted. `stream` flushes
     /// the view model after every event it delivers, and the cadences are long
     /// enough that nothing else flushes: only the follow scroll a flush
-    /// schedules fires on its own.
-    func makeStreamingViewModel(stream: ScriptedSSEStreamingClient) -> ChatViewModel {
+    /// schedules fires on its own. A `streamingHapticPulseInterval` of 0 bumps
+    /// the pulse trigger on every live word instead of the real 0.32 s cadence.
+    func makeStreamingViewModel(
+        stream: ScriptedSSEStreamingClient,
+        streamingHapticPulseInterval: TimeInterval = ChatHaptics.StreamingPulseThrottle.defaultInterval
+    ) -> ChatViewModel {
         let viewModel = ChatViewModel(
             session: session,
             server: server,
@@ -923,6 +977,7 @@ import XCTest
             streamingScrollCoalescingDelayNanoseconds: 1_000_000,
             streamingWordRevealCadenceNanoseconds: 60_000_000_000,
             streamingMaxRevealLagNanoseconds: 3_600_000_000_000,
+            streamingHapticPulseInterval: streamingHapticPulseInterval,
             draftAttachmentStore: draftAttachmentStore
         )
         stream.flushPendingStreamingContent = { [weak viewModel] in viewModel?.flushPendingStreamingContent() }

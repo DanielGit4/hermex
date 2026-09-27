@@ -19,13 +19,18 @@ final class SessionListAllProfilesTests: XCTestCase {
     @MainActor
     func testListSearchAndProjectsRequestsAskForEveryProfile() async throws {
         let fake = AllProfilesServerFake(active: "default", rows: [Self.webui("w1", profile: "default", at: 10)])
-        let viewModel = makeViewModel(fake)
+        var listQueries: [String?] = []
+        let viewModel = SessionListViewModel(server: server, client: makeClient { request in
+            if request.url?.path == "/api/sessions" { listQueries.append(request.url?.query) }
+            return try fake.handle(request)
+        })
 
         await viewModel.load()
         await viewModel.searchSessions(query: "planning", debounceNanoseconds: 0)
         await viewModel.loadProjects()
 
-        XCTAssertEqual(fake.query(for: "/api/sessions"), ["all_profiles": "1"])
+        // Every profile's rows without hidden ones, then the cookie profile's plain list.
+        XCTAssertEqual(listQueries, ["all_profiles=1&exclude_hidden=1", nil])
         XCTAssertEqual(
             fake.query(for: "/api/sessions/search"),
             ["q": "planning", "content": "1", "depth": "5", "all_profiles": "1"]
@@ -396,7 +401,8 @@ final class SessionListAllProfilesTests: XCTestCase {
 
         XCTAssertTrue(didPin)
         XCTAssertEqual(fake.requests, [
-            "POST /api/profile/switch", "POST /api/session/pin", "GET /api/sessions", "POST /api/profile/switch"
+            "POST /api/profile/switch", "POST /api/session/pin", "GET /api/sessions", "GET /api/sessions",
+            "POST /api/profile/switch"
         ])
         XCTAssertEqual(fake.violations, [])
         XCTAssertEqual(viewModel.activeProfileName, "default")

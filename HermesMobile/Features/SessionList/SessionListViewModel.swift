@@ -507,7 +507,7 @@ final class SessionListViewModel {
         // answered, so only a load clear of switches reports the profile.
         let profileWorkBefore = profileWork == nil ? profileWorkCount : nil
         do {
-            let response = try await client.sessions(allProfiles: true)
+            let response = try await client.sessionList()
             guard revision == returnRevision else { return false }
             listsAllProfiles = response.allProfiles ?? false
             if profileWork == nil, profileWorkBefore == profileWorkCount,

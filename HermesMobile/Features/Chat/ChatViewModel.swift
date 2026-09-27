@@ -687,6 +687,7 @@ final class ChatViewModel {
         streamingScrollCoalescingDelayNanoseconds: UInt64 = 16_000_000,
         streamingWordRevealCadenceNanoseconds: UInt64 = 48_000_000,
         streamingMaxRevealLagNanoseconds: UInt64 = 1_000_000_000,
+        streamingHapticPulseInterval: TimeInterval = ChatHaptics.StreamingPulseThrottle.defaultInterval,
         speechSynthesizerFactory: @escaping () -> any ChatSpeechSynthesizing = { AVSpeechSynthesizer() },
         listenAudioSession: (any ListenAudioSessionControlling)? = nil,
         listenRemoteControlCenter: (any ListenRemoteControlControlling)? = nil,
@@ -749,6 +750,7 @@ final class ChatViewModel {
         self.serverTTSAudioPlayerFactory = serverTTSAudioPlayerFactory
             ?? { try ServerTTSAudioPlayer(data: $0) }
         displayTitle = Self.displayTitle(from: session.title)
+        streamingHapticPulseThrottle.interval = streamingHapticPulseInterval
         self.streamCoordinator.attach(delegate: self)
         self.pendingActionCoordinator.delegate = self
         self.attachmentCoordinator.delegate = self
