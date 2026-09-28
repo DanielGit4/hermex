@@ -66,7 +66,7 @@ import XCTest
 
     func testReportsScrollCrossingCostInALongChat() async throws {
         try requireReportOptIn()
-        let crossings = try await crossNearBottomInHostedChat(messageCount: 500)
+        let crossings = try await crossNearBottomInHostedChat(messageCount: 500, frameTimeout: Self.longChatFrameTimeout)
         report(crossings, scenario: "long500")
     }
 
@@ -582,8 +582,8 @@ import XCTest
     /// `scrollAwayDistance` above the bottom without a gesture, tapping the
     /// scroll-to-bottom button, scrolling away again, and scrolling back.
     /// Scrolling away and the tap flip auto-follow; scrolling back does not.
-    func crossNearBottomInHostedChat(messageCount: Int) async throws -> [Crossing] {
-        try await withHostedChat(messageCount: messageCount) { _, window in
+    func crossNearBottomInHostedChat(messageCount: Int, frameTimeout: TimeInterval = 10) async throws -> [Crossing] {
+        try await withHostedChat(messageCount: messageCount, frameTimeout: frameTimeout) { _, window in
             let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
             XCTAssertFalse(ViewBodyProbe.isScrollToBottomButtonVisible, "A settled chat starts at the bottom")
             let bottom = bottomOffsetY(of: scrollView)
