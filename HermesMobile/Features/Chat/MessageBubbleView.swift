@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MessageBubbleView: View {
     @State private var responseIsVisible = false
+    @State private var nearScreenSignal = ChatNearScreenSignal()
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.layoutDirection) private var layoutDirection
@@ -167,6 +168,7 @@ struct MessageBubbleView: View {
             } else {
                 ResponseTextSelection(identity: messageText, collectsGlyphs: responseIsVisible, onAskHermex: onAskHermex) {
                     assistantContent(segments: segments)
+                        .environment(\.chatNearScreenSignal, nearScreenSignal)
                 }
                 .onGeometryChange(for: Bool.self) { geometry in
                     guard let viewport = geometry.bounds(of: .scrollView(axis: .vertical)) else { return true }
@@ -174,6 +176,12 @@ struct MessageBubbleView: View {
                 } action: { isVisible in
                     ViewBodyProbe.hit(.replyVisibility)
                     responseIsVisible = isVisible
+                }
+                .background {
+                    // The hosted tiles cannot see the scroll view; only a reply with media measures for them.
+                    if segments.containsTranscriptMedia {
+                        Color.clear.onNearScreenChange { if nearScreenSignal.isNear != $0 { nearScreenSignal.isNear = $0 } }
+                    }
                 }
             }
 

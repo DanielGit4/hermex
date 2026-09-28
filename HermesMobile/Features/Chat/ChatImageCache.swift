@@ -269,6 +269,28 @@ struct ChatImageLoadRequest<Key: Hashable>: Hashable {
     let isNearScreen: Bool
 }
 
+/// Whether a settled reply's row is near the screen. The reply hosts its
+/// content in its own `UIHostingController` (`ResponseTextSelection`), where
+/// image tiles cannot see the transcript's scroll view and would always be
+/// near; the row measures itself outside the host and its tiles read this.
+@Observable @MainActor
+final class ChatNearScreenSignal {
+    var isNear = true
+}
+
+extension EnvironmentValues {
+    /// Set inside a settled reply's host; nil elsewhere, where a tile's own
+    /// geometry decides.
+    var chatNearScreenSignal: ChatNearScreenSignal? {
+        get { self[ChatNearScreenSignalKey.self] }
+        set { self[ChatNearScreenSignalKey.self] = newValue }
+    }
+}
+
+private struct ChatNearScreenSignalKey: EnvironmentKey {
+    static let defaultValue: ChatNearScreenSignal? = nil
+}
+
 extension View {
     /// Reports whether this view is on screen or within one screen of it in its
     /// vertical scroll view; outside a scroll view it is always near. The eager

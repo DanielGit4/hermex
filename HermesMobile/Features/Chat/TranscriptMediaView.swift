@@ -88,6 +88,7 @@ private struct TranscriptMediaThumbnailView: View {
     /// The key whose load finished with no image; it stays failed while scrolling.
     @State private var failedKey: TranscriptMediaImageCacheKey?
     @State private var isNearScreen = false
+    @Environment(\.chatNearScreenSignal) private var nearScreenSignal
 
     private let thumbnailWidth: CGFloat = 210
     private let thumbnailHeight: CGFloat = 132
@@ -115,10 +116,10 @@ private struct TranscriptMediaThumbnailView: View {
             .buttonStyle(.chatTactile(.thumbnail))
             .accessibilityLabel(imageButtonAccessibilityLabel)
             .onNearScreenChange { isNearScreen = $0 }
-            .task(id: ChatImageLoadRequest(key: imageCacheKey, isNearScreen: isNearScreen)) {
+            .task(id: ChatImageLoadRequest(key: imageCacheKey, isNearScreen: isNear)) {
                 // Far from the screen the image is released, so the cache's budget bounds memory.
                 let key = imageCacheKey
-                guard isNearScreen, failedKey != key, let loadMediaImage else {
+                guard isNear, failedKey != key, let loadMediaImage else {
                     image = nil
                     return
                 }
@@ -168,6 +169,9 @@ private struct TranscriptMediaThumbnailView: View {
             TranscriptMediaUnavailableChip(reference: reference)
         }
     }
+
+    /// Inside a settled reply's host, its own geometry always says near; the reply row's decides.
+    private var isNear: Bool { isNearScreen && (nearScreenSignal?.isNear ?? true) }
 
     private var imageCacheKey: TranscriptMediaImageCacheKey {
         TranscriptMediaImageCacheKey(namespace: cacheNamespace, reference: reference)
@@ -223,6 +227,10 @@ private struct TranscriptMediaResolvedRemoteView: View {
 
     @State private var resolvedMedia: ResolvedMedia?
     @State private var isNearScreen = false
+    @Environment(\.chatNearScreenSignal) private var nearScreenSignal
+
+    /// Inside a settled reply's host, its own geometry always says near; the reply row's decides.
+    private var isNear: Bool { isNearScreen && (nearScreenSignal?.isNear ?? true) }
 
     var body: some View {
         Group {
@@ -268,8 +276,8 @@ private struct TranscriptMediaResolvedRemoteView: View {
         // Identity follows the reference (`.id` at the call site), so a resolved
         // result is kept; only an unresolved tile starts a load, near the screen.
         .onNearScreenChange { isNearScreen = $0 }
-        .task(id: isNearScreen) {
-            guard isNearScreen, resolvedMedia == nil else { return }
+        .task(id: isNear) {
+            guard isNear, resolvedMedia == nil else { return }
             let data = await ChatImageLoadLimiter.shared.run { await loadMediaData(reference) }
             guard !Task.isCancelled else { return }
             resolvedMedia = data.map(Self.resolve) ?? .unavailable
