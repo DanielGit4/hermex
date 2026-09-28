@@ -252,7 +252,34 @@ final class ChatImageCacheTests: XCTestCase {
             }
         })
 
-        try await assertLoadsFollowTheScreen(host: host, ledger: ledger, tileHeight: 132, path: Self.transcriptPath)
+        try await assertLoadsFollowTheScreen(host: host, ledger: ledger, path: Self.transcriptPath)
+    }
+
+    /// A settled reply hosts its content in its own `UIHostingController`,
+    /// where the tiles cannot see the transcript's scroll view.
+    func testSettledAssistantReplyMediaLoadsOnlyNearTheScreen() async throws {
+        let ledger = LoadLedger()
+        let png = Self.pngData()
+        let namespace = "https://near.example|\(UUID().uuidString)"
+        let messages = (0..<Self.tileCount).map { index in
+            ChatMessage(role: "assistant", content: "MEDIA:\(Self.replyPath(index))", timestamp: 1, messageId: "near-reply-\(index)")
+        }
+        let host = UIHostingController(rootView: ScrollView {
+            VStack(spacing: Self.spacing) {
+                ForEach(messages) { message in
+                    MessageBubbleView(
+                        message: message,
+                        loadTranscriptMediaImage: { reference in
+                            ledger.record(reference.rawReference)
+                            return png
+                        },
+                        transcriptMediaCacheNamespace: namespace
+                    )
+                }
+            }
+        })
+
+        try await assertLoadsFollowTheScreen(host: host, ledger: ledger, path: Self.replyPath)
     }
 
     func testAttachmentThumbnailsLoadOnlyNearTheScreen() async throws {
@@ -288,16 +315,16 @@ final class ChatImageCacheTests: XCTestCase {
             }
         })
 
-        try await assertLoadsFollowTheScreen(host: host, ledger: ledger, tileHeight: 118, path: Self.attachmentPath)
+        try await assertLoadsFollowTheScreen(host: host, ledger: ledger, path: Self.attachmentPath)
     }
 
     /// Opens 50 image tiles at the top, scrolls to the middle and back.
     /// Loads cover the screen plus one screen of margin at each stop, and the
-    /// return trip reads the cache instead of loading again.
+    /// return trip reads the cache instead of loading again. The rows must be
+    /// of equal height; their pitch is measured from the content height.
     private func assertLoadsFollowTheScreen(
         host: UIViewController,
         ledger: LoadLedger,
-        tileHeight: CGFloat,
         path: (Int) -> String,
         file: StaticString = #filePath,
         line: UInt = #line
@@ -314,7 +341,8 @@ final class ChatImageCacheTests: XCTestCase {
         await settle(ledger)
 
         let scroll = try XCTUnwrap(descendants(host.view, of: UIScrollView.self).first, file: file, line: line)
-        let layout = TileLayout(count: Self.tileCount, tileHeight: tileHeight, pitch: tileHeight + Self.spacing)
+        let pitch = (scroll.contentSize.height + Self.spacing) / CGFloat(Self.tileCount)
+        let layout = TileLayout(count: Self.tileCount, tileHeight: pitch - Self.spacing, pitch: pitch)
         let viewport = scroll.bounds.height
         let topOffset = scroll.contentOffset.y
         let visibleAtTop = layout.tiles(from: topOffset, to: topOffset + viewport)
@@ -379,6 +407,10 @@ final class ChatImageCacheTests: XCTestCase {
 
     private static func attachmentPath(_ index: Int) -> String {
         "/fixture/photo-\(index).png"
+    }
+
+    private static func replyPath(_ index: Int) -> String {
+        "/fixture/reply-\(index).png"
     }
 
     private static func pngData(side: CGFloat = 8) -> Data {
