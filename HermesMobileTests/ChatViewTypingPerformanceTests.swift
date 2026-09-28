@@ -1080,8 +1080,12 @@ import XCTest
         fixture.viewModel = viewModel
         defer { fixture.viewModel = nil }
 
+        // A long chat lays every row out once on open, and with Window Long
+        // Chats on collapses the far ones in one pass: either can hold a Debug
+        // simulator's main thread past the usual 10 s frame wait.
+        let frameTimeout = ChatViewTypingPerformanceTests.longChatFrameTimeout
         return try await withHostedWindow(fixture) { window in
-            try await settle(window, fixture: fixture) {
+            try await settle(window, fixture: fixture, frameTimeout: frameTimeout) {
                 fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
             }
             let didStart = await viewModel.sendMessage("Summarize what changed in the parser.")
@@ -1091,7 +1095,7 @@ import XCTest
             var streamed = "Streaming "
             stream.emit(.token(streamed))
             let replyID = try XCTUnwrap(viewModel.streamingAssistantMessageID, "The first word must add the reply")
-            try await settle(window, fixture: fixture) { true }
+            try await settle(window, fixture: fixture, frameTimeout: frameTimeout) { true }
 
             var run = StreamRun()
             for index in 0..<ticks {
