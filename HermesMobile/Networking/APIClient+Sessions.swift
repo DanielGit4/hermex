@@ -39,15 +39,18 @@ extension APIClient {
     /// passes no cron limit there), so it is asked for without hidden rows,
     /// which leaves out the cron runs under the server's default settings. The
     /// cookie profile's plain list, whose cron runs the server caps at
-    /// `CRON_PROJECT_CHIP_LIMIT`, then brings back its hidden and project rows.
-    /// A server that omits `all_profiles` predates both flags and already sent
-    /// that full list, so it is asked only once.
+    /// `CRON_PROJECT_CHIP_LIMIT`, brings back its hidden and project rows.
+    /// Both requests go out at once. A server that omits `all_profiles`
+    /// predates both flags and already sent that full list, so its plain
+    /// answer, or failure, is dropped.
     func sessionList() async throws -> SessionsResponse {
-        let visible = try await sessions(allProfiles: true, excludeHidden: true)
+        async let visibleList = sessions(allProfiles: true, excludeHidden: true)
+        async let plainList = sessions()
+        let visible = try await visibleList
         guard visible.allProfiles != nil else {
             return .sessionList(visible, addingHiddenRowsFrom: nil)
         }
-        return .sessionList(visible, addingHiddenRowsFrom: try await sessions())
+        return .sessionList(visible, addingHiddenRowsFrom: try await plainList)
     }
 
     func searchSessions(

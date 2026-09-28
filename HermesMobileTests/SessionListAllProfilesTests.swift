@@ -20,9 +20,12 @@ final class SessionListAllProfilesTests: XCTestCase {
     @MainActor
     func testListSearchAndProjectsRequestsAskForEveryProfile() async throws {
         let fake = AllProfilesServerFake(active: "default", rows: [Self.webui("w1", profile: "default", at: 10)])
-        var listQueries: [String?] = []
+        let listQueries = OSAllocatedUnfairLock<[String]>(initialState: [])
         let viewModel = SessionListViewModel(server: server, client: makeClient { request in
-            if request.url?.path == "/api/sessions" { listQueries.append(request.url?.query) }
+            if request.url?.path == "/api/sessions" {
+                let query = request.url?.query ?? "(plain)"
+                listQueries.withLock { $0.append(query) }
+            }
             return try fake.handle(request)
         })
 
@@ -30,8 +33,8 @@ final class SessionListAllProfilesTests: XCTestCase {
         await viewModel.searchSessions(query: "planning", debounceNanoseconds: 0)
         await viewModel.loadProjects()
 
-        // Every profile's rows without hidden ones, then the cookie profile's plain list.
-        XCTAssertEqual(listQueries, ["all_profiles=1&exclude_hidden=1", nil])
+        // Every profile's rows without hidden ones, and the cookie profile's plain list.
+        XCTAssertEqual(listQueries.withLock { $0 }.sorted(), ["(plain)", "all_profiles=1&exclude_hidden=1"])
         XCTAssertEqual(
             fake.query(for: "/api/sessions/search"),
             ["q": "planning", "content": "1", "depth": "5", "all_profiles": "1"]
@@ -604,6 +607,67 @@ final class SessionListAllProfilesTests: XCTestCase {
         XCTAssertEqual(fake.switchedProfiles, ["opensource", "default"], "The gate and the return make one switch")
     }
 
+    /// A list load started while the return is on its way waits for it, so
+    /// both of its requests carry the profile the return lands on, not the
+    /// one lent to the chat that closed.
+    @MainActor
+    func testAListLoadWaitsForASwitchInFlightAndBothRequestsUseItsProfile() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [
+            Self.webui("mine", profile: "default", at: 10),
+            Self.webui("open-1", profile: "opensource", at: 20)
+        ])
+        let gate = ResponseGate()
+        defer { gate.release() }
+        let isHolding = OSAllocatedUnfairLock(initialState: false)
+        let switchArrived = expectation(description: "the return's switch reached the server")
+        let listWhileHeld = expectation(description: "a list request while the switch is held")
+        listWhileHeld.isInverted = true
+        listWhileHeld.assertForOverFulfill = false
+        let viewModel = SessionListViewModel(server: server, client: makeClient { request in
+            // Held before the fake applies it, so the server stays on the lent profile.
+            if isHolding.withLock({ $0 }) {
+                switch request.url?.path {
+                case "/api/profile/switch":
+                    switchArrived.fulfill()
+                    gate.wait()
+                case "/api/sessions":
+                    listWhileHeld.fulfill()
+                default:
+                    break
+                }
+            }
+            return try fake.handle(request)
+        })
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        let opened = try await openChat(try row("open-1", in: viewModel), in: viewModel)
+        fake.clearRequests()
+
+        gate.hold()
+        isHolding.withLock { $0 = true }
+        let returning = viewModel.destinationDidChange(from: .session(opened), to: nil)
+        await fulfillment(of: [switchArrived], timeout: 5)
+        let reload = Task { await viewModel.load() }
+        await fulfillment(of: [listWhileHeld], timeout: 0.3)
+        isHolding.withLock { $0 = false }
+        gate.release()
+        await returning.value
+        let loaded = await reload.value
+
+        let listProfiles = zip(fake.requests, fake.servedProfiles).compactMap { request, profile in
+            request == "GET /api/sessions" ? profile : nil
+        }
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(listProfiles, ["default", "default"], "\(fake.requests)")
+        XCTAssertEqual(
+            Array(fake.requests.drop { $0 != "POST /api/profile/switch" }),
+            ["POST /api/profile/switch", "GET /api/sessions", "GET /api/sessions"],
+            "Both list requests after the switch"
+        )
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default"])
+        XCTAssertEqual(fake.violations, [])
+    }
+
     /// PR #14's rule under the return: a profile picked in the foreign chat's
     /// own picker becomes the pick when the chat closes, and stays.
     @MainActor
@@ -826,11 +890,14 @@ final class SessionListAllProfilesTests: XCTestCase {
             // Answered for the profile the server was on when the request arrived.
             let response = try fake.handle(request)
             guard request.url?.path == "/api/sessions" else { return response }
-            let index = listRequests.withLock { count in
-                defer { count += 1 }
-                return count
+            // A load's arrival is its all-profiles request; the plain one may come first.
+            if request.url?.query != nil {
+                let index = listRequests.withLock { count in
+                    defer { count += 1 }
+                    return count
+                }
+                if index < arrivals.count { arrivals[index].fulfill() }
             }
-            if index < arrivals.count { arrivals[index].fulfill() }
             gate.wait()
             return response
         })

@@ -524,8 +524,9 @@ final class SessionListViewModel {
         }
         if let modelContext { showCachedSessions(modelContext: modelContext) }
 
-        // A profile switch that overlaps this load may land after the server
-        // answered, so only a load clear of switches reports the profile.
+        await profileWorkSettled()
+        // A switch queued while this load's requests are out may land after
+        // the server answered, so only a load clear of switches reports the profile.
         let profileWorkBefore = profileWork == nil ? profileWorkCount : nil
         do {
             let response = try await client.sessionList()
@@ -1315,6 +1316,19 @@ final class SessionListViewModel {
         let result = await work.value
         if profileWork == tail { profileWork = nil }
         return result
+    }
+
+    /// Waits for the list's queued profile work, and any queued meanwhile, so
+    /// a list load's two requests carry the same, settled cookie. Never call
+    /// it inside an `afterProfileWork` operation: it would wait on itself.
+    private func profileWorkSettled() async {
+        // Each tail once: a finished tail stays queued until its caller
+        // resumes, and awaiting it again would spin without suspending.
+        var awaited: Task<Void, Never>?
+        while let pending = profileWork, pending != awaited {
+            awaited = pending
+            await pending.value
+        }
     }
 
     /// Whether a switch to `profile` has nothing to do: the server is known to

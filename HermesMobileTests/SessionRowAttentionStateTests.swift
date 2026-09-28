@@ -593,12 +593,20 @@ final class SessionRowAttentionStateTests: XCTestCase {
 
     // MARK: - Helpers
 
+    /// These fakes are old servers (no `all_profiles`), whose plain list the
+    /// client drops; answering it here keeps each handler at one list request
+    /// per load.
     @MainActor
     private func makeViewModel(
         unreadStore: SessionUnreadStore? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) throws -> SessionListViewModel {
-        MockURLProtocol.requestHandler = handler
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/sessions", request.url?.query == nil {
+                return apiTestJSONResponse(#"{"sessions": []}"#, for: request)
+            }
+            return try handler(request)
+        }
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]

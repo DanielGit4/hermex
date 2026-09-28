@@ -1,6 +1,7 @@
 import XCTest
 import AVFoundation
 import ImageIO
+import os
 import SwiftData
 import UIKit
 import UniformTypeIdentifiers
@@ -278,79 +279,102 @@ final class APIClientSessionListTests: APIClientTestCase {
     /// plain list adds back the rows it lacks that are hidden or in a project,
     /// and nothing else. The first response keeps its rows and fields.
     func testSessionListAddsOnlyTheCookieProfilesHiddenAndProjectRows() async throws {
-        var queries: [String?] = []
+        let queries = OSAllocatedUnfairLock<[String]>(initialState: [])
         let client = makeClient { request in
             XCTAssertEqual(request.httpMethod, "GET")
             XCTAssertEqual(request.url?.path, "/api/sessions")
-            queries.append(request.url?.query)
-            if queries.count == 1 {
-                return try Self.sessionListResponse([
-                    ["session_id": "shared", "title": "From every profile", "profile": "default"],
-                    ["session_id": "elsewhere", "title": "Another profile", "profile": "opensource"]
-                ], ["all_profiles": true, "active_profile": "default", "archived_count": 3, "cli_count": 4], for: request)
-            }
-            return try Self.sessionListResponse([
-                ["session_id": "shared", "title": "Cookie copy", "project_id": "p-hermex"],
-                Self.hiddenCronRun("cron_job_1", at: 50),
-                ["session_id": "cli-assigned", "is_cli_session": true, "project_id": "p-hermex", "default_hidden": true],
-                ["session_id": "project-row", "project_id": "p-hermex"],
-                ["session_id": "unassigned", "title": "Past the shared recent window"],
-                ["session_id": "tg-older", "raw_source": "telegram", "session_source": "messaging", "is_cli_session": true],
-                ["session_id": "blank-project", "project_id": "  "]
-            ], ["all_profiles": false, "active_profile": "default", "archived_count": 99], for: request)
+            let query = request.url?.query ?? "(plain)"
+            queries.withLock { $0.append(query) }
+            return try Self.cookieAndEveryProfileResponse(for: request)
         }
 
         let response = try await client.sessionList()
 
-        XCTAssertEqual(queries, ["all_profiles=1&exclude_hidden=1", nil])
+        XCTAssertEqual(queries.withLock { $0 }.sorted(), ["(plain)", "all_profiles=1&exclude_hidden=1"])
+        Self.assertCookieAndEveryProfileList(response)
+    }
+
+    /// Both requests go out at once: each reaches the server before either
+    /// is answered, and the list is the one they made when sent in turn.
+    func testSessionListSendsBothRequestsBeforeEitherIsAnswered() async throws {
+        let pairing = ListRequestPairing(timeout: 2)
+        let client = makeClient { request in
+            try pairing.answer(request) { try Self.cookieAndEveryProfileResponse(for: request) }
+        }
+
+        let response = try await client.sessionList()
+
+        XCTAssertEqual(pairing.queries, ["(plain)", "all_profiles=1&exclude_hidden=1"])
         XCTAssertEqual(
-            response.sessions?.compactMap(\.sessionId),
-            ["shared", "elsewhere", "cron_job_1", "cli-assigned", "project-row"]
+            pairing.arrivalsWhenAnswered,
+            ["all_profiles=1&exclude_hidden=1": 2, "(plain)": 2],
+            "Each request is answered only once the other has arrived"
         )
-        XCTAssertEqual(response.sessions?.first?.title, "From every profile")
-        XCTAssertEqual(response.allProfiles, true)
-        XCTAssertEqual(response.activeProfile, "default")
-        XCTAssertEqual(response.archivedCount, 3)
-        XCTAssertEqual(response.cliCount, 4)
+        XCTAssertEqual(pairing.roundTrips, 1)
+        Self.assertCookieAndEveryProfileList(response)
     }
 
     /// A server without `all_profiles` predates both flags: it ignored them
-    /// and already sent the whole single-profile list.
-    func testSessionListAsksOnceWhenTheServerOmitsAllProfiles() async throws {
-        var requestCount = 0
-        let client = makeClient { request in
-            requestCount += 1
-            return try Self.sessionListResponse(
-                [["session_id": "webui-1"], Self.hiddenCronRun("cron_job_1", at: 50)],
-                [:],
-                for: request
-            )
+    /// and already sent the whole single-profile list. The plain answer that
+    /// went out with it is dropped, and so is its failure.
+    func testSessionListDropsThePlainAnswerWhenTheServerOmitsAllProfiles() async throws {
+        for plainStatus in [200, 500] {
+            let client = makeClient { request in
+                guard request.url?.query == nil else {
+                    return try Self.sessionListResponse(
+                        [["session_id": "webui-1"], Self.hiddenCronRun("cron_job_1", at: 50)],
+                        [:],
+                        for: request
+                    )
+                }
+                guard plainStatus == 200 else {
+                    return apiTestJSONResponse(#"{"error": "boom"}"#, for: request, status: plainStatus)
+                }
+                return try Self.sessionListResponse(
+                    [["session_id": "webui-1"], ["session_id": "plain-only", "default_hidden": true]],
+                    [:],
+                    for: request
+                )
+            }
+
+            let response = try await client.sessionList()
+
+            XCTAssertEqual(response.sessions?.compactMap(\.sessionId), ["webui-1", "cron_job_1"], "plain \(plainStatus)")
+            XCTAssertNil(response.allProfiles, "plain \(plainStatus)")
         }
-
-        let response = try await client.sessionList()
-
-        XCTAssertEqual(requestCount, 1)
-        XCTAssertEqual(response.sessions?.compactMap(\.sessionId), ["webui-1", "cron_job_1"])
-        XCTAssertNil(response.allProfiles)
     }
 
     /// An isolated-profile server answers `all_profiles: false`: it still
     /// honors `exclude_hidden`, so the plain list brings the hidden rows back.
     func testSessionListStillAsksTheCookieProfileWhenTheServerListsOneProfile() async throws {
-        var queries: [String?] = []
+        let queries = OSAllocatedUnfairLock<[String]>(initialState: [])
         let client = makeClient { request in
-            queries.append(request.url?.query)
-            let rows: [[String: Any]] = queries.count == 1
-                ? [["session_id": "webui-1"]]
-                : [["session_id": "webui-1"], Self.hiddenCronRun("cron_job_1", at: 50)]
+            let query = request.url?.query
+            queries.withLock { $0.append(query ?? "(plain)") }
+            let rows: [[String: Any]] = query == nil
+                ? [["session_id": "webui-1"], Self.hiddenCronRun("cron_job_1", at: 50)]
+                : [["session_id": "webui-1"]]
             return try Self.sessionListResponse(rows, ["all_profiles": false], for: request)
         }
 
         let response = try await client.sessionList()
 
-        XCTAssertEqual(queries, ["all_profiles=1&exclude_hidden=1", nil])
+        XCTAssertEqual(queries.withLock { $0 }.sorted(), ["(plain)", "all_profiles=1&exclude_hidden=1"])
         XCTAssertEqual(response.sessions?.compactMap(\.sessionId), ["webui-1", "cron_job_1"])
         XCTAssertEqual(response.allProfiles, false)
+    }
+
+    /// Either request failing fails the list with that request's error, as
+    /// when they went out in turn: the all-profiles request's error wins, and
+    /// the plain one's counts once the server lists every profile.
+    func testSessionListFailsWithTheErrorOfTheRequestThatFailed() async {
+        let everyProfileFailed = await sessionListFailure(everyProfileStatus: 500, plainStatus: 200)
+        let plainFailed = await sessionListFailure(everyProfileStatus: 200, plainStatus: 500)
+        let signedOut = await sessionListFailure(everyProfileStatus: 401, plainStatus: 500)
+
+        XCTAssertEqual(everyProfileFailed, "HTTP 500: every profile")
+        XCTAssertEqual(plainFailed, "HTTP 500: cookie profile")
+        XCTAssertEqual(signedOut, "unauthorized")
     }
 
     /// The backstop for a response that carries every run (`show_cron_sessions`
@@ -440,5 +464,110 @@ final class APIClientSessionListTests: APIClientTestCase {
             )),
             data
         )
+    }
+
+    /// Every profile's rows for the `all_profiles` request, the cookie
+    /// profile's for the plain one. Picked by query: the two requests can
+    /// arrive in either order.
+    private static func cookieAndEveryProfileResponse(for request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        guard request.url?.query == nil else {
+            return try sessionListResponse([
+                ["session_id": "shared", "title": "From every profile", "profile": "default"],
+                ["session_id": "elsewhere", "title": "Another profile", "profile": "opensource"]
+            ], ["all_profiles": true, "active_profile": "default", "archived_count": 3, "cli_count": 4], for: request)
+        }
+        return try sessionListResponse([
+            ["session_id": "shared", "title": "Cookie copy", "project_id": "p-hermex"],
+            hiddenCronRun("cron_job_1", at: 50),
+            ["session_id": "cli-assigned", "is_cli_session": true, "project_id": "p-hermex", "default_hidden": true],
+            ["session_id": "project-row", "project_id": "p-hermex"],
+            ["session_id": "unassigned", "title": "Past the shared recent window"],
+            ["session_id": "tg-older", "raw_source": "telegram", "session_source": "messaging", "is_cli_session": true],
+            ["session_id": "blank-project", "project_id": "  "]
+        ], ["all_profiles": false, "active_profile": "default", "archived_count": 99], for: request)
+    }
+
+    /// The list `sessionList()` makes of `cookieAndEveryProfileResponse`.
+    private static func assertCookieAndEveryProfileList(
+        _ response: SessionsResponse,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertEqual(
+            response.sessions?.compactMap(\.sessionId),
+            ["shared", "elsewhere", "cron_job_1", "cli-assigned", "project-row"],
+            file: file,
+            line: line
+        )
+        XCTAssertEqual(response.sessions?.first?.title, "From every profile", file: file, line: line)
+        XCTAssertEqual(response.allProfiles, true, file: file, line: line)
+        XCTAssertEqual(response.activeProfile, "default", file: file, line: line)
+        XCTAssertEqual(response.archivedCount, 3, file: file, line: line)
+        XCTAssertEqual(response.cliCount, 4, file: file, line: line)
+    }
+
+    /// How `sessionList()` fails against a server that answers the
+    /// all-profiles request with `everyProfileStatus` and the plain one with
+    /// `plainStatus`; an error body names the request. Nil on success.
+    private func sessionListFailure(everyProfileStatus: Int, plainStatus: Int) async -> String? {
+        let client = makeClient { request in
+            let isPlain = request.url?.query == nil
+            let status = isPlain ? plainStatus : everyProfileStatus
+            guard status == 200 else {
+                return apiTestJSONResponse(isPlain ? "cookie profile" : "every profile", for: request, status: status)
+            }
+            return try Self.sessionListResponse([["session_id": "webui-1"]], ["all_profiles": true], for: request)
+        }
+        do {
+            _ = try await client.sessionList()
+            return nil
+        } catch APIError.http(let status, let body) {
+            return "HTTP \(status): \(body ?? "")"
+        } catch APIError.unauthorized {
+            return "unauthorized"
+        } catch {
+            return "\(error)"
+        }
+    }
+}
+
+/// Pairs one list refresh's requests on a fake server: each request, on
+/// arrival, waits up to `timeout` for a second one before it is answered.
+/// Sent together, both arrive before either is answered, one round trip;
+/// sent in turn, the second arrives once the first was answered, two.
+/// Handlers run on the mock's concurrent queue, hence the lock.
+final class ListRequestPairing: @unchecked Sendable {
+    private let condition = NSCondition()
+    private let timeout: TimeInterval
+    private var arrivedQueries: [String] = []
+    private var answeredCount = 0
+    private var answeredBeforeArrival: [Int] = []
+    private var arrivedWhenAnswered: [String: Int] = [:]
+
+    init(timeout: TimeInterval) {
+        self.timeout = timeout
+    }
+
+    /// The queries that arrived, "(plain)" for none, sorted.
+    var queries: [String] { condition.withLock { arrivedQueries.sorted() } }
+    /// Per query, how many requests had arrived when it was answered.
+    var arrivalsWhenAnswered: [String: Int] { condition.withLock { arrivedWhenAnswered } }
+    /// Round trips the refresh took: the distinct counts of requests already
+    /// answered when one arrived.
+    var roundTrips: Int { condition.withLock { Set(answeredBeforeArrival).count } }
+
+    /// Records `request`, waits for its pair, then answers with `respond`.
+    func answer<Response>(_ request: URLRequest, _ respond: () throws -> Response) rethrows -> Response {
+        let query = request.url?.query ?? "(plain)"
+        condition.withLock {
+            answeredBeforeArrival.append(answeredCount)
+            arrivedQueries.append(query)
+            condition.broadcast()
+            let deadline = Date(timeIntervalSinceNow: timeout)
+            while arrivedQueries.count < 2, condition.wait(until: deadline) {}
+            arrivedWhenAnswered[query] = arrivedQueries.count
+        }
+        defer { condition.withLock { answeredCount += 1 } }
+        return try respond()
     }
 }

@@ -98,13 +98,19 @@ final class SessionListGroupingTimingTests: XCTestCase {
             }
             stamps = Dictionary(uniqueKeysWithValues: rows.map { ($0.cacheKey, $0.cachedAt) })
         }
-        let afterRequests = server.requests
+        // The two requests arrive in either order; the all-profiles one is listed first.
+        let afterRequests = server.requests.sorted { $0.query != nil && $1.query == nil }
         let afterCached = try CacheStore.cachedSessions(serverURL: Self.serverURL, in: afterContext)
 
         // The first load after upgrading from a PR #14 build sweeps its cache.
         let upgraded = SessionListViewModel(server: Self.serverURL, client: client)
         await upgraded.load(modelContext: beforeContext)
         let upgradedCached = try CacheStore.cachedSessions(serverURL: Self.serverURL, in: beforeContext)
+
+        // One more refresh, its list requests paired on the server, counts the
+        // round trips a refresh waits for.
+        let pairing = server.pairListRequests(timeout: 1)
+        let pairedLoaded = await viewModel.load(modelContext: afterContext)
 
         let beforeBytes = beforeRequests.reduce(0) { $0 + $1.bytes }
         let afterRows = afterRequests.reduce(0) { $0 + $1.rows }
@@ -116,7 +122,7 @@ final class SessionListGroupingTimingTests: XCTestCase {
             "TIMING cron flood after: requests \(Self.describe(afterRequests)), total \(afterRows) rows \(afterBytes) bytes; "
                 + "kept \(viewModel.sessions.count) rows; cached \(afterCached.count) (cron \(afterCached.filter(\.isCronSession).count)); "
                 + "load+apply+cache median \(Self.format(Self.median(after))), first \(Self.format(after[0])) (\(runs) runs); "
-                + "rows rewritten per steady-state refresh \(rewritten)",
+                + "rows rewritten per steady-state refresh \(rewritten); round trips per refresh \(pairing.roundTrips)",
             "TIMING cron flood upgrade: a PR #14 cache of \(beforeCached.count) rows holds \(upgradedCached.count) "
                 + "(cron \(upgradedCached.filter(\.isCronSession).count)) after one new load"
         ]
@@ -134,6 +140,9 @@ final class SessionListGroupingTimingTests: XCTestCase {
         XCTAssertEqual(upgradedCached.filter(\.isCronSession).count, SessionsResponse.cronRunLimit)
         XCTAssertEqual(Set(upgradedCached.compactMap(\.sessionId)), Set(afterCached.compactMap(\.sessionId)))
         XCTAssertLessThan(Self.median(after), .seconds(2))
+        XCTAssertTrue(pairedLoaded)
+        XCTAssertEqual(pairing.queries, ["(plain)", "all_profiles=1&exclude_hidden=1"])
+        XCTAssertEqual(pairing.roundTrips, 1, "Both list requests go out at once")
     }
 
     // MARK: - Cached paint at launch
@@ -440,6 +449,7 @@ private final class CronFloodServer: @unchecked Sendable {
     private var payloads: [String: (rows: Int, data: Data)] = [:]
     private let lock = NSLock()
     private var recorded: [Request] = []
+    private var pairing: ListRequestPairing?
 
     init(honorsExcludeHidden: Bool = true) throws {
         self.honorsExcludeHidden = honorsExcludeHidden
@@ -473,7 +483,19 @@ private final class CronFloodServer: @unchecked Sendable {
     var requests: [Request] { lock.withLock { recorded } }
     func clearRequests() { lock.withLock { recorded = [] } }
 
+    /// Pairs the next refresh's list requests; see `ListRequestPairing`.
+    func pairListRequests(timeout: TimeInterval) -> ListRequestPairing {
+        let pairing = ListRequestPairing(timeout: timeout)
+        lock.withLock { self.pairing = pairing }
+        return pairing
+    }
+
     func handle(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
+        guard let pairing = lock.withLock({ self.pairing }) else { return try answer(request) }
+        return try pairing.answer(request) { try answer(request) }
+    }
+
+    private func answer(_ request: URLRequest) throws -> (HTTPURLResponse, Data) {
         let url = try XCTUnwrap(request.url)
         XCTAssertEqual(url.path, "/api/sessions")
         let query = Dictionary(
