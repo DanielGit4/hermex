@@ -2262,8 +2262,9 @@ final class SessionListMutationTests: XCTestCase {
     func testLoadStoresArchivedCountFromResponseForArchivedEntry() async throws {
         let viewModel = try makeViewModel { request in
             XCTAssertEqual(request.url?.path, "/api/sessions")
-            // The list asks for every profile's rows without hidden ones, and
-            // nothing else; a response without `all_profiles` needs no second request.
+            // The list asks for every profile's rows without hidden ones; the
+            // plain request sent alongside is dropped for a response without
+            // `all_profiles` (`makeClient` answers it).
             XCTAssertEqual(request.url?.query, "all_profiles=1&exclude_hidden=1")
             return apiTestJSONResponse("""
             {
@@ -3610,11 +3611,19 @@ final class SessionListMutationTests: XCTestCase {
         )
     }
 
+    /// These fakes are old servers (no `all_profiles`), whose plain list the
+    /// client drops; answering it here keeps each handler at one list request
+    /// per load.
     private func makeClient(
         server: URL? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) throws -> APIClient {
-        MockURLProtocol.requestHandler = handler
+        MockURLProtocol.requestHandler = { request in
+            if request.url?.path == "/api/sessions", request.url?.query == nil {
+                return apiTestJSONResponse(#"{"sessions": []}"#, for: request)
+            }
+            return try handler(request)
+        }
 
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
