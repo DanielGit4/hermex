@@ -230,7 +230,9 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
         var dump = ""
         for (fixture, text) in fixtures.enumerated() {
             let scalars = text.unicodeScalars
-            let offsets = (0..<32).map { _ in Int.random(in: 1...scalars.count, using: &generator) }.sorted()
+            // Cut points come straight from the seeded generator: `Int.random(in:using:)` may change its
+            // algorithm in a future Swift, which would move the cuts and fail this test without an output change.
+            let offsets = (0..<32).map { _ in Int(generator.next() % UInt64(scalars.count)) + 1 }.sorted()
             for offset in offsets {
                 let prefix = String(String.UnicodeScalarView(scalars.prefix(offset)))
                 dump += "#\(fixture).\(offset)\n"
@@ -238,7 +240,7 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
             }
         }
 
-        GoldenLayouts.assertDump(dump, section: "C (random cuts of 6 KB fixtures)", lines: 35_430, fnv: 0x017638fb35192f6d)
+        GoldenLayouts.assertDump(dump, section: "C (random cuts of 6 KB fixtures)", lines: 36_488, fnv: 0x40484dad11fe60f6)
     }
 
     /// A combining mark joins the second delimiter byte into a larger Character, so these inputs'
