@@ -400,9 +400,10 @@ final class SessionListAllProfilesTests: XCTestCase {
         let didPin = await viewModel.setPinned(true, for: try row("open-1", in: viewModel))
 
         XCTAssertTrue(didPin)
+        // The pin on the row's profile, then the list back on the pick.
         XCTAssertEqual(fake.requests, [
-            "POST /api/profile/switch", "POST /api/session/pin", "GET /api/sessions", "GET /api/sessions",
-            "POST /api/profile/switch"
+            "POST /api/profile/switch", "POST /api/session/pin", "POST /api/profile/switch",
+            "GET /api/sessions", "GET /api/sessions"
         ])
         XCTAssertEqual(fake.violations, [])
         XCTAssertEqual(viewModel.activeProfileName, "default")
