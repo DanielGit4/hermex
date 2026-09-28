@@ -255,6 +255,73 @@ import XCTest
         }
     }
 
+    // MARK: - Window Long Chats
+
+    /// With Window Long Chats on, a chat keeps only the rows near the screen
+    /// laid out, so opening 500 or 1,000 messages at the bottom builds about
+    /// as many UIKit views as opening 50. It used to build every row's views
+    /// (about 6,000 at 500 messages).
+    func testLongChatsKeepABoundedViewTreeWithWindowingOn() async throws {
+        try setTranscriptWindowing(true)
+        let short = try await countHostedViews(messageCount: 50)
+        let long = try await countHostedViews(messageCount: 500)
+        let longer = try await countHostedViews(messageCount: 1000)
+
+        XCTAssertLessThanOrEqual(
+            long.views, short.views * 3 / 2,
+            "500 messages built \(long.views) UIKit views and \(long.replies) reply hosts; 50 built \(short.views) and \(short.replies)"
+        )
+        XCTAssertLessThanOrEqual(
+            longer.views, short.views * 3 / 2,
+            "1,000 messages built \(longer.views) UIKit views and \(longer.replies) reply hosts; 50 built \(short.views) and \(short.replies)"
+        )
+        XCTAssertLessThanOrEqual(
+            abs(longer.views - long.views), long.views * 15 / 100,
+            "1,000 messages built \(longer.views) UIKit views; 500 built \(long.views)"
+        )
+    }
+
+    /// Windowing replaces far rows with spacers of their measured height, so
+    /// the transcript is exactly as tall as with every row laid out. Scrolling,
+    /// the bottom pin and jumps all rely on that.
+    func testWindowingKeepsTheTranscriptHeightOfALongChat() async throws {
+        try setTranscriptWindowing(false)
+        let off = try await withHostedChat(messageCount: 500) { _, window in
+            try XCTUnwrap(transcriptScrollView(in: window)).contentSize.height
+        }
+        try setTranscriptWindowing(true)
+        let on = try await withHostedChat(messageCount: 500) { _, window in
+            try XCTUnwrap(transcriptScrollView(in: window)).contentSize.height
+        }
+        print("WINDOW-HEIGHT messages=500 off=\(format(off)) on=\(format(on))")
+        XCTAssertEqual(on, off, accuracy: 1, "Windowing changed the transcript's height")
+    }
+
+    /// Opens a chat of `messageCount` messages, all served, and counts the
+    /// UIKit views once it settles at the bottom. Each mounted reply hosts one
+    /// `ResponseSelectionInput`, so their count is the mounted replies; the
+    /// other rows draw no UIKit view of their own.
+    private func countHostedViews(messageCount: Int) async throws -> (views: Int, replies: Int) {
+        try await withHostedChat(messageCount: messageCount) { _, window in
+            let views = descendants(window)
+            let replies = views.filter { $0 is ResponseSelectionInput }.count
+            print("WINDOW-COUNT messages=\(messageCount) uiViews=\(views.count) mountedRows=\(replies)")
+            return (views.count, replies)
+        }
+    }
+
+    /// Sets Window Long Chats for this test and restores it afterwards. Skips
+    /// when the run forces the other value through `HERMEX_TRANSCRIPT_WINDOWING`.
+    private func setTranscriptWindowing(_ isOn: Bool) throws {
+        if let forced = ProcessInfo.processInfo.environment["HERMEX_TRANSCRIPT_WINDOWING"], forced != (isOn ? "1" : "0") {
+            throw XCTSkip("HERMEX_TRANSCRIPT_WINDOWING=\(forced) overrides the switch this test needs")
+        }
+        let key = "chatTranscript.windowsTranscriptRows"
+        let saved = UserDefaults.standard.object(forKey: key) as? Bool
+        addTeardownBlock { UserDefaults.standard.set(saved, forKey: key) }
+        UserDefaults.standard.set(isOn, forKey: key)
+    }
+
     // MARK: - Harness
 
     struct TypingRun {
