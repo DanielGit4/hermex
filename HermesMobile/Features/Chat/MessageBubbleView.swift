@@ -2,6 +2,7 @@ import SwiftUI
 
 struct MessageBubbleView: View {
     @State private var responseIsVisible = false
+    @State private var nearScreenSignal = ChatNearScreenSignal()
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.colorSchemeContrast) private var colorSchemeContrast
     @Environment(\.layoutDirection) private var layoutDirection
@@ -167,6 +168,7 @@ struct MessageBubbleView: View {
             } else {
                 ResponseTextSelection(identity: messageText, collectsGlyphs: responseIsVisible, onAskHermex: onAskHermex) {
                     assistantContent(segments: segments)
+                        .environment(\.chatNearScreenSignal, nearScreenSignal)
                 }
                 .onGeometryChange(for: Bool.self) { geometry in
                     guard let viewport = geometry.bounds(of: .scrollView(axis: .vertical)) else { return true }
@@ -174,6 +176,12 @@ struct MessageBubbleView: View {
                 } action: { isVisible in
                     ViewBodyProbe.hit(.replyVisibility)
                     responseIsVisible = isVisible
+                }
+                .background {
+                    // The hosted tiles cannot see the scroll view; only a reply with media measures for them.
+                    if segments.containsTranscriptMedia {
+                        Color.clear.onNearScreenChange { if nearScreenSignal.isNear != $0 { nearScreenSignal.isNear = $0 } }
+                    }
                 }
             }
 
@@ -728,13 +736,15 @@ private struct GridAttachmentCell: View {
 
 /// Loads attachment images through the authenticated `APIClient` instead of
 /// `AsyncImage`, which uses `URLSession.shared` and may not carry our auth
-/// cookie. Deduplicates concurrent requests and caches in memory.
+/// cookie. Loads only near the screen, through `ChatImageCaches.attachments`.
 private struct RemoteAttachmentImage: View {
     let path: String
     let cacheNamespace: String
     let loadAttachmentImage: (String) async -> Data?
     @State private var image: UIImage?
-    @State private var didAttempt = false
+    /// The key whose load finished with no image; it stays failed while scrolling.
+    @State private var failedKey: AttachmentImageCacheKey?
+    @State private var isNearScreen = false
 
     var body: some View {
         ZStack {
@@ -742,25 +752,28 @@ private struct RemoteAttachmentImage: View {
                 Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
-            } else if !didAttempt {
+            } else if failedKey != imageCacheKey {
                 placeholderImage
             } else {
                 fallbackImage
             }
         }
-        .task(id: imageCacheKey) {
-            image = nil
-            didAttempt = false
-            let loaded = await AttachmentImageCache.shared.image(
-                for: path,
-                cacheNamespace: cacheNamespace,
-                loadAttachmentImage: loadAttachmentImage
-            )
-            guard !Task.isCancelled else { return }
-            await MainActor.run {
-                self.image = loaded
-                self.didAttempt = true
+        .onNearScreenChange { isNearScreen = $0 }
+        .task(id: ChatImageLoadRequest(key: imageCacheKey, isNearScreen: isNearScreen)) {
+            // Far from the screen the image is released, so the cache's budget bounds memory.
+            let key = imageCacheKey
+            guard isNearScreen, failedKey != key else {
+                image = nil
+                return
             }
+            image = ChatImageCaches.attachments.cachedImage(for: key)
+            guard image == nil else { return }
+            let loaded = await ChatImageCaches.attachments.image(for: key) {
+                await loadAttachmentImage(path)
+            }
+            guard !Task.isCancelled else { return }
+            image = loaded
+            failedKey = loaded == nil ? key : nil
         }
     }
 
@@ -786,57 +799,6 @@ private struct RemoteAttachmentImage: View {
                     .tint(Color(.tertiaryLabel))
             )
     }
-}
-
-/// In-memory image cache that delegates loading to the authenticated client.
-/// Deduplicates concurrent requests for the same namespaced path. The cache is
-/// process-wide and survives `.id(server)` teardown, so keys include the
-/// server (and session) namespace rather than the relative path alone.
-private actor AttachmentImageCache {
-    static let shared = AttachmentImageCache()
-
-    private var cache: [AttachmentImageCacheKey: UIImage] = [:]
-    private var inFlight: [AttachmentImageCacheKey: Task<UIImage?, Never>] = [:]
-
-    func image(
-        for path: String,
-        cacheNamespace: String,
-        loadAttachmentImage: @escaping (String) async -> Data?
-    ) async -> UIImage? {
-        let key = AttachmentImageCacheKey(namespace: cacheNamespace, path: path)
-        if let cached = cache[key] {
-            return cached
-        }
-
-        if let task = inFlight[key] {
-            return await task.value
-        }
-
-        let task = Task<UIImage?, Never> {
-            guard let data = await loadAttachmentImage(path) else {
-                return nil
-            }
-            let previewData = ImagePreviewDownsampler.previewData(
-                from: data,
-                maxPixelSize: ImagePreviewDownsampler.attachmentMaxPixelSize
-            ) ?? data
-            return UIImage(data: previewData)
-        }
-
-        inFlight[key] = task
-        let image = await task.value
-        inFlight[key] = nil
-
-        if let image {
-            cache[key] = image
-        }
-        return image
-    }
-}
-
-struct AttachmentImageCacheKey: Hashable {
-    let namespace: String
-    let path: String
 }
 
 enum ResponseSpeedFormatter {

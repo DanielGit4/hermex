@@ -184,6 +184,40 @@ import XCTest
         }
     }
 
+    /// A chat whose every reply shows an image opens at the bottom and loads
+    /// only the images within a screen of it. Settled replies host their
+    /// content out of the scroll view's sight, so each used to load its image
+    /// on open, however far up it was.
+    func testOpeningAChatLoadsOnlyTheImagesNearTheBottom() async throws {
+        let turns = 40
+        let fixture = try ChatTypingFixture(messageCount: 4 * turns, repliesShowImages: true)
+        defer {
+            fixture.tearDown()
+            ChatImageCaches.transcriptMedia.removeAll()
+        }
+
+        try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture) {
+                fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
+            let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "The chat must open at the bottom")
+
+            // The screen and one screen above it, in average turns, plus a
+            // turn cut by the edge and one for turns shorter than the average.
+            let turnHeight = scrollView.contentSize.height / CGFloat(turns)
+            let nearTurns = Int((2 * scrollView.bounds.height / turnHeight).rounded(.up)) + 2
+            let nearest = Set((turns - nearTurns..<turns).map(ChatTypingFixture.imagePath))
+            let loaded = fixture.mediaPaths
+            print("IMAGE-OPEN turns=\(turns) loaded=\(loaded.count) nearTurns=\(nearTurns) turnHeight=\(format(turnHeight)) viewport=\(format(scrollView.bounds.height))")
+            XCTAssertTrue(loaded.contains(ChatTypingFixture.imagePath(turns - 1)), "The newest image, on screen, never loaded")
+            XCTAssertTrue(
+                loaded.isSubset(of: nearest),
+                "Loaded \(loaded.count) of \(turns) images on open; only the newest \(nearTurns) are near the bottom. Also loaded: \(loaded.subtracting(nearest).sorted())"
+            )
+        }
+    }
+
     // MARK: - Harness
 
     struct TypingRun {
@@ -893,12 +927,21 @@ import XCTest
 
     var requestCount: Int { counter.total }
     var sessionRequestCount: Int { counter.sessions }
+    /// The distinct paths `/api/media` was asked for.
+    var mediaPaths: Set<String> { counter.mediaPaths }
 
     /// `servesNewestWindow` answers like hermes-webui's cold open instead of
     /// with every message: only the newest window, with its offset.
     /// `answersChatStart` answers `/api/chat/start` with a stream, the way
     /// hermes-webui starts a turn, so a send leaves a stream active.
-    init(messageCount: Int, servesNewestWindow: Bool = false, answersChatStart: Bool = false) throws {
+    /// `repliesShowImages` ends every reply with a `MEDIA:` image token and
+    /// answers `/api/media` with a small PNG.
+    init(
+        messageCount: Int,
+        servesNewestWindow: Bool = false,
+        answersChatStart: Bool = false,
+        repliesShowImages: Bool = false
+    ) throws {
         let counter = RequestCounter()
         self.counter = counter
         let decoder = JSONDecoder()
@@ -911,7 +954,7 @@ import XCTest
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
 
-        let messages = Self.messages(count: messageCount)
+        let messages = Self.messages(count: messageCount, repliesShowImages: repliesShowImages)
         let windowStart = servesNewestWindow ? Self.newestWindowStart(of: messages) : 0
         serverWindow = windowStart..<messages.count
         var sessionFields: [String: Any] = [
@@ -931,9 +974,17 @@ import XCTest
         let chatStartBody = answersChatStart
             ? Data(#"{"session_id": "typing-perf", "stream_id": "stream-perf"}"#.utf8)
             : nil
+        let imageBody = repliesShowImages
+            ? UIGraphicsImageRenderer(size: CGSize(width: 8, height: 8)).pngData { $0.fill(CGRect(x: 0, y: 0, width: 8, height: 8)) }
+            : nil
         MockURLProtocol.requestHandler = { request in
             let isSession = request.url?.path == "/api/session"
-            counter.record(isSession: isSession)
+            let isMedia = request.url?.path == "/api/media"
+            let mediaPath = isMedia
+                ? request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?
+                    .queryItems?.first { $0.name == "path" }?.value
+                : nil
+            counter.record(isSession: isSession, mediaPath: mediaPath)
             if isSession {
                 sessionGate.wait()
             }
@@ -943,6 +994,9 @@ import XCTest
             )!
             if let chatStartBody, request.url?.path == "/api/chat/start" {
                 return (response, chatStartBody)
+            }
+            if let imageBody, isMedia {
+                return (response, imageBody)
             }
             return (response, isSession ? sessionBody : Data("{}".utf8))
         }
@@ -1045,9 +1099,14 @@ import XCTest
         }
     }
 
+    /// The image the reply of `turn` shows when replies show images.
+    static func imagePath(_ turn: Int) -> String {
+        "/tmp/workspace/img-\(turn).png"
+    }
+
     /// Whole turns of four messages (question, tool call, tool result, reply);
     /// a remainder of two is a plain question and reply.
-    static func messages(count: Int) -> [[String: Any]] {
+    static func messages(count: Int, repliesShowImages: Bool = false) -> [[String: Any]] {
         var messages: [[String: Any]] = []
         var turn = 0
         while messages.count + 1 < count {
@@ -1071,14 +1130,14 @@ import XCTest
             }
             messages.append([
                 "role": "assistant", "message_id": "reply-\(turn)", "timestamp": time + 60,
-                "content": reply(turn: turn)
+                "content": reply(turn: turn, showsImage: repliesShowImages)
             ])
             turn += 1
         }
         return messages
     }
 
-    private static func reply(turn: Int) -> String {
+    private static func reply(turn: Int, showsImage: Bool) -> String {
         var text = """
         ## Parser pass \(turn)
 
@@ -1107,6 +1166,9 @@ import XCTest
             | unterminated string | hang | error at 1:\(turn % 80) |
             """
         }
+        if showsImage {
+            text += "\n\nMEDIA:\(imagePath(turn))"
+        }
         return text
     }
 }
@@ -1115,14 +1177,17 @@ import XCTest
 private final class RequestCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var counts = (total: 0, sessions: 0)
+    private var media: Set<String> = []
 
     var total: Int { lock.withLock { counts.total } }
     var sessions: Int { lock.withLock { counts.sessions } }
+    var mediaPaths: Set<String> { lock.withLock { media } }
 
-    func record(isSession: Bool) {
+    func record(isSession: Bool, mediaPath: String?) {
         lock.withLock {
             counts.total += 1
             if isSession { counts.sessions += 1 }
+            if let mediaPath { media.insert(mediaPath) }
         }
     }
 }
