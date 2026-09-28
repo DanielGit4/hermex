@@ -258,6 +258,50 @@ final class TranscriptMessageTests: XCTestCase {
 }
 
 final class ChatTranscriptDisplaySettingsTests: XCTestCase {
+    func testWindowingNeedsTheSwitchOnAndVoiceOverOff() {
+        XCTAssertTrue(ChatTranscriptWindowPolicy.windowsRows(switchOn: true, voiceOverRunning: false))
+        XCTAssertFalse(ChatTranscriptWindowPolicy.windowsRows(switchOn: false, voiceOverRunning: false))
+        XCTAssertFalse(ChatTranscriptWindowPolicy.windowsRows(switchOn: true, voiceOverRunning: true))
+        XCTAssertFalse(ChatTranscriptWindowPolicy.windowsRows(switchOn: false, voiceOverRunning: true))
+    }
+
+    /// Rows within one viewport height are near, past two are far, and in
+    /// between a row keeps whatever state it had.
+    func testWindowBandsAndHysteresis() {
+        let height: CGFloat = 800
+        func below(by gap: CGFloat) -> CGRect { CGRect(x: 0, y: -(height + gap), width: 400, height: height) }
+        func above(by gap: CGFloat) -> CGRect { CGRect(x: 0, y: 100 + gap, width: 400, height: height) }
+
+        XCTAssertEqual(ChatTranscriptWindowPolicy.band(rowHeight: 100, viewport: nil), .near)
+        XCTAssertEqual(ChatTranscriptWindowPolicy.band(rowHeight: 100, viewport: CGRect(x: 0, y: -300, width: 400, height: height)), .near)
+        for (viewport, band) in [
+            (below(by: 800), .near), (below(by: 801), .between), (below(by: 1600), .between), (below(by: 1601), .far),
+            (above(by: 800), .near), (above(by: 801), .between), (above(by: 1601), .far)
+        ] as [(CGRect, ChatTranscriptWindowPolicy.Band)] {
+            XCTAssertEqual(ChatTranscriptWindowPolicy.band(rowHeight: 100, viewport: viewport), band, "\(viewport)")
+        }
+
+        XCTAssertFalse(ChatTranscriptWindowPolicy.isFar(after: .near, wasFar: true))
+        XCTAssertTrue(ChatTranscriptWindowPolicy.isFar(after: .far, wasFar: false))
+        XCTAssertTrue(ChatTranscriptWindowPolicy.isFar(after: .between, wasFar: true))
+        XCTAssertFalse(ChatTranscriptWindowPolicy.isFar(after: .between, wasFar: false))
+    }
+
+    /// A far row collapses only to a height measured for exactly its current
+    /// layout, and never once the reader expanded something in it: that
+    /// expansion lives in the row, so collapsing would lose it and change its
+    /// height when it lays out again. (A hosted test cannot tap the SwiftUI
+    /// disclosure that sets `isSticky`, so the rule is pinned here.)
+    func testWindowCollapsesOnlyUnexpandedRowsToAnExactMeasurement() {
+        let measured = ChatTranscriptWindowPolicy.Measurement(key: "layout-a", height: 120)
+
+        XCTAssertEqual(ChatTranscriptWindowPolicy.collapsedHeight(isFar: true, isSticky: false, measured: measured, key: "layout-a"), 120)
+        XCTAssertNil(ChatTranscriptWindowPolicy.collapsedHeight(isFar: false, isSticky: false, measured: measured, key: "layout-a"))
+        XCTAssertNil(ChatTranscriptWindowPolicy.collapsedHeight(isFar: true, isSticky: true, measured: measured, key: "layout-a"))
+        XCTAssertNil(ChatTranscriptWindowPolicy.collapsedHeight(isFar: true, isSticky: false, measured: measured, key: "layout-b"))
+        XCTAssertNil(ChatTranscriptWindowPolicy.collapsedHeight(isFar: true, isSticky: false, measured: nil, key: "layout-a"))
+    }
+
     func testWorkingRowShowsForActiveRunOnly() {
         let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
 

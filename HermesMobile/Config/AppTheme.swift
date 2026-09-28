@@ -233,6 +233,24 @@ enum ChatTranscriptDisplaySettings {
     /// Settings → Chat "Fold Finished Turns": settled turns collapse their
     /// thinking, tool rows, and interim replies behind one elapsed-time row.
     static let foldsSettledTurnsKey = "chatTranscript.foldsSettledTurns"
+    /// Settings → Developer "Window Long Chats" (Debug-only spike): keep only
+    /// the transcript rows near the screen laid out, and update only the live
+    /// row's entry per streamed word.
+    static let windowsTranscriptRowsKey = "chatTranscript.windowsTranscriptRows"
+    static let defaultWindowsTranscriptRows = false
+
+    /// Window Long Chats, read once per chat screen. In Debug builds
+    /// `HERMEX_TRANSCRIPT_WINDOWING` ("1" on, "0" off) wins over the stored switch.
+    static var windowsTranscriptRows: Bool {
+        #if DEBUG
+        switch ProcessInfo.processInfo.environment["HERMEX_TRANSCRIPT_WINDOWING"] {
+        case "1": return true
+        case "0": return false
+        default: break
+        }
+        #endif
+        return UserDefaults.standard.object(forKey: windowsTranscriptRowsKey) as? Bool ?? defaultWindowsTranscriptRows
+    }
 
     /// Backs the Settings → Chat "Right-to-Left Chat Layout" toggle (issue #259).
     /// Local-only: there is no server settings object to mirror an `rtl` flag

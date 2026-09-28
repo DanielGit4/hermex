@@ -215,15 +215,22 @@ final class ChatViewModel {
             if !isGrowingStreamingReply {
                 messagesStructureRevision &+= 1
             }
-            recomputeDisplayedTranscriptMessages()
+            if !updateOnlyTheGrownReplyRow() {
+                recomputeDisplayedTranscriptMessages()
+            }
         }
     }
     /// Bumped by every write to `messages` but one: the streaming reply's text
     /// growing in place. Keys the memoized turn folds and terminal replies,
     /// which both skip the turn holding the streaming reply.
     @ObservationIgnored private var messagesStructureRevision = 0
-    /// True only while `flushAssistantTokens` grows the streaming reply's text.
-    @ObservationIgnored private var isGrowingStreamingReply = false
+    /// The streaming reply's index, set only while `flushAssistantTokens`
+    /// grows its text.
+    @ObservationIgnored private var growingStreamingReplyIndex: Int?
+    private var isGrowingStreamingReply: Bool { growingStreamingReplyIndex != nil }
+    /// Window Long Chats, read once when the chat screen opens; its transcript
+    /// reads it from here too. Tests override it.
+    @ObservationIgnored var windowsTranscriptRows = ChatTranscriptDisplaySettings.windowsTranscriptRows
     @ObservationIgnored private var turnFoldsMemo: (key: TurnDerivationKey, folds: TranscriptTurnFolds)?
     @ObservationIgnored private var terminalReplyRenderIDsMemo: (key: TurnDerivationKey, renderIDs: Set<String>)?
     /// Memoized transcript mapping, recomputed once whenever `messages` or
@@ -344,6 +351,38 @@ final class ChatViewModel {
         )
         recomputeCompressionReferenceCard()
     }
+
+    /// With Window Long Chats on, a streamed word that only grows the live
+    /// reply swaps that one transcript entry instead of deriving the whole
+    /// transcript again. Returns false, for the full derivation, whenever the
+    /// word could change more: a reasoning card reads the reply's text (its
+    /// own thinking, or an archived card stripping the reply's echo), and so
+    /// does the compaction card's anchor.
+    private func updateOnlyTheGrownReplyRow() -> Bool {
+        guard windowsTranscriptRows,
+              let index = growingStreamingReplyIndex,
+              compressionAnchorMetadata == nil,
+              let rows = Self.transcriptMessages(
+                  displayedTranscriptMessages,
+                  replacingGrownReply: messages[index],
+                  at: index,
+                  archivedReasoningGroups: completedReasoningGroups,
+                  displayedReasoningGroups: displayedReasoningGroups
+              )
+        else { return false }
+
+        displayedTranscriptMessages = rows
+        ViewBodyProbe.hit(.liveRowUpdate)
+        return true
+    }
+
+    #if DEBUG
+    /// Derives the whole transcript again, as a word the fast path took
+    /// would have without it, so a test can compare the two.
+    func recomputeDisplayedTranscriptForTesting() {
+        recomputeDisplayedTranscriptMessages()
+    }
+    #endif
 
     /// What the turn folds and terminal replies are derived from, short of the
     /// streaming reply's text. The groups compare by buffer first, so an
@@ -5489,8 +5528,8 @@ final class ChatViewModel {
             let existing = messages[index]
             // Only the streaming reply's text changes, which leaves the turn
             // folds and terminal replies as they were: both skip its turn.
-            isGrowingStreamingReply = existing.role == "assistant"
-            defer { isGrowingStreamingReply = false }
+            growingStreamingReplyIndex = existing.role == "assistant" ? index : nil
+            defer { growingStreamingReplyIndex = nil }
             messages[index] = ChatMessage(
                 role: existing.role,
                 content: (existing.content ?? "") + appendedContent,
@@ -6577,6 +6616,38 @@ extension ChatViewModel {
         }
 
         return transcriptMessages
+    }
+
+    /// `displayed` with the entry of the reply at `loadedIndex` holding the
+    /// grown `reply`, or nil when the grown text could change more than that
+    /// entry: the reply is not displayed yet, carries thinking of its own, or
+    /// anchors a reasoning card, whose echo stripping reads the reply's text.
+    /// Growing text never changes a message's anchor, turn or visibility.
+    nonisolated static func transcriptMessages(
+        _ displayed: [TranscriptMessage],
+        replacingGrownReply reply: ChatMessage,
+        at loadedIndex: Int,
+        archivedReasoningGroups: [ReasoningGroup],
+        displayedReasoningGroups: [ReasoningGroup]
+    ) -> [TranscriptMessage]? {
+        guard reasoningTexts(from: reply).isEmpty,
+              let row = displayed.lastIndex(where: { $0.loadedIndex == loadedIndex }),
+              displayed[row].message.messageId == reply.messageId
+        else { return nil }
+
+        let entry = displayed[row]
+        guard !archivedReasoningGroups.contains(where: { $0.anchorMessageID == entry.anchorID }),
+              !displayedReasoningGroups.contains(where: { $0.anchorMessageID == entry.anchorID })
+        else { return nil }
+
+        var rows = displayed
+        rows[row] = TranscriptMessage(
+            loadedIndex: entry.loadedIndex,
+            renderID: entry.renderID,
+            anchorID: entry.anchorID,
+            message: reply
+        )
+        return rows
     }
 
     nonisolated private static func transcriptActivityAnchorIDs(
