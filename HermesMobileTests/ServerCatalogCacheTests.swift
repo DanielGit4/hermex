@@ -56,6 +56,8 @@ import XCTest
 
         // A new cache on the same directory is a relaunch: nothing is in memory.
         let relaunched = ServerCatalogCache(directory: directory)
+        let freshAfterRelaunch = await relaunched.freshModels(for: client(cache: relaunched).catalogScope)
+        XCTAssertNil(freshAfterRelaunch, "models from the last launch are last-known rows, never fresh")
         let held = expectation(description: "providers and models held")
         held.expectedFulfillmentCount = 2
         HeldURLProtocol.install(decide: { _ in .hold }, onHold: { _ in held.fulfill() })
@@ -189,6 +191,72 @@ import XCTest
         XCTAssertEqual(kept?.value.providers?.first?.id, "fresh", "an older answer never replaces a newer one")
     }
 
+    // MARK: - Fresh lists a chat reuses
+
+    func testFreshListsNeverCrossServersOrProfilesAndAClearDropsThem() async throws {
+        let cache = ServerCatalogCache()
+        HeldURLProtocol.install { Self.composerAnswer($0) }
+        let work = client(cache: cache, profile: "work")
+        _ = try await work.profiles()
+        _ = try await work.workspaces()
+        _ = try await work.commands()
+        _ = try await work.models()
+
+        let everyList = { (client: APIClient) async -> [Bool] in
+            let scope = client.catalogScope
+            return [await cache.freshProfiles(for: scope) != nil, await cache.freshWorkspaces(for: scope) != nil,
+                    await cache.freshCommands(for: scope) != nil, await cache.freshModels(for: scope) != nil]
+        }
+        let sameProfile = await everyList(client(cache: cache, profile: "work"))
+        let otherProfile = await everyList(client(cache: cache, profile: "personal"))
+        let noCookie = await everyList(client(cache: cache))
+        let otherServer = await everyList(client(serverB, cache: cache, profile: "work"))
+        XCTAssertEqual(sameProfile, [true, true, true, true])
+        XCTAssertEqual(otherProfile, [false, false, false, false])
+        XCTAssertEqual(noCookie, [false, false, false, false])
+        XCTAssertEqual(otherServer, [false, false, false, false])
+
+        await cache.expireFresh(server: serverB)
+        let afterOtherServerExpired = await everyList(work)
+        XCTAssertEqual(afterOtherServerExpired, [true, true, true, true])
+
+        try await cache.remove(server: serverA)
+        let afterClear = await everyList(work)
+        XCTAssertEqual(afterClear, [false, false, false, false])
+    }
+
+    func testAFetchThatStartedBeforeAWriteIsNotFreshButModelsStayLastKnown() async throws {
+        let cache = ServerCatalogCache()
+        let api = client(cache: cache)
+        let held = expectation(description: "profiles and models held")
+        held.expectedFulfillmentCount = 2
+        HeldURLProtocol.install(decide: { request in
+            ["/api/profiles", "/api/models"].contains(request.url?.path ?? "") ? .hold : .respond(200, "{}")
+        }, onHold: { _ in held.fulfill() })
+        let profiles = Task { try await api.profiles() }
+        let models = Task { try await api.models() }
+        await fulfillment(of: [held], timeout: 5)
+
+        _ = try await api.saveDefaultModel(model: "gpt-6")
+        HeldURLProtocol.release("/api/profiles", json: #"{"active": "default"}"#)
+        HeldURLProtocol.release("/api/models", json: CatalogFixture.models())
+        _ = try await profiles.value
+        _ = try await models.value
+
+        let freshProfiles = await cache.freshProfiles(for: api.catalogScope)
+        let freshModels = await cache.freshModels(for: api.catalogScope)
+        let lastKnownModels = await api.lastKnownModels()
+        XCTAssertNil(freshProfiles, "the write may have changed what the server answered")
+        XCTAssertNil(freshModels)
+        XCTAssertEqual(lastKnownModels?.value.catalogGroups.flatMap(\.allModels).map(\.id), ["gpt-5"],
+                       "an expired catalog still fills the picker")
+
+        HeldURLProtocol.install { Self.composerAnswer($0) }
+        _ = try await api.profiles()
+        let afterWrite = await cache.freshProfiles(for: api.catalogScope)
+        XCTAssertNotNil(afterWrite, "a fetch after the write is fresh")
+    }
+
     // MARK: - Lifecycle
 
     func testClearOfflineDataDeletesOnlyThatServersCatalogs() async throws {
@@ -241,9 +309,11 @@ import XCTest
     // MARK: - Pickers
 
     func testTheComposerSeedsItsModelOnlyFromTheFreshResponse() async throws {
-        let cache = ServerCatalogCache()
+        let clock = CatalogTestClock()
+        let cache = ServerCatalogCache(now: clock.now)
         HeldURLProtocol.install { _ in .respond(200, CatalogFixture.models(defaultModel: "cached-default")) }
         _ = try await client(cache: cache).models()
+        clock.advance(by: ServerCatalogCache.freshness + 1)
 
         HeldURLProtocol.install { request in
             switch request.url?.path {
@@ -267,6 +337,7 @@ import XCTest
         let cache = ServerCatalogCache()
         HeldURLProtocol.install { _ in .respond(200, CatalogFixture.models()) }
         _ = try await client(cache: cache).models()
+        await cache.expireFresh(server: serverA)
 
         let held = expectation(description: "models request held")
         HeldURLProtocol.install(decide: { request in

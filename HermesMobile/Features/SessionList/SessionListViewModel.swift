@@ -1293,12 +1293,14 @@ final class SessionListViewModel {
     /// Switches the server profile to `profile` unless that is moot; `force`
     /// sends it anyway because the server has just said the profile is
     /// elsewhere. Runs only inside `afterProfileWork`. Returns nil on success.
+    /// A loan or return is not the user's profile change, so it keeps the
+    /// fresh lists chats reuse.
     private func performProfileSwitch(to profile: String, force: Bool) async -> ProfileSwitchFailure? {
         guard force || !switchIsMoot(to: profile) else { return nil }
 
         serverProfileIsUncertain = true
         do {
-            let response = try await client.switchProfile(name: profile)
+            let response = try await client.switchProfile(name: profile, keepsFreshCatalogs: true)
             if let message = Self.nonEmpty(response.error) {
                 return ProfileSwitchFailure(
                     message: String(localized: "Could not switch to the “\(profile)” profile: \(message)"),

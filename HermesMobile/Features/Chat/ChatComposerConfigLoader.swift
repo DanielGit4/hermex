@@ -72,6 +72,13 @@ struct ChatComposerConfigLoader {
     /// model it is scoped to. Errors keep the serial order's precedence
     /// (profiles, models, reasoning, workspaces), and commands load even when the
     /// rest fails.
+    ///
+    /// Profiles, models and commands reuse what another chat fetched on this
+    /// server and profile within `ServerCatalogCache.freshness`; workspaces
+    /// too once the chat has a workspace, because a reused `last` may be stale.
+    /// Reasoning is asked every time: it is scoped to the chat's model, and
+    /// any chat's effort change writes the profile's default. The chat's
+    /// transcript, pending approval, yolo and git state are its own requests.
     func loadConfiguration(from initialState: ChatComposerConfigState) async -> ChatComposerConfigLoadResult {
         var state = initialState
         var configurationError: Error?
@@ -84,7 +91,7 @@ struct ChatComposerConfigLoader {
 
         async let agentCommands = loadAgentCommands()
         if configurationError == nil {
-            async let workspaceResponse = client.workspaces()
+            async let workspaceResponse = client.workspaces(reusingFresh: Self.nonEmpty(state.currentWorkspace) != nil)
             do {
                 try await loadModelAndReasoning(into: &state)
                 applyWorkspaces(try await workspaceResponse, to: &state)
@@ -101,8 +108,9 @@ struct ChatComposerConfigLoader {
     }
 
     /// The last-known catalog for `profile`, to fill an empty picker while the fresh
-    /// load runs. Lists only: `loadConfiguration` seeds the chat's model from the
-    /// fresh answer alone. Nil when the client's active profile is another one.
+    /// load runs. Lists only: `loadConfiguration` seeds the chat's model from a
+    /// fresh answer alone, never from an expired or last-launch one. Nil when the
+    /// client's active profile is another one.
     func lastKnownCatalogGroups(profile: String?) async -> [ModelCatalogGroup]? {
         guard let groups = await client.lastKnownModels(profile: Self.nonEmpty(profile))?.value.catalogGroups,
               !groups.isEmpty
@@ -110,8 +118,10 @@ struct ChatComposerConfigLoader {
         return groups
     }
 
+    /// Moves the client's profile cookie to the session's own profile, so the
+    /// lists read after it are that profile's, never the session list's pick.
     private func resolveProfile(into state: inout ChatComposerConfigState) async throws {
-        let profilesResponse = try await client.profiles()
+        let profilesResponse = try await client.profiles(reusingFresh: true)
         state.profileOptions = profilesResponse.profiles ?? []
         state.isSingleProfileMode = profilesResponse.singleProfileMode ?? false
         state.selectedProfileName = Self.nonEmpty(state.currentProfile)
@@ -122,7 +132,7 @@ struct ChatComposerConfigLoader {
               Self.nonEmpty(profilesResponse.active) != sessionProfile
         else { return }
 
-        let switchResponse = try await client.switchProfile(name: sessionProfile)
+        let switchResponse = try await client.switchProfile(name: sessionProfile, keepsFreshCatalogs: true)
         state.profileOptions = switchResponse.profiles ?? state.profileOptions
         state.selectedProfileName = Self.nonEmpty(switchResponse.active) ?? sessionProfile
         state.currentProfile = state.selectedProfileName
@@ -145,7 +155,7 @@ struct ChatComposerConfigLoader {
             state.currentModel = Self.nonEmpty(selectedProfile?.model)
         }
 
-        let modelsResponse = try await client.models()
+        let modelsResponse = try await client.models(reusingFresh: true)
         state.modelCatalogGroups = modelsResponse.catalogGroups
         if state.currentModel == nil {
             state.currentModel = modelsResponse.defaultModel
@@ -179,7 +189,7 @@ struct ChatComposerConfigLoader {
     }
 
     private func loadAgentCommands() async -> [AgentCommand] {
-        (try? await client.commands())?.commands ?? []
+        (try? await client.commands(reusingFresh: true))?.commands ?? []
     }
 
     private static func profileSummary(

@@ -1,10 +1,12 @@
 import Foundation
 
 extension APIClient {
-    /// Always asks the server; a success also replaces the last-known catalog.
-    func models() async throws -> ModelsResponse {
+    /// Asks the server unless `reusingFresh` finds a fresh answer for this server
+    /// and profile; a success also replaces the last-known catalog.
+    func models(reusingFresh: Bool = false) async throws -> ModelsResponse {
         let scope = catalogScope
-        let startedAt = Date()
+        if reusingFresh, let fresh = await catalogCache.freshModels(for: scope) { return fresh }
+        let startedAt = catalogCache.clock()
         let data = try await sendData(endpoint: .models, method: "GET")
         let response = try decode(ModelsResponse.self, from: data)
         await catalogCache.storeModels(response, raw: data, scope: scope, fetchedAt: startedAt)
@@ -43,8 +45,15 @@ extension APIClient {
         try await send(endpoint: .modelsLive, method: "GET")
     }
 
-    func commands() async throws -> CommandsResponse {
-        try await send(endpoint: .commands, method: "GET")
+    /// Asks the server unless `reusingFresh` finds a fresh answer for this server
+    /// and profile; a success becomes the fresh answer.
+    func commands(reusingFresh: Bool = false) async throws -> CommandsResponse {
+        let scope = catalogScope
+        if reusingFresh, let fresh = await catalogCache.freshCommands(for: scope) { return fresh }
+        let startedAt = catalogCache.clock()
+        let response: CommandsResponse = try await send(endpoint: .commands, method: "GET")
+        await catalogCache.storeCommands(response, scope: scope, fetchedAt: startedAt)
+        return response
     }
 
     /// Saves the default model. Pass `provider` whenever the row names its
@@ -99,16 +108,32 @@ extension APIClient {
         )
     }
 
-    func profiles() async throws -> ProfilesResponse {
-        try await send(endpoint: .profiles, method: "GET")
+    /// Asks the server unless `reusingFresh` finds a fresh answer for this server
+    /// and profile cookie; a success becomes the fresh answer. Its `active` is
+    /// what that cookie answers, so reusing it cannot misreport the profile.
+    func profiles(reusingFresh: Bool = false) async throws -> ProfilesResponse {
+        let scope = catalogScope
+        if reusingFresh, let fresh = await catalogCache.freshProfiles(for: scope) { return fresh }
+        let startedAt = catalogCache.clock()
+        let response: ProfilesResponse = try await send(endpoint: .profiles, method: "GET")
+        await catalogCache.storeProfiles(response, scope: scope, fetchedAt: startedAt)
+        return response
     }
 
-    func switchProfile(name: String) async throws -> ProfileSwitchResponse {
-        try await send(
+    /// A user's profile change expires the server's fresh lists. The automatic
+    /// moves that take the cookie to a chat's own profile and back pass
+    /// `keepsFreshCatalogs`: the lists are keyed by the cookie already, and
+    /// expiring on every loan would leave nothing to reuse.
+    func switchProfile(name: String, keepsFreshCatalogs: Bool = false) async throws -> ProfileSwitchResponse {
+        let response: ProfileSwitchResponse = try await send(
             endpoint: .switchProfile,
             method: "POST",
             body: ProfileSwitchRequest(name: name)
         )
+        if !keepsFreshCatalogs {
+            await catalogCache.expireFresh(server: baseURL)
+        }
+        return response
     }
 
     /// Creates a new profile (`POST /api/profile/create`), mirroring the webui's
@@ -140,7 +165,7 @@ extension APIClient {
     /// Always asks the server; a success also replaces the last-known providers.
     func providers() async throws -> ProvidersResponse {
         let scope = catalogScope
-        let startedAt = Date()
+        let startedAt = catalogCache.clock()
         let response: ProvidersResponse = try await send(endpoint: .providers, method: "GET")
         await catalogCache.storeProviders(response, scope: scope, fetchedAt: startedAt)
         return response
