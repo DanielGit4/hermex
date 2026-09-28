@@ -149,12 +149,18 @@ private enum DisplayDelimiter: CaseIterable {
         at index: Int,
         protected: [Bool]
     ) -> Bool {
-        let tokenCharacters = Array(token)
-        guard index >= 0, index + tokenCharacters.count <= characters.count else { return false }
-        for offset in 0..<tokenCharacters.count where protected[index + offset] {
-            return false
+        // `index <= count` keeps today's answer for an empty token past the end (false);
+        // a non-empty token that runs past the end fails the per-position check below.
+        guard index >= 0, index <= characters.count else { return false }
+        var position = index
+        for tokenCharacter in token {
+            guard position < characters.count,
+                  !protected[position],
+                  characters[position] == tokenCharacter
+            else { return false }
+            position += 1
         }
-        return Array(characters[index..<(index + tokenCharacters.count)]) == tokenCharacters
+        return true
     }
 }
 
@@ -401,12 +407,21 @@ enum MarkdownMathLayoutCache {
         return .segmented(segments)
     }
 
-    /// Cheap scan for a display-math opener/closer (`$$` or `\[` / `\]`).
+    /// Cheap scan for a display-math opener/closer (`$$` or `\[` / `\]`), one pass over the UTF-8 bytes.
     ///
-    /// Deliberately conservative: a false positive only costs one extra pass,
-    /// while a false negative would drop literal text from the transcript.
+    /// Deliberately conservative: a false positive only costs one extra pass, while a false negative would
+    /// drop literal text from the transcript. Bytes see `$$` where Characters may not (`$` followed by
+    /// `$` + U+0301 is two Characters, neither of them `$$`); that is a false positive, and harmless because
+    /// the segmenter found no delimiter there, so the full pass returns the same layout. There are no false
+    /// negatives: a Character equal to `$`, `\`, `[` or `]` is that single ASCII byte.
     private static func containsDisplayDelimiter(_ content: String) -> Bool {
-        content.contains("$$") || content.contains("\\[") || content.contains("\\]")
+        var previous: UInt8 = 0
+        for byte in content.utf8 {
+            if previous == 0x24, byte == 0x24 { return true }                 // $$
+            if previous == 0x5C, byte == 0x5B || byte == 0x5D { return true } // \[ or \]
+            previous = byte
+        }
+        return false
     }
 
     /// Test seam: drop memoized layouts so a test can observe a cold pass.

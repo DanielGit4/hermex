@@ -259,11 +259,17 @@ private enum InlineDelimiter: CaseIterable {
         at index: Int,
         protected: [Bool]
     ) -> Bool {
-        let tokenCharacters = Array(token)
-        guard index >= 0, index + tokenCharacters.count <= characters.count else { return false }
-        for offset in 0..<tokenCharacters.count where protected[index + offset] {
-            return false
+        // `index <= count` keeps today's answer for an empty token past the end (false);
+        // a non-empty token that runs past the end fails the per-position check below.
+        guard index >= 0, index <= characters.count else { return false }
+        var position = index
+        for tokenCharacter in token {
+            guard position < characters.count,
+                  !protected[position],
+                  characters[position] == tokenCharacter
+            else { return false }
+            position += 1
         }
-        return Array(characters[index..<(index + tokenCharacters.count)]) == tokenCharacters
+        return true
     }
 }
