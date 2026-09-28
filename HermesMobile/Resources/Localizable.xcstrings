@@ -112832,6 +112832,27 @@
         "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "無法切換至設定檔「%1$@」：%2$@" } }
       }
     },
+    "Could Not Switch Profiles" : {
+      "localizations" : {
+        "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "تعذّر تبديل ملف التعريف" } },
+        "de" : { "stringUnit" : { "state" : "needs_review", "value" : "Profil konnte nicht gewechselt werden" } },
+        "es" : { "stringUnit" : { "state" : "needs_review", "value" : "No se pudo cambiar de perfil" } },
+        "fr" : { "stringUnit" : { "state" : "needs_review", "value" : "Impossible de changer de profil" } },
+        "he" : { "stringUnit" : { "state" : "needs_review", "value" : "לא ניתן להחליף פרופיל" } },
+        "it" : { "stringUnit" : { "state" : "needs_review", "value" : "Impossibile cambiare profilo" } },
+        "ja" : { "stringUnit" : { "state" : "needs_review", "value" : "プロファイルを切り替えられませんでした" } },
+        "ko" : { "stringUnit" : { "state" : "needs_review", "value" : "프로필을 전환할 수 없음" } },
+        "nl" : { "stringUnit" : { "state" : "needs_review", "value" : "Kan niet van profiel wisselen" } },
+        "pl" : { "stringUnit" : { "state" : "needs_review", "value" : "Nie można przełączyć profilu" } },
+        "pt-BR" : { "stringUnit" : { "state" : "needs_review", "value" : "Não foi possível mudar de perfil" } },
+        "ru" : { "stringUnit" : { "state" : "needs_review", "value" : "Не удалось сменить профиль" } },
+        "tr" : { "stringUnit" : { "state" : "needs_review", "value" : "Profil değiştirilemedi" } },
+        "ur" : { "stringUnit" : { "state" : "needs_review", "value" : "پروفائل تبدیل نہیں ہو سکا" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "needs_review", "value" : "无法切换配置文件" } },
+        "zh-Hant" : { "stringUnit" : { "state" : "needs_review", "value" : "無法切換設定檔" } },
+        "zh-HK" : { "stringUnit" : { "state" : "needs_review", "value" : "無法切換設定檔" } }
+      }
+    },
     "Expand %@ sessions" : {
       "localizations" : {
         "ar" : { "stringUnit" : { "state" : "needs_review", "value" : "توسيع جلسات %@" } },

@@ -4,7 +4,8 @@ import XCTest
 
 /// All shows every profile's chats (`all_profiles=1`), groups messaging chats
 /// per platform, and opens a row from another profile only after the server
-/// moves to it, without changing the profile New Chat uses.
+/// moves to it, without changing the profile New Chat uses. The server moves
+/// back to the pick when that chat closes or the row action ends.
 final class SessionListAllProfilesTests: XCTestCase {
     private let server = URL(string: "https://example.test")!
 
@@ -338,31 +339,31 @@ final class SessionListAllProfilesTests: XCTestCase {
     }
 
     /// PR #8: New Chat creates on the pick. After a row moved the server to
-    /// another profile, New Chat moves it back first, so the new chat's own
-    /// requests and its workspace belong to the pick.
+    /// another profile, returning to the list moves it back, so the new chat's
+    /// own requests and its workspace belong to the pick.
     @MainActor
     func testNewChatAfterOpeningAForeignRowSwitchesBackAndKeepsThePick() async throws {
         let fake = AllProfilesServerFake(active: "default", rows: [Self.webui("open-1", profile: "opensource", at: 20)])
         let viewModel = makeViewModel(fake)
         await viewModel.load()
         await viewModel.loadActiveProfile()
-        _ = await viewModel.sessionForOpening(try row("open-1", in: viewModel))
+        let opened = try await openChat(try row("open-1", in: viewModel), in: viewModel)
 
-        // Returning to the list reloads the rows and the profile; the pick stays.
+        // Returning to the list moves the server back, then reloads the rows
+        // and the profile; the pick stays.
+        await viewModel.destinationDidChange(from: .session(opened), to: nil).value
         await viewModel.load()
         await viewModel.loadActiveProfile()
         XCTAssertEqual(viewModel.activeProfileName, "default")
-        XCTAssertEqual(viewModel.serverProfileName, "opensource")
+        XCTAssertEqual(viewModel.serverProfileName, "default")
         fake.clearRequests()
 
         let createdSession = await viewModel.createSession()
         let created = try XCTUnwrap(createdSession)
         _ = try await makeClient(fake).sessionYolo(sessionID: try XCTUnwrap(created.sessionId))
 
-        XCTAssertEqual(fake.requests, [
-            "POST /api/profile/switch", "GET /api/workspaces", "POST /api/session/new", "GET /api/session/yolo"
-        ])
-        XCTAssertEqual(fake.switchedProfiles.last, "default")
+        XCTAssertEqual(fake.requests, ["GET /api/workspaces", "POST /api/session/new", "GET /api/session/yolo"])
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default"])
         XCTAssertEqual(fake.createdSessionProfiles, ["default"])
         XCTAssertEqual(created.profile, "default")
         XCTAssertEqual(created.workspace, "/work/default")
@@ -399,10 +400,10 @@ final class SessionListAllProfilesTests: XCTestCase {
         let didPin = await viewModel.setPinned(true, for: try row("open-1", in: viewModel))
 
         XCTAssertTrue(didPin)
-        XCTAssertEqual(
-            fake.requests,
-            ["POST /api/profile/switch", "POST /api/session/pin", "GET /api/sessions", "GET /api/sessions"]
-        )
+        XCTAssertEqual(fake.requests, [
+            "POST /api/profile/switch", "POST /api/session/pin", "GET /api/sessions", "GET /api/sessions",
+            "POST /api/profile/switch"
+        ])
         XCTAssertEqual(fake.violations, [])
         XCTAssertEqual(viewModel.activeProfileName, "default")
     }
@@ -452,6 +453,213 @@ final class SessionListAllProfilesTests: XCTestCase {
         XCTAssertEqual(fake.requests, ["GET /api/session", "POST /api/profile/switch", "GET /api/session"])
         XCTAssertEqual(fake.switchedProfiles.last, "openai_sol")
         XCTAssertEqual(viewModel.activeProfileName, "default")
+    }
+
+    // MARK: - Returning the profile to the pick
+
+    /// Closing a chat from another profile moves the server back to the pick
+    /// before any screen reached from the list loads or saves.
+    @MainActor
+    func testClosingAForeignChatReturnsTheServerSoListScreensUseThePick() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [
+            Self.webui("mine", profile: "default", at: 10),
+            Self.webui("open-1", profile: "opensource", at: 20)
+        ])
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        let opened = try await openChat(try row("open-1", in: viewModel), in: viewModel)
+        XCTAssertEqual(fake.activeProfile, "opensource")
+
+        await viewModel.destinationDidChange(from: .session(opened), to: nil).value
+
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default"])
+        XCTAssertEqual(viewModel.serverProfileName, "default")
+        XCTAssertEqual(viewModel.activeProfileName, "default")
+        XCTAssertTrue(viewModel.isServerOnPick)
+        try await assertScreensReachedFromTheList(use: "default", fake)
+    }
+
+    /// A row action on another profile's row returns the server to the pick
+    /// once it ends, though the user never left the list.
+    @MainActor
+    func testARowActionOnAForeignRowReturnsTheServerToThePick() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [
+            Self.webui("mine", profile: "default", at: 10),
+            Self.webui("open-1", profile: "opensource", at: 20)
+        ])
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+
+        let didPin = await viewModel.setPinned(true, for: try row("open-1", in: viewModel))
+        let didRename = await viewModel.rename(try row("open-1", in: viewModel), to: "Renamed")
+
+        XCTAssertTrue(didPin)
+        XCTAssertTrue(didRename)
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default", "opensource", "default"])
+        XCTAssertEqual(fake.violations, [])
+        XCTAssertEqual(viewModel.activeProfileName, "default")
+        XCTAssertEqual(viewModel.serverProfileName, "default")
+        try await assertScreensReachedFromTheList(use: "default", fake)
+    }
+
+    /// Beside an open chat (regular width), a row action returns the server
+    /// to that chat's profile rather than the pick.
+    @MainActor
+    func testARowActionBesideAForeignChatReturnsTheServerToTheChat() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [
+            Self.webui("mine", profile: "default", at: 10),
+            Self.webui("open-1", profile: "opensource", at: 20)
+        ])
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        _ = try await openChat(try row("open-1", in: viewModel), in: viewModel)
+
+        let didPin = await viewModel.setPinned(true, for: try row("mine", in: viewModel))
+
+        XCTAssertTrue(didPin)
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default", "opensource"])
+        XCTAssertEqual(fake.violations, [])
+        XCTAssertEqual(viewModel.serverProfileName, "opensource")
+        XCTAssertEqual(viewModel.activeProfileName, "default")
+    }
+
+    /// A screen opened while the return is pending, such as a deep link from a
+    /// foreign chat straight to Tasks, loads only once the server is back on
+    /// the pick.
+    @MainActor
+    func testAScreenOpenedBeforeTheReturnLandsWaitsForThePick() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [Self.webui("open-1", profile: "opensource", at: 20)])
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        let opened = try await openChat(try row("open-1", in: viewModel), in: viewModel)
+
+        let returning = viewModel.destinationDidChange(from: .session(opened), to: .utility(.tasks))
+        XCTAssertFalse(viewModel.isServerOnPick, "The gate waits instead of showing Tasks")
+        let failure = await viewModel.ensureServerOnPick()
+        XCTAssertNil(failure)
+        XCTAssertEqual(fake.activeProfile, "default")
+        fake.clearRequests()
+        await TasksViewModel(server: server, client: makeClient(fake)).load()
+        await returning.value
+
+        XCTAssertEqual(fake.servedProfiles.first, "default")
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default"], "The gate and the return make one switch")
+    }
+
+    /// PR #14's rule under the return: a profile picked in the foreign chat's
+    /// own picker becomes the pick when the chat closes, and stays.
+    @MainActor
+    func testAProfilePickedInsideAForeignChatBecomesThePickWhenItCloses() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [Self.webui("open-1", profile: "opensource", at: 20)])
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        let opened = try await openChat(try row("open-1", in: viewModel), in: viewModel)
+
+        fake.setActiveProfile("openai_sol")
+        await viewModel.destinationDidChange(from: .session(opened), to: nil).value
+
+        XCTAssertEqual(viewModel.activeProfileName, "openai_sol")
+        XCTAssertEqual(viewModel.serverProfileName, "openai_sol")
+        XCTAssertEqual(fake.switchedProfiles, ["opensource"])
+        try await assertScreensReachedFromTheList(use: "openai_sol", fake)
+    }
+
+    /// No switch when the server is already on the profile it needs.
+    @MainActor
+    func testNoSwitchWhenTheServerIsAlreadyOnTheNeededProfile() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [
+            Self.webui("mine", profile: "default", at: 10),
+            Self.webui("open-1", profile: "opensource", at: 20)
+        ])
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        fake.clearRequests()
+
+        let mine = try await openChat(try row("mine", in: viewModel), in: viewModel)
+        await viewModel.destinationDidChange(from: .session(mine), to: nil).value
+        await viewModel.destinationDidChange(from: nil, to: .utility(.tasks)).value
+        let onPick = await viewModel.ensureServerOnPick()
+
+        XCTAssertNil(onPick)
+        XCTAssertTrue(viewModel.isServerOnPick)
+        XCTAssertEqual(fake.requests, [])
+
+        // After a foreign chat, the screen's gate adds nothing to the one return.
+        let foreign = try await openChat(try row("open-1", in: viewModel), in: viewModel)
+        await viewModel.destinationDidChange(from: .session(foreign), to: .utility(.tasks)).value
+        let backOnPick = await viewModel.ensureServerOnPick()
+
+        XCTAssertNil(backOnPick)
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default"])
+    }
+
+    /// A chat from another profile whose reply is still streaming keeps
+    /// working after the list took the profile back: its reload follows the
+    /// 409 once, one switch to the owner, and the retry succeeds.
+    @MainActor
+    func testAForeignChatFollowsItsSessionOnceAfterTheListTookTheProfileBack() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [
+            Self.webui("open-1", profile: "opensource", at: 20, ["active_stream_id": "stream-1"])
+        ])
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        let opened = try await openChat(try row("open-1", in: viewModel), in: viewModel)
+        let chat = makeChat(for: opened, following: viewModel)
+        // The list takes the profile back while the chat is open, as a return racing it would.
+        let failure = await viewModel.ensureServerOnPick()
+        XCTAssertNil(failure)
+        fake.clearRequests()
+
+        // Reattaching after backgrounding reloads the chat.
+        await chat.loadMessages()
+
+        XCTAssertNil(chat.lastError)
+        XCTAssertEqual(chat.activeStreamID, "stream-1")
+        XCTAssertEqual(Array(fake.requests.prefix(3)), ["GET /api/session", "POST /api/profile/switch", "GET /api/session"])
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default", "opensource"])
+        XCTAssertEqual(viewModel.serverProfileName, "opensource")
+        XCTAssertEqual(viewModel.activeProfileName, "default")
+
+        // Closed, the chat can no longer take the profile from the list.
+        await viewModel.destinationDidChange(from: .session(opened), to: nil).value
+        do {
+            _ = try await chat.client.session(id: "open-1", includeMessages: false, messageLimit: nil)
+            XCTFail("Expected the profile mismatch")
+        } catch let error as APIError {
+            XCTAssertEqual(error.mismatchedSessionProfile, "opensource")
+        }
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default", "opensource", "default"])
+        XCTAssertEqual(fake.activeProfile, "default")
+    }
+
+    /// No loop: when the retry is refused too, the chat surfaces the error
+    /// and switches no further.
+    @MainActor
+    func testAForeignChatSurfacesASecondRefusalWithoutAnotherSwitch() async throws {
+        let fake = AllProfilesServerFake(
+            active: "default",
+            rows: [Self.webui("open-1", profile: "opensource", at: 20)],
+            refusedSessionIDs: ["open-1"]
+        )
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        let opened = try await openChat(try row("open-1", in: viewModel), in: viewModel)
+        let chat = makeChat(for: opened, following: viewModel)
+        fake.clearRequests()
+
+        await chat.loadMessages()
+
+        XCTAssertEqual(fake.requests, ["GET /api/session", "POST /api/profile/switch", "GET /api/session"])
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "opensource"])
+        XCTAssertEqual((chat.lastError as? APIError)?.mismatchedSessionProfile, "opensource")
     }
 
     // MARK: - Offline cache
@@ -507,6 +715,62 @@ final class SessionListAllProfilesTests: XCTestCase {
     @MainActor
     private func makeViewModel(_ fake: AllProfilesServerFake) -> SessionListViewModel {
         SessionListViewModel(server: server, client: makeClient(fake))
+    }
+
+    /// Opens `row` the way the list does: the server moves to the row's
+    /// profile, then the destination changes to its chat.
+    @MainActor
+    private func openChat(_ row: SessionSummary, in viewModel: SessionListViewModel) async throws -> SessionSummary {
+        let opened = await viewModel.sessionForOpening(row)
+        let session = try XCTUnwrap(opened)
+        await viewModel.destinationDidChange(from: nil, to: .session(session)).value
+        return session
+    }
+
+    /// The chat `SessionListView` shows for `session`: its client follows a
+    /// 409 through the list, on the handler the list's fake installed.
+    @MainActor
+    private func makeChat(for session: SessionSummary, following list: SessionListViewModel) -> ChatViewModel {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let client = APIClient(
+            baseURL: server,
+            session: URLSession(configuration: configuration),
+            followSessionProfile: { [list] owner in await list.followSessionProfile(owner) }
+        )
+        return ChatViewModel(
+            session: session,
+            server: server,
+            client: client,
+            streamClient: ScriptedSSEStreamingClient(),
+            approvalStreamClient: ScriptedSSEStreamingClient(),
+            clarifyStreamClient: ScriptedSSEStreamingClient(),
+            btwStreamClient: ScriptedSSEStreamingClient()
+        )
+    }
+
+    /// Loads Tasks, Skills, Memory, Insights, Archived and the Settings
+    /// profile read against `fake`, as the screens reached from the list do,
+    /// and asserts the server served every request under `profile`.
+    @MainActor
+    private func assertScreensReachedFromTheList(
+        use profile: String,
+        _ fake: AllProfilesServerFake,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) async throws {
+        fake.clearRequests()
+        let client = makeClient(fake)
+        await TasksViewModel(server: server, client: client).load()
+        await SkillsViewModel(client: client).load()
+        await MemoryViewModel(server: server, client: client).load()
+        await InsightsViewModel(client: client).load()
+        await ArchivedSessionsViewModel(server: server, client: client).load()
+        _ = try await client.profiles()
+
+        XCTAssertFalse(fake.requests.isEmpty, file: file, line: line)
+        XCTAssertFalse(fake.requests.contains("POST /api/profile/switch"), "\(fake.requests)", file: file, line: line)
+        XCTAssertEqual(Set(fake.servedProfiles), [profile], "\(fake.requests)", file: file, line: line)
     }
 
     private func makeClient(_ fake: AllProfilesServerFake) -> APIClient {
@@ -674,8 +938,11 @@ final class AllProfilesServerFake: @unchecked Sendable {
     private var rows: [[String: Any]]
     /// Sessions the server knows but the list response leaves out.
     private let unlistedSessionIDs: Set<String>
+    /// Sessions refused on every profile, as if the owner kept moving.
+    private let refusedSessionIDs: Set<String>
     private let projects: [[String: Any]]
     private var recorded: [String] = []
+    private var recordedProfiles: [String] = []
     private var queries: [String: [String: String]] = [:]
     private var mismatches: [String] = []
     private var switches: [String] = []
@@ -688,12 +955,14 @@ final class AllProfilesServerFake: @unchecked Sendable {
         projects: [[String: Any]] = [],
         singleProfileMode: Bool = false,
         honorsAllProfiles: Bool = true,
-        unlistedSessionIDs: Set<String> = []
+        unlistedSessionIDs: Set<String> = [],
+        refusedSessionIDs: Set<String> = []
     ) {
         self.active = active
         self.profileNames = profiles
         self.rows = rows
         self.unlistedSessionIDs = unlistedSessionIDs
+        self.refusedSessionIDs = refusedSessionIDs
         self.projects = projects
         self.singleProfileMode = singleProfileMode
         self.honorsAllProfiles = honorsAllProfiles
@@ -702,12 +971,15 @@ final class AllProfilesServerFake: @unchecked Sendable {
     var activeProfile: String { lock.withLock { active } }
     /// "METHOD /path" per request, in order.
     var requests: [String] { lock.withLock { recorded } }
+    /// The cookie profile each request in `requests` was served under; a
+    /// switch counts under the profile it left.
+    var servedProfiles: [String] { lock.withLock { recordedProfiles } }
     var violations: [String] { lock.withLock { mismatches } }
     var switchedProfiles: [String] { lock.withLock { switches } }
     var createdSessionProfiles: [String?] { lock.withLock { newSessionProfiles } }
 
     func query(for path: String) -> [String: String]? { lock.withLock { queries[path] } }
-    func clearRequests() { lock.withLock { recorded = []; mismatches = [] } }
+    func clearRequests() { lock.withLock { recorded = []; recordedProfiles = []; mismatches = [] } }
     /// Moves the profile the way another screen would.
     func setActiveProfile(_ name: String) { lock.withLock { active = name } }
 
@@ -724,9 +996,11 @@ final class AllProfilesServerFake: @unchecked Sendable {
 
         return try lock.withLock {
             recorded.append("\(method) \(url.path)")
+            recordedProfiles.append(active)
             queries[url.path] = query
 
-            if let sessionID, let owner = profile(ofSession: sessionID), owner != active {
+            if let sessionID, let owner = profile(ofSession: sessionID),
+               owner != active || refusedSessionIDs.contains(sessionID) {
                 mismatches.append("\(method) \(url.path) \(sessionID) owner=\(owner) active=\(active)")
                 return try respond([
                     "error": "Session belongs to a different profile",
