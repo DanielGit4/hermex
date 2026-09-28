@@ -286,23 +286,169 @@ import XCTest
     /// the bottom pin and jumps all rely on that.
     func testWindowingKeepsTheTranscriptHeightOfALongChat() async throws {
         try setTranscriptWindowing(false)
-        let off = try await withHostedChat(messageCount: 500) { _, window in
+        let off = try await withHostedChat(messageCount: 500, frameTimeout: Self.longChatFrameTimeout) { _, window in
             try XCTUnwrap(transcriptScrollView(in: window)).contentSize.height
         }
         try setTranscriptWindowing(true)
-        let on = try await withHostedChat(messageCount: 500) { _, window in
+        let on = try await withHostedChat(messageCount: 500, frameTimeout: Self.longChatFrameTimeout) { _, window in
             try XCTUnwrap(transcriptScrollView(in: window)).contentSize.height
         }
         print("WINDOW-HEIGHT messages=500 off=\(format(off)) on=\(format(on))")
         XCTAssertEqual(on, off, accuracy: 1, "Windowing changed the transcript's height")
     }
 
+    /// With windowing on, scrolling a long chat to its top lays out the rows
+    /// there and collapses the ones at the bottom, at the same content height
+    /// and about the same number of views. The scroll-to-bottom button then
+    /// lands at the bottom, lays the last reply out again and resumes follow.
+    func testWindowedLongChatLaysOutTheRowsWhereTheReaderIs() async throws {
+        try setTranscriptWindowing(true)
+        let lastTurn = Self.lastTurn(ofMessageCount: 500)
+        let frameTimeout = Self.longChatFrameTimeout
+        try await withHostedChat(messageCount: 500, frameTimeout: frameTimeout) { fixture, window in
+            let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
+            let observer = try XCTUnwrap(
+                descendants(window).compactMap { ($0 as? ChatScrollObserver.ObserverView)?.coordinator }.first
+            )
+            let height = scrollView.contentSize.height
+            let bottomViews = descendants(window).count
+            let atBottom = mountedReplyTurns(in: window)
+            XCTAssertTrue(atBottom.contains(lastTurn), "The last reply must be laid out at the bottom")
+            XCTAssertFalse(atBottom.contains(0), "The first reply must be collapsed at the bottom")
+
+            scrollView.setContentOffset(CGPoint(x: 0, y: -scrollView.adjustedContentInset.top), animated: false)
+            try await settle(window, fixture: fixture, frameTimeout: frameTimeout) { true }
+            let atTop = mountedReplyTurns(in: window)
+            let topViews = descendants(window).count
+            print("WINDOW-SCROLL bottomViews=\(bottomViews) topViews=\(topViews) bottomTurns=\(atBottom.sorted()) topTurns=\(atTop.sorted())")
+            XCTAssertTrue(atTop.contains(0), "The first reply must be laid out at the top")
+            XCTAssertFalse(atTop.contains(lastTurn), "The last reply must be collapsed at the top")
+            XCTAssertLessThanOrEqual(topViews, bottomViews * 3 / 2, "The top built \(topViews) views; the bottom \(bottomViews)")
+            XCTAssertEqual(scrollView.contentSize.height, height, accuracy: 1, "Scrolling changed the transcript's height")
+            XCTAssertTrue(ViewBodyProbe.isScrollToBottomButtonVisible, "The top must show the scroll-to-bottom button")
+
+            _ = try await tapScrollToBottomButton(scrollView, in: window)
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "Tapping the button must land at the bottom")
+            XCTAssertEqual(observer.followsLatestContent?(), true, "Tapping the button must turn follow back on")
+            try await settle(window, fixture: fixture, frameTimeout: frameTimeout) { true }
+            XCTAssertTrue(mountedReplyTurns(in: window).contains(lastTurn), "The last reply must be laid out again")
+            XCTAssertLessThanOrEqual(distanceFromBottom(of: scrollView), 1, "Laying rows out again moved the reader off the bottom")
+        }
+    }
+
+    /// A reply collapsed while the reader was away is selectable again once
+    /// they scroll back to it.
+    func testWindowedReplyIsSelectableAfterScrollingAwayAndBack() async throws {
+        try setTranscriptWindowing(true)
+        let lastTurn = Self.lastTurn(ofMessageCount: 500)
+        let frameTimeout = Self.longChatFrameTimeout
+        try await withHostedChat(messageCount: 500, frameTimeout: frameTimeout) { fixture, window in
+            let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
+            let bottom = scrollView.contentOffset.y
+            scrollView.setContentOffset(CGPoint(x: 0, y: -scrollView.adjustedContentInset.top), animated: false)
+            try await settle(window, fixture: fixture, frameTimeout: frameTimeout) { true }
+            XCTAssertFalse(mountedReplyTurns(in: window).contains(lastTurn), "The last reply must collapse while the reader is at the top")
+
+            scrollView.setContentOffset(CGPoint(x: 0, y: bottom), animated: false)
+            try await settle(window, fixture: fixture, frameTimeout: frameTimeout) { true }
+            try assertSelectable(turn: lastTurn, in: window)
+        }
+    }
+
+    /// Loading older messages with windowing on keeps the reader where they
+    /// were: the older rows lay out once to measure themselves, then collapse
+    /// at the same height, so the prepend's offset correction still holds.
+    func testWindowedPrependKeepsTheReaderInPlace() async throws {
+        let off = try await prependInHostedChat(windowing: false)
+        let on = try await prependInHostedChat(windowing: true)
+        print("WINDOW-PREPEND turn=\(on.turn) offShift=\(format(off.shift)) onShift=\(format(on.shift)) offHeight=\(format(off.height)) onHeight=\(format(on.height))")
+        XCTAssertEqual(on.turn, off.turn, "Both runs must track the same reply")
+        XCTAssertEqual(on.shift, 0, accuracy: 1, "The reply the reader saw moved \(format(on.shift)) pt")
+        XCTAssertEqual(on.height, off.height, accuracy: 1, "Windowing changed the height of the prepended transcript")
+    }
+
+    /// Opens the newest window of a 500-message chat, scrolls to its top and
+    /// loads older messages through the transcript's pull to refresh. Returns
+    /// how far the topmost reply on screen moved and the final height.
+    private func prependInHostedChat(windowing: Bool) async throws -> (turn: Int, shift: CGFloat, height: CGFloat) {
+        try setTranscriptWindowing(windowing)
+        let fixture = try ChatTypingFixture(messageCount: 500, servesNewestWindow: true)
+        defer { fixture.tearDown() }
+
+        return try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture) {
+                fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
+            let scrollView = try XCTUnwrap(transcriptScrollView(in: window))
+            scrollView.setContentOffset(CGPoint(x: 0, y: -scrollView.adjustedContentInset.top), animated: false)
+            try await settle(window, fixture: fixture) { true }
+            let visible = replyFrames(in: window).filter { $0.value.minY >= window.safeAreaInsets.top && $0.value.minY < window.bounds.maxY }
+            let (turn, frame) = try XCTUnwrap(visible.min { $0.value.minY < $1.value.minY }, "A reply must be on screen at the top")
+            let requests = fixture.sessionRequestCount
+
+            let refresh = try XCTUnwrap(scrollView.refreshControl, "The transcript must load older messages on pull")
+            refresh.sendActions(for: .valueChanged)
+            try await settle(window, fixture: fixture) { fixture.sessionRequestCount > requests }
+            let after = try XCTUnwrap(replyFrames(in: window)[turn], "The reply the reader saw must still be laid out")
+            return (turn, after.minY - frame.minY, scrollView.contentSize.height)
+        }
+    }
+
+    /// Every row lays out once when a long chat opens, which on a busy Debug
+    /// simulator can hold the main thread past the usual 10 s frame wait.
+    static let longChatFrameTimeout: TimeInterval = 60
+
+    static func lastTurn(ofMessageCount count: Int) -> Int {
+        ChatTypingFixture.messages(count: count).filter { $0["role"] as? String == "user" }.count - 1
+    }
+
+    /// Each laid-out reply shows its "Parser pass <turn>" heading in a
+    /// selection leaf; collapsed replies have none.
+    private func replyFrames(in window: UIWindow) -> [Int: CGRect] {
+        var frames: [Int: CGRect] = [:]
+        for case let leaf as ResponseSelectionLeafView in descendants(window) {
+            guard let range = leaf.text.range(of: "Parser pass "),
+                  let turn = Int(leaf.text[range.upperBound...].prefix { $0.isNumber })
+            else { continue }
+            frames[turn] = leaf.convert(leaf.bounds, to: window)
+        }
+        return frames
+    }
+
+    private func mountedReplyTurns(in window: UIWindow) -> Set<Int> {
+        Set(replyFrames(in: window).keys)
+    }
+
+    /// Selects all of the reply of `turn` through its selection input.
+    private func assertSelectable(turn: Int, in window: UIWindow) throws {
+        let leaf = try XCTUnwrap(
+            descendants(window).compactMap { $0 as? ResponseSelectionLeafView }.first { $0.text.contains("Parser pass \(turn)") },
+            "The reply of turn \(turn) must be laid out"
+        )
+        var ancestor = leaf.superview
+        while ancestor != nil && !(ancestor is ResponseSelectionInput) { ancestor = ancestor?.superview }
+        let input = try XCTUnwrap(ancestor as? ResponseSelectionInput)
+        input.selectAll(nil)
+        let range = try XCTUnwrap(input.selectedTextRange)
+        let text = try XCTUnwrap(input.text(in: range))
+        XCTAssertTrue(text.contains("Parser pass \(turn)") && text.contains("for the full list."), "Select all must cover the whole reply")
+        XCTAssertFalse(input.selectionRects(for: range).isEmpty, "A reply on screen needs real selection handles")
+        input.selectedTextRange = nil
+    }
+
     /// Opens a chat of `messageCount` messages, all served, and counts the
     /// UIKit views once it settles at the bottom. Each mounted reply hosts one
     /// `ResponseSelectionInput`, so their count is the mounted replies; the
-    /// other rows draw no UIKit view of their own.
+    /// other rows draw no UIKit view of their own. Every row lays out once on
+    /// open, which at 1,000 messages holds a Debug build's main thread past
+    /// the usual 10 s frame wait.
     private func countHostedViews(messageCount: Int) async throws -> (views: Int, replies: Int) {
-        try await withHostedChat(messageCount: messageCount) { _, window in
+        let fixture = try ChatTypingFixture(messageCount: messageCount)
+        defer { fixture.tearDown() }
+        return try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture, frameTimeout: Self.longChatFrameTimeout) {
+                fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
             let views = descendants(window)
             let replies = views.filter { $0 is ResponseSelectionInput }.count
             print("WINDOW-COUNT messages=\(messageCount) uiViews=\(views.count) mountedRows=\(replies)")
@@ -316,7 +462,7 @@ import XCTest
         if let forced = ProcessInfo.processInfo.environment["HERMEX_TRANSCRIPT_WINDOWING"], forced != (isOn ? "1" : "0") {
             throw XCTSkip("HERMEX_TRANSCRIPT_WINDOWING=\(forced) overrides the switch this test needs")
         }
-        let key = "chatTranscript.windowsTranscriptRows"
+        let key = ChatTranscriptDisplaySettings.windowsTranscriptRowsKey
         let saved = UserDefaults.standard.object(forKey: key) as? Bool
         addTeardownBlock { UserDefaults.standard.set(saved, forKey: key) }
         UserDefaults.standard.set(isOn, forKey: key)
@@ -365,13 +511,14 @@ import XCTest
     /// tears everything down again so the next hosted test starts clean.
     private func withHostedChat<Result>(
         messageCount: Int,
+        frameTimeout: TimeInterval = 10,
         _ body: (ChatTypingFixture, UIWindow) async throws -> Result
     ) async throws -> Result {
         let fixture = try ChatTypingFixture(messageCount: messageCount)
         defer { fixture.tearDown() }
 
         return try await withHostedWindow(fixture) { window in
-            try await settle(window, fixture: fixture) {
+            try await settle(window, fixture: fixture, frameTimeout: frameTimeout) {
                 fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
             }
             XCTAssertGreaterThanOrEqual(fixture.sessionRequestCount, 1, "The transcript must come from the mocked server")
@@ -750,12 +897,13 @@ import XCTest
     func settle(
         _ window: UIWindow,
         fixture: ChatTypingFixture,
+        frameTimeout: TimeInterval = 10,
         until isReady: () -> Bool
     ) async throws {
         var previous: [Double] = []
         var stableChecks = 0
         for _ in 0..<150 {
-            await renderFrames(4)
+            await renderFrames(4, timeout: frameTimeout)
             let signature = [
                 Double(transcriptScrollView(in: window)?.contentSize.height ?? 0),
                 Double(fixture.requestCount),
@@ -797,11 +945,11 @@ import XCTest
         window.rootViewController = nil
     }
 
-    func renderFrames(_ target: Int = 3) async {
+    func renderFrames(_ target: Int = 3, timeout: TimeInterval = 10) async {
         let rendered = expectation(description: "Frames rendered")
         let driver = BotRenderFrameDriver(target: target) { rendered.fulfill() }
         driver.start()
-        await fulfillment(of: [rendered], timeout: 10)
+        await fulfillment(of: [rendered], timeout: timeout)
         driver.stop()
     }
 }
@@ -1073,6 +1221,19 @@ import XCTest
             sessionFields["_messages_truncated"] = windowStart > 0
         }
         let sessionBody = try JSONSerialization.data(withJSONObject: ["session": sessionFields])
+        // An older page, like hermes-webui's: the `msg_limit` messages before
+        // `msg_before`, with their offset.
+        let olderPageBody: (URLRequest) -> Data? = { request in
+            let query = request.url.flatMap { URLComponents(url: $0, resolvingAgainstBaseURL: false) }?.queryItems ?? []
+            guard let before = query.first(where: { $0.name == "msg_before" })?.value.flatMap(Int.init) else { return nil }
+            let limit = query.first { $0.name == "msg_limit" }?.value.flatMap(Int.init) ?? 50
+            let start = max(0, min(before, messages.count) - limit)
+            var fields = sessionFields
+            fields["messages"] = Array(messages[start..<min(before, messages.count)])
+            fields["_messages_offset"] = start
+            fields["_messages_truncated"] = start > 0
+            return try? JSONSerialization.data(withJSONObject: ["session": fields])
+        }
         let sessionGate = ResponseGate()
         self.sessionGate = sessionGate
         let chatStartBody = answersChatStart
@@ -1102,7 +1263,7 @@ import XCTest
             if let imageBody, isMedia {
                 return (response, imageBody)
             }
-            return (response, isSession ? sessionBody : Data("{}".utf8))
+            return (response, isSession ? olderPageBody(request) ?? sessionBody : Data("{}".utf8))
         }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]

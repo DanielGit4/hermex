@@ -3,6 +3,7 @@ import UIKit
 
 struct ChatTranscriptView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityVoiceOverEnabled) private var isVoiceOverRunning
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var scrollPositionController = ChatScrollPositionController()
 
@@ -43,6 +44,9 @@ struct ChatTranscriptView: View {
     let transcriptRelayoutScrollToken: Int
     let bottomAnchorID: String
     let transcriptSpacing: CGFloat
+    /// Window Long Chats as the screen opened with it: far rows collapse to
+    /// spacers of their measured height (`ChatTranscriptWindowPolicy`).
+    let windowsRows: Bool
     /// Read only by the bottom inset and the scroll-to-bottom button, so a
     /// composer that grows a line re-runs those two and not the transcript.
     let composerHeight: ChatComposerHeight
@@ -253,6 +257,10 @@ struct ChatTranscriptView: View {
     ) -> some View {
         // One clock read per body pass; each row compares its timestamp to it.
         let now = Date()
+        let windowsFarRows = ChatTranscriptWindowPolicy.windowsRows(
+            switchOn: windowsRows,
+            voiceOverRunning: isVoiceOverRunning
+        )
 
         return VStack(spacing: transcriptSpacing) {
             olderMessagesButton(proxy: proxy)
@@ -276,7 +284,7 @@ struct ChatTranscriptView: View {
                     expandedTurnKeys: expandedTurnKeys
                 )
 
-                ChatTranscriptMessageBlock(
+                let block = ChatTranscriptMessageBlock(
                     transcriptMessage: transcriptMessage,
                     transcriptSpacing: transcriptSpacing,
                     showsThinkingAndToolCards: showsThinkingAndToolCards,
@@ -319,9 +327,18 @@ struct ChatTranscriptView: View {
                     onFork: onFork,
                     onCopy: onCopy
                 )
-                .equatable()
-                .transition(rowEntryTransition(for: transcriptMessage.message, now: now))
-                .id(transcriptMessage.renderID)
+
+                if windowsFarRows {
+                    ChatTranscriptWindowedRow(block: block, contentWidth: contentWidth)
+                        .equatable()
+                        .transition(rowEntryTransition(for: transcriptMessage.message, now: now))
+                        .id(transcriptMessage.renderID)
+                } else {
+                    block
+                        .equatable()
+                        .transition(rowEntryTransition(for: transcriptMessage.message, now: now))
+                        .id(transcriptMessage.renderID)
+                }
 
                 if let compressionReferenceCard,
                    compressionReferenceCard.afterRenderID == transcriptMessage.renderID {
@@ -757,6 +774,132 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
             showsThinkingAndToolCards &&
             toolCallAnchorMessageID == transcriptMessage.anchorID &&
             !liveToolCalls.isEmpty
+    }
+}
+
+/// A transcript row with Window Long Chats on: the block while it is near
+/// the screen, else a spacer of the height the block measured for its
+/// current layout (`ChatTranscriptWindowPolicy`). The band, the measurement
+/// and the reader's expansions are this row's own state, so a row mounting
+/// or collapsing re-runs only itself.
+private struct ChatTranscriptWindowedRow: View, Equatable {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.chatDisclosureToggled) private var transcriptDisclosureToggled
+    @State private var isFar = false
+    @State private var isSticky = false
+    @State private var measured: ChatTranscriptWindowPolicy.Measurement<ChatTranscriptRowLayoutKey>?
+    /// `measured` once it has held for `settleDelay`. A block can re-measure
+    /// a layout pass after its first report (a reply's selection host settles
+    /// its size a pass later), and only its settled height may stand in for it.
+    @State private var settled: ChatTranscriptWindowPolicy.Measurement<ChatTranscriptRowLayoutKey>?
+    private static let settleDelay: Duration = .milliseconds(150)
+
+    let block: ChatTranscriptMessageBlock
+    let contentWidth: CGFloat
+
+    static func == (lhs: ChatTranscriptWindowedRow, rhs: ChatTranscriptWindowedRow) -> Bool {
+        lhs.block == rhs.block && lhs.contentWidth == rhs.contentWidth
+    }
+
+    var body: some View {
+        let key = ChatTranscriptRowLayoutKey(block: block, contentWidth: contentWidth, dynamicTypeSize: dynamicTypeSize)
+        Group {
+            if let height = ChatTranscriptWindowPolicy.collapsedHeight(
+                isFar: isFar, isSticky: isSticky, measured: settled, key: key
+            ) {
+                // A block that yields nothing collapses to nothing, so the
+                // stack adds no spacing for it either way.
+                if height > 0 {
+                    Color.clear
+                        .frame(height: height)
+                        .accessibilityHidden(true)
+                }
+            } else {
+                block
+                    .equatable()
+                    .chatDisclosureToggled {
+                        isSticky = true
+                        transcriptDisclosureToggled()
+                    }
+                    .onGeometryChange(for: ChatTranscriptWindowPolicy.Measurement<ChatTranscriptRowLayoutKey>.self) { geometry in
+                        ChatTranscriptWindowPolicy.Measurement(key: key, height: geometry.size.height)
+                    } action: { measurement in
+                        measured = measurement
+                    }
+                    .task(id: measured) {
+                        try? await Task.sleep(for: Self.settleDelay)
+                        guard !Task.isCancelled else { return }
+                        settled = measured
+                    }
+            }
+        }
+        .onGeometryChange(for: ChatTranscriptWindowPolicy.Band.self) { geometry in
+            ChatTranscriptWindowPolicy.band(
+                rowHeight: geometry.size.height,
+                viewport: geometry.bounds(of: .scrollView(axis: .vertical))
+            )
+        } action: { band in
+            // Swapping a far row for its spacer is invisible; never animate it.
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                isFar = ChatTranscriptWindowPolicy.isFar(after: band, wasFar: isFar)
+            }
+        }
+    }
+}
+
+/// What a settled row's height depends on. It leaves out `loadedIndex`, which
+/// every prepend shifts, and the flags every row receives (stream active,
+/// listening, cached, regenerate/edit/fork in flight): those change menu
+/// items and never a height, and keying on them would remount every row when
+/// a stream starts. The stream flag counts only for rows with live state.
+private struct ChatTranscriptRowLayoutKey: Equatable {
+    let renderID: String
+    let anchorID: String
+    let message: ChatMessage
+    let foldState: TranscriptTurnFoldRowState?
+    let isTerminalReply: Bool
+    let showsThinkingAndToolCards: Bool
+    let reasoningGroups: [ReasoningGroup]
+    let toolCallGroups: [ToolCallGroup]
+    let transcriptSpacing: CGFloat
+    let localAttachmentPreviews: [String: Data]?
+    let liveReasoningText: String
+    let reasoningAnchorMessageID: String?
+    let liveReasoningStreamID: String?
+    let liveToolCalls: [ToolCall]
+    let toolCallAnchorMessageID: String?
+    let streamingAssistantMessageID: String?
+    let liveTokensPerSecond: Double?
+    let liveRowHasActiveStream: Bool
+    let contentWidth: CGFloat
+    let dynamicTypeSize: DynamicTypeSize
+
+    init(block: ChatTranscriptMessageBlock, contentWidth: CGFloat, dynamicTypeSize: DynamicTypeSize) {
+        renderID = block.transcriptMessage.renderID
+        anchorID = block.transcriptMessage.anchorID
+        message = block.transcriptMessage.message
+        foldState = block.foldState
+        isTerminalReply = block.isTerminalReply
+        showsThinkingAndToolCards = block.showsThinkingAndToolCards
+        reasoningGroups = block.reasoningGroups
+        toolCallGroups = block.toolCallGroups
+        transcriptSpacing = block.transcriptSpacing
+        localAttachmentPreviews = block.localAttachmentPreviews
+        liveReasoningText = block.liveReasoningText
+        reasoningAnchorMessageID = block.reasoningAnchorMessageID
+        liveReasoningStreamID = block.liveReasoningStreamID
+        liveToolCalls = block.liveToolCalls
+        toolCallAnchorMessageID = block.toolCallAnchorMessageID
+        streamingAssistantMessageID = block.streamingAssistantMessageID
+        liveTokensPerSecond = block.liveTokensPerSecond
+        let hasLiveState = block.reasoningAnchorMessageID != nil
+            || block.toolCallAnchorMessageID != nil
+            || block.streamingAssistantMessageID != nil
+        liveRowHasActiveStream = hasLiveState && block.hasActiveStream
+        self.contentWidth = contentWidth
+        self.dynamicTypeSize = dynamicTypeSize
     }
 }
 

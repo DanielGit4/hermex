@@ -83,6 +83,7 @@ struct SettingsView: View {
     @AppStorage(ChatTranscriptDisplaySettings.showsResponseSpeedKey) private var showsResponseSpeed = false
     @AppStorage(ChatTranscriptDisplaySettings.wrapsCodeBlockLinesKey) private var wrapsCodeBlockLines = false
     @AppStorage(ChatTranscriptDisplaySettings.rtlChatLayoutEnabledKey) private var rtlChatLayoutEnabled = ChatTranscriptDisplaySettings.rtlChatLayoutDefaultEnabled
+    @AppStorage(ChatTranscriptDisplaySettings.windowsTranscriptRowsKey) private var windowsTranscriptRows = ChatTranscriptDisplaySettings.defaultWindowsTranscriptRows
     @AppStorage(StreamedTextAnimationSettings.isEnabledKey) private var isStreamedTextAnimationEnabled = true
     @AppStorage(HeaderLogoColor.storageKey) private var headerLogoColorHex = HeaderLogoColor.defaultHex
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
@@ -686,6 +687,14 @@ struct SettingsView: View {
                     .buttonStyle(.plain)
 
                     SettingsFootnote("Debug builds only. Replay a canned reply and tune the streamed-text fade feel live.")
+
+                    SettingsToggleRow(
+                        title: "Window Long Chats",
+                        systemImage: "rectangle.split.1x2",
+                        isOn: $windowsTranscriptRows
+                    )
+
+                    SettingsFootnote("Spike: lays out only the messages near the screen. Applies to chats opened after the change.")
                 }
                 #endif
 

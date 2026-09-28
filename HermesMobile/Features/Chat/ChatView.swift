@@ -1456,6 +1456,7 @@ struct ChatView: View {
             transcriptRelayoutScrollToken: viewModel.transcriptRelayoutScrollToken,
             bottomAnchorID: bottomAnchorID,
             transcriptSpacing: transcriptSpacing,
+            windowsRows: viewModel.windowsTranscriptRows,
             composerHeight: composerHeight,
             composerChromeHeight: composerChromeHeight,
             localAttachmentPreviews: viewModel.localAttachmentPreviews,

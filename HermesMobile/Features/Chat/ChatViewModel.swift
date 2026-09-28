@@ -224,6 +224,9 @@ final class ChatViewModel {
     @ObservationIgnored private var messagesStructureRevision = 0
     /// True only while `flushAssistantTokens` grows the streaming reply's text.
     @ObservationIgnored private var isGrowingStreamingReply = false
+    /// Window Long Chats, read once when the chat screen opens; its transcript
+    /// reads it from here too. Tests override it.
+    @ObservationIgnored var windowsTranscriptRows = ChatTranscriptDisplaySettings.windowsTranscriptRows
     @ObservationIgnored private var turnFoldsMemo: (key: TurnDerivationKey, folds: TranscriptTurnFolds)?
     @ObservationIgnored private var terminalReplyRenderIDsMemo: (key: TurnDerivationKey, renderIDs: Set<String>)?
     /// Memoized transcript mapping, recomputed once whenever `messages` or

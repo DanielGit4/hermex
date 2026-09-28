@@ -179,6 +179,66 @@ enum ChatScrollPolicy {
     }
 }
 
+/// Which transcript rows stay laid out with Settings → Developer "Window Long
+/// Chats" on. A far row collapses to a spacer of the height it measured for
+/// exactly its current layout, so the transcript's height never changes and
+/// no row is ever placed by an estimate, which is what broke the lazy stack.
+enum ChatTranscriptWindowPolicy {
+    /// Where a row sits relative to the viewport.
+    enum Band: Equatable {
+        /// On screen or within one viewport height of it.
+        case near
+        /// One to two viewport heights away: the row keeps its current state.
+        case between
+        /// More than two viewport heights away.
+        case far
+    }
+
+    struct Measurement<Key: Equatable>: Equatable {
+        let key: Key
+        let height: CGFloat
+    }
+
+    /// VoiceOver moves through accessibility elements, which spacers lack, so
+    /// it would skip collapsed history: every row stays laid out while it runs.
+    static func windowsRows(switchOn: Bool, voiceOverRunning: Bool) -> Bool {
+        switchOn && !voiceOverRunning
+    }
+
+    /// `viewport` is the scroll view's visible bounds in the row's own space;
+    /// nil, outside a scroll view, counts as near.
+    static func band(rowHeight: CGFloat, viewport: CGRect?) -> Band {
+        guard let viewport else { return .near }
+        let gap = max(0, viewport.minY - rowHeight, -viewport.maxY)
+        if gap <= viewport.height { return .near }
+        return gap > 2 * viewport.height ? .far : .between
+    }
+
+    /// A row mounts within one viewport height and collapses only past two,
+    /// so one near the edge does not flip on every scroll step.
+    static func isFar(after band: Band, wasFar: Bool) -> Bool {
+        switch band {
+        case .near: return false
+        case .far: return true
+        case .between: return wasFar
+        }
+    }
+
+    /// The spacer height for a row, or nil to keep it laid out: while it is
+    /// not far, once the reader expanded something in it (`isSticky`: that
+    /// state lives in the row and a remount would lose it), and until it has
+    /// a measurement taken for exactly `key`.
+    static func collapsedHeight<Key: Equatable>(
+        isFar: Bool,
+        isSticky: Bool,
+        measured: Measurement<Key>?,
+        key: Key
+    ) -> CGFloat? {
+        guard isFar, !isSticky, let measured, measured.key == key else { return nil }
+        return measured.height
+    }
+}
+
 /// Transcript disclosure controls (reasoning blocks, tool cards, tool groups,
 /// turn folds) call this right before they toggle so the transcript can pin
 /// the reader's offset and suspend follow scrolls through the size change.
