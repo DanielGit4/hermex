@@ -83,12 +83,20 @@ final class SessionListGroupingTimingTests: XCTestCase {
         let afterContext = try Self.makeContext()
         let viewModel = SessionListViewModel(server: Self.serverURL, client: client)
         var after: [Duration] = []
-        for _ in 0..<runs {
+        // Cached rows each steady-state refresh (runs 2...) wrote a new `cachedAt` into.
+        var rewritten: [Int] = []
+        var stamps: [String: Date] = [:]
+        for run in 0..<runs {
             server.clearRequests()
             let start = clock.now
             let loaded = await viewModel.load(modelContext: afterContext)
             after.append(clock.now - start)
             XCTAssertTrue(loaded)
+            let rows = try afterContext.fetch(FetchDescriptor<CachedSession>())
+            if run > 0 {
+                rewritten.append(rows.filter { stamps[$0.cacheKey] != $0.cachedAt }.count)
+            }
+            stamps = Dictionary(uniqueKeysWithValues: rows.map { ($0.cacheKey, $0.cachedAt) })
         }
         let afterRequests = server.requests
         let afterCached = try CacheStore.cachedSessions(serverURL: Self.serverURL, in: afterContext)
@@ -107,7 +115,8 @@ final class SessionListGroupingTimingTests: XCTestCase {
                 + "load+cache median \(Self.format(Self.median(before))), first \(Self.format(before[0])) (\(runs) runs)",
             "TIMING cron flood after: requests \(Self.describe(afterRequests)), total \(afterRows) rows \(afterBytes) bytes; "
                 + "kept \(viewModel.sessions.count) rows; cached \(afterCached.count) (cron \(afterCached.filter(\.isCronSession).count)); "
-                + "load+apply+cache median \(Self.format(Self.median(after))), first \(Self.format(after[0])) (\(runs) runs)",
+                + "load+apply+cache median \(Self.format(Self.median(after))), first \(Self.format(after[0])) (\(runs) runs); "
+                + "rows rewritten per steady-state refresh \(rewritten)",
             "TIMING cron flood upgrade: a PR #14 cache of \(beforeCached.count) rows holds \(upgradedCached.count) "
                 + "(cron \(upgradedCached.filter(\.isCronSession).count)) after one new load"
         ]

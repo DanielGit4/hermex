@@ -1148,3 +1148,226 @@ extension CacheStoreTests {
         XCTAssertEqual(upgraded.messages.map(\.content), messages.map(\.content))
     }
 }
+
+// MARK: - Session list refreshes write only what changed
+
+@MainActor
+extension CacheStoreTests {
+    func testCacheSessionsLeavesAnUnchangedListUnwrittenAndUnsaved() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let firstCachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+
+        try CacheStore.cacheSessions(try refreshList(), serverURL: serverURL, in: context, cachedAt: firstCachedAt)
+
+        // Identical list inside the refresh interval: no row moves, nothing saves.
+        let saves = SaveCounter(context)
+        let soon = firstCachedAt.addingTimeInterval(10 * 60)
+        try CacheStore.cacheSessions(try refreshList(), serverURL: serverURL, in: context, cachedAt: soon)
+
+        XCTAssertEqual(saves.count, 0, "An unchanged session list refresh must not save")
+        XCTAssertFalse(context.hasChanges)
+        XCTAssertEqual(
+            try cachedAtBySessionID(in: context),
+            ["full": firstCachedAt, "b": firstCachedAt, "c": firstCachedAt]
+        )
+    }
+
+    func testCacheSessionsRewritesOnlyTheRowWhoseFieldChanged() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let firstCachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+        let edited = firstCachedAt.addingTimeInterval(10 * 60)
+
+        try CacheStore.cacheSessions(try refreshList(), serverURL: serverURL, in: context, cachedAt: firstCachedAt)
+        try CacheStore.cacheSessions(
+            try refreshList(messageCountOfB: 5),
+            serverURL: serverURL,
+            in: context,
+            cachedAt: edited
+        )
+
+        let storeContext = ModelContext(context.container)
+        XCTAssertEqual(
+            try cachedAtBySessionID(in: storeContext),
+            ["full": firstCachedAt, "b": edited, "c": firstCachedAt]
+        )
+        let changed = try XCTUnwrap(fetchCachedSessions(in: storeContext).first { $0.sessionID == "b" })
+        XCTAssertEqual(changed.messageCount, 5)
+        XCTAssertEqual(changed.expiresAt, edited.addingTimeInterval(CachePolicy.ttl))
+    }
+
+    func testCacheSessionsDeletesMissingRowsWhenEveryOtherRowIsUnchanged() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let firstCachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+        let soon = firstCachedAt.addingTimeInterval(10 * 60)
+
+        try CacheStore.cacheSessions(try refreshList(), serverURL: serverURL, in: context, cachedAt: firstCachedAt)
+        try CacheStore.cacheSessions(
+            try refreshList().filter { $0.sessionId != "c" },
+            serverURL: serverURL,
+            in: context,
+            cachedAt: soon
+        )
+
+        // The delete must reach the store, so the refresh still saved.
+        XCTAssertEqual(
+            try cachedAtBySessionID(in: ModelContext(context.container)),
+            ["full": firstCachedAt, "b": firstCachedAt]
+        )
+    }
+
+    func testCacheSessionsRestampsUnchangedRowsAfterTheRefreshInterval() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let firstCachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+        let later = firstCachedAt.addingTimeInterval(CachePolicy.rowRefreshInterval)
+
+        try CacheStore.cacheSessions(try refreshList(), serverURL: serverURL, in: context, cachedAt: firstCachedAt)
+        try CacheStore.cacheSessions(try refreshList(), serverURL: serverURL, in: context, cachedAt: later)
+
+        let rows = try fetchCachedSessions(in: ModelContext(context.container))
+        XCTAssertEqual(rows.count, 3)
+        for row in rows {
+            XCTAssertEqual(row.cachedAt, later, row.sessionID)
+            XCTAssertEqual(row.expiresAt, later.addingTimeInterval(CachePolicy.ttl), row.sessionID)
+        }
+    }
+
+    func testCacheSessionsKeepsExpiredRowsTheRefreshRestamps() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let firstCachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+        let expiredNow = firstCachedAt.addingTimeInterval(CachePolicy.ttl + 1)
+
+        try CacheStore.cacheSessions(try refreshList(), serverURL: serverURL, in: context, cachedAt: firstCachedAt)
+        try CacheStore.cacheSessions(try refreshList(), serverURL: serverURL, in: context, cachedAt: expiredNow)
+
+        let cached = try XCTUnwrap(fetchCachedSessions(in: context).first { $0.sessionID == "b" })
+        XCTAssertEqual(cached.expiresAt, expiredNow.addingTimeInterval(CachePolicy.ttl))
+        XCTAssertEqual(
+            Set(try CacheStore.cachedSessions(serverURL: serverURL, in: context, now: expiredNow).compactMap(\.sessionId)),
+            ["full", "b", "c"]
+        )
+    }
+
+    /// The list a phone with ~890 cached sessions refreshes: an identical
+    /// response inside the refresh interval must not rewrite any row.
+    func testCacheSessionsRewritesNoRowOfAnUnchangedRealSizeList() throws {
+        let context = try makeContext()
+        let serverURL = URL(string: "https://example.test")!
+        let firstCachedAt = Date(timeIntervalSince1970: 1_770_000_000)
+
+        try CacheStore.cacheSessions(try realSizeList(), serverURL: serverURL, in: context, cachedAt: firstCachedAt)
+        try CacheStore.cacheSessions(
+            try realSizeList(),
+            serverURL: serverURL,
+            in: context,
+            cachedAt: firstCachedAt.addingTimeInterval(5 * 60)
+        )
+
+        let rows = try fetchCachedSessions(in: context)
+        XCTAssertEqual(rows.count, 890)
+        XCTAssertEqual(rows.filter { $0.cachedAt != firstCachedAt }.count, 0, "Rows rewritten by an unchanged refresh")
+    }
+
+    /// Three rows; "full" sets every field `CachedSession` stores.
+    private func refreshList(messageCountOfB: Int = 4) throws -> [SessionSummary] {
+        try XCTUnwrap(decodeSessions("""
+        {
+          "sessions": [
+            {
+              "session_id": "full", "title": "Every field", "workspace": "/srv/app", "model": "gpt-5",
+              "model_provider": "openai", "message_count": 12, "created_at": 1769990000.25,
+              "updated_at": 1769999000.5, "last_message_at": 1770000000.75, "pinned": true, "archived": false,
+              "project_id": "p-app", "profile": "opensource", "input_tokens": 1200, "output_tokens": 340,
+              "estimated_cost": 0.0123, "active_stream_id": "stream-1", "is_streaming": true,
+              "is_cli_session": false, "user_message_count": 6, "has_pending_user_message": true,
+              "pending_started_at": 1770000001.5, "worktree_path": "/srv/app/.worktrees/full",
+              "source_tag": "webui", "raw_source": "webui", "session_source": "webui", "source_label": "WebUI",
+              "parent_session_id": "root", "relationship_type": "fork", "read_only": false,
+              "is_read_only": false, "handoff_state": "active", "handoff_platform": "telegram"
+            },
+            {"session_id": "b", "title": "Beta", "message_count": \(messageCountOfB), "last_message_at": 1769990000},
+            {"session_id": "c", "title": "Gamma", "last_message_at": 1769980000}
+          ]
+        }
+        """).sessions)
+    }
+
+    /// 890 rows shaped like a real all-profiles list: 680 Telegram chats, 200
+    /// cron runs and 10 WebUI chats, with profiles cycling across them.
+    private func realSizeList() throws -> [SessionSummary] {
+        let profiles = ["default", "opensource", "openai_sol"]
+        let telegram: [[String: Any]] = (0..<680).map { index in
+            [
+                "session_id": "tg-\(index)",
+                "title": "Telegram chat \(index)",
+                "message_count": 30,
+                "last_message_at": 1_770_000_000 - Double(index) * 7_200,
+                "is_cli_session": true,
+                "raw_source": "telegram",
+                "source_tag": "telegram",
+                "session_source": "messaging",
+                "source_label": "Telegram"
+            ]
+        }
+        let cron: [[String: Any]] = (0..<200).map { index in
+            let updatedAt = 1_769_000_000 - Double(index) * 3_600
+            return [
+                "session_id": "cron_job_\(index)",
+                "title": "Nightly job \(index % 4)",
+                "message_count": 2,
+                "created_at": updatedAt - 30,
+                "updated_at": updatedAt,
+                "source_tag": "cron",
+                "project_id": "p-cron"
+            ]
+        }
+        let webUI: [[String: Any]] = (0..<10).map { index in
+            [
+                "session_id": "webui-\(index)",
+                "title": "WebUI chat \(index)",
+                "message_count": 12,
+                "last_message_at": 1_770_000_000 - Double(index) * 60,
+                "session_source": "webui",
+                "workspace": "/Users/daniel/workspace/project-\(index % 4)"
+            ]
+        }
+        let rows = (telegram + cron + webUI).enumerated().map { index, row in
+            row.merging(["profile": profiles[index % profiles.count]]) { _, profile in profile }
+        }
+        let data = try JSONSerialization.data(withJSONObject: ["sessions": rows])
+        let sessions = try XCTUnwrap(decodeSessions(String(decoding: data, as: UTF8.self)).sessions)
+        XCTAssertEqual(sessions.count, 890)
+        return sessions
+    }
+
+    private func cachedAtBySessionID(in context: ModelContext) throws -> [String: Date] {
+        try fetchCachedSessions(in: context).reduce(into: [:]) { $0[$1.sessionID] = $1.cachedAt }
+    }
+}
+
+/// Counts `ModelContext.didSave` posts for one context. The cache saves on the
+/// main actor and the notification is posted synchronously from `save()`.
+private final class SaveCounter: @unchecked Sendable {
+    private(set) var count = 0
+    private var observer: NSObjectProtocol?
+
+    init(_ context: ModelContext) {
+        observer = NotificationCenter.default.addObserver(
+            forName: ModelContext.didSave,
+            object: context,
+            queue: nil
+        ) { [weak self] _ in
+            self?.count += 1
+        }
+    }
+
+    deinit {
+        if let observer {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+}
