@@ -1281,6 +1281,9 @@ enum ViewBodyProbe {
         case turnFoldsDerive, terminalRepliesDerive
         /// Not a body: the chat screen playing one enabled streaming pulse.
         case streamingHapticPulse
+        /// Not a body: a streamed word replacing only the live reply's
+        /// transcript entry (Window Long Chats).
+        case liveRowUpdate
     }
 
     #if DEBUG
