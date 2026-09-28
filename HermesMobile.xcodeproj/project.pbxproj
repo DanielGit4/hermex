@@ -164,6 +164,7 @@
 		1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */; };
 		B23000000000000000000001 /* SessionSearchExcerpt.swift in Sources */ = {isa = PBXBuildFile; fileRef = B23000000000000000000002 /* SessionSearchExcerpt.swift */; };
 		1A2B3C4D5E6F7000000000D1 /* SessionListViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */; };
+		5E55A77E0000000000000001 /* SessionAttentionWatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E55A77E0000000000000002 /* SessionAttentionWatch.swift */; };
 		A04300000000000000000001 /* SessionListComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000011 /* SessionListComponents.swift */; };
 		A10900000000000000000001 /* SessionNavigationState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10900000000000000000011 /* SessionNavigationState.swift */; };
 		A04300000000000000000002 /* SessionListActionConfirmations.swift in Sources */ = {isa = PBXBuildFile; fileRef = A04300000000000000000012 /* SessionListActionConfirmations.swift */; };
@@ -781,6 +782,7 @@
 		1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionRowView.swift; sourceTree = "<group>"; };
 		B23000000000000000000002 /* SessionSearchExcerpt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionSearchExcerpt.swift; sourceTree = "<group>"; };
 		1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListViewModel.swift; sourceTree = "<group>"; };
+		5E55A77E0000000000000002 /* SessionAttentionWatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionAttentionWatch.swift; sourceTree = "<group>"; };
 		A04300000000000000000011 /* SessionListComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListComponents.swift; sourceTree = "<group>"; };
 		A10900000000000000000011 /* SessionNavigationState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionNavigationState.swift; sourceTree = "<group>"; };
 		A04300000000000000000012 /* SessionListActionConfirmations.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionListActionConfirmations.swift; sourceTree = "<group>"; };
@@ -1727,6 +1729,7 @@
 				1A2B3C4D5E6F7000000000D2 /* SessionRowView.swift */,
 				B23000000000000000000002 /* SessionSearchExcerpt.swift */,
 				1A2B3C4D5E6F7000000000D3 /* SessionListViewModel.swift */,
+				5E55A77E0000000000000002 /* SessionAttentionWatch.swift */,
 				A04300000000000000000011 /* SessionListComponents.swift */,
 				A10900000000000000000011 /* SessionNavigationState.swift */,
 				A04300000000000000000012 /* SessionListActionConfirmations.swift */,
@@ -2606,6 +2609,7 @@
 				1A2B3C4D5E6F7000000000D0 /* SessionRowView.swift in Sources */,
 				B23000000000000000000001 /* SessionSearchExcerpt.swift in Sources */,
 				1A2B3C4D5E6F7000000000D1 /* SessionListViewModel.swift in Sources */,
+				5E55A77E0000000000000001 /* SessionAttentionWatch.swift in Sources */,
 				A04300000000000000000001 /* SessionListComponents.swift in Sources */,
 				A10900000000000000000001 /* SessionNavigationState.swift in Sources */,
 				A04300000000000000000002 /* SessionListActionConfirmations.swift in Sources */,

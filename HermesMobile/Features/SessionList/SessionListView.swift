@@ -344,7 +344,9 @@ struct SessionListView: View {
                 await SessionListReturnRefresh.run(
                     refreshSessions: { await refreshSessionsAndActiveProfile() },
                     monitorTaskID: { activeSessionMonitorTaskID },
-                    refreshActiveRows: { taskID in await refreshActiveSessionRows(taskID) }
+                    refreshActiveRows: { taskID in
+                        await refreshActiveSessionRows(taskID, forceAttentionProbes: true)
+                    }
                 )
             }
             .onAppear {
@@ -1200,7 +1202,8 @@ struct SessionListView: View {
             hasActiveRows: !activeSessions.isEmpty,
             isViewingCachedData: viewModel.isViewingCachedData,
             isRegularWidth: horizontalSizeClass == .regular,
-            destination: navigationState.destination
+            destination: navigationState.destination,
+            isSceneActive: scenePhase == .active
         )
     }
 
@@ -1319,7 +1322,13 @@ struct SessionListView: View {
         returnRefreshID = UUID()
     }
 
+    /// Polls while `shouldPoll` holds, with the session events stream open
+    /// so quiet rows need no attention probes.
     private func monitorActiveSessionRows() async {
+        guard activeSessionMonitorTaskID.shouldPoll else { return }
+        viewModel.startSessionEvents()
+        defer { viewModel.stopSessionEvents() }
+
         while !Task.isCancelled {
             let taskID = activeSessionMonitorTaskID
             guard taskID.shouldPoll else { return }
@@ -1337,9 +1346,13 @@ struct SessionListView: View {
     }
 
     /// One poll tick: checks the active rows' streams and attention probes.
-    private func refreshActiveSessionRows(_ taskID: ActiveSessionMonitorTaskID) async {
+    private func refreshActiveSessionRows(
+        _ taskID: ActiveSessionMonitorTaskID,
+        forceAttentionProbes: Bool = false
+    ) async {
         let refreshResult = await viewModel.refreshActiveSessionStatesIfNeeded(
             streamIDs: taskID.streamIDs,
+            forceAttentionProbes: forceAttentionProbes,
             modelContext: modelContext
         )
         if refreshResult == .reloaded || refreshResult == .failed {
@@ -1863,10 +1876,11 @@ private struct SessionSearchTaskID: Hashable {
 
 /// Identity for the session list's active-row poll. SwiftUI restarts the poll
 /// whenever this changes, and the poll runs only while `shouldPoll` holds.
-/// On compact width a pushed chat or utility screen covers the list, so the
-/// poll pauses until the user returns; `SessionListReturnRefresh` reloads the
-/// rows and runs one tick then. Scheduled sessions shows live rows from the same view model,
-/// so it keeps the poll running.
+/// It pauses while the app is not active. On compact width a pushed chat or
+/// utility screen covers the list, so the poll pauses until the user returns;
+/// `SessionListReturnRefresh` reloads the rows and runs one tick then.
+/// Scheduled sessions shows live rows from the same view model, so it keeps
+/// the poll running.
 struct ActiveSessionMonitorTaskID: Hashable {
     /// Wait between polls. The open chat watches its own run over SSE, so the
     /// list only needs badges and the Working-to-done switch reasonably fresh.
@@ -1877,23 +1891,26 @@ struct ActiveSessionMonitorTaskID: Hashable {
     let isViewingCachedData: Bool
     let isListVisible: Bool
     let isRegularWidth: Bool
+    let isSceneActive: Bool
 
     init(
         streamIDs: [String],
         hasActiveRows: Bool,
         isViewingCachedData: Bool,
         isRegularWidth: Bool,
-        destination: SessionNavigationDestination?
+        destination: SessionNavigationDestination?,
+        isSceneActive: Bool
     ) {
         self.streamIDs = streamIDs
         self.hasActiveRows = hasActiveRows
         self.isViewingCachedData = isViewingCachedData
         self.isRegularWidth = isRegularWidth
+        self.isSceneActive = isSceneActive
         isListVisible = isRegularWidth || destination == nil || destination == .utility(.scheduled)
     }
 
     var shouldPoll: Bool {
-        hasActiveRows && isListVisible && !isViewingCachedData
+        hasActiveRows && isListVisible && !isViewingCachedData && isSceneActive
     }
 
     /// Whether a return to the list needs an immediate tick. Only compact width

@@ -3294,6 +3294,158 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertEqual(groups.totalScheduledCount, 9)
     }
 
+    /// The list's body asks for its groups on every pass. Until an input of
+    /// the grouping changes it gets the groups it already has, the same
+    /// storage rather than a regrouped copy, whatever else moved.
+    @MainActor
+    func testSessionListGroupsAreReusedUntilAnInputChanges() async throws {
+        let viewModel = try makeViewModel { request in
+            switch request.url?.path {
+            case "/api/sessions":
+                return apiTestJSONResponse("""
+                {"sessions": [
+                  {"session_id": "working", "title": "Working", "last_message_at": 200, "active_stream_id": "stream-1"},
+                  {"session_id": "done", "title": "Done", "last_message_at": 100},
+                  {"session_id": "cron_1", "title": "Nightly", "updated_at": 50}
+                ]}
+                """, for: request)
+            case "/api/chat/stream/status":
+                return apiTestJSONResponse(#"{"active": true}"#, for: request)
+            case "/api/approval/pending":
+                return apiTestJSONResponse(#"{"pending": {"approval_id": "ap-1"}, "pending_count": 1}"#, for: request)
+            case "/api/clarify/pending":
+                return apiTestJSONResponse(#"{"pending": null}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.load()
+
+        let first = viewModel.sessionListGroups(searchText: "", selectedProjectID: nil)
+        let second = viewModel.sessionListGroups(searchText: "  ", selectedProjectID: nil)
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: ["stream-1"])
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["working": .approval])
+        let done = try XCTUnwrap(viewModel.sessions.first { $0.sessionId == "done" })
+        viewModel.toggleUnread(done)
+        XCTAssertTrue(viewModel.isUnread(done))
+        let reloaded = await viewModel.load()
+        XCTAssertTrue(reloaded)
+        let third = viewModel.sessionListGroups(searchText: "", selectedProjectID: nil)
+
+        withExtendedLifetime((first, second, third)) {
+            XCTAssertEqual(first.ordinary.compactMap(\.sessionId), ["working", "done"])
+            XCTAssertEqual(first.scheduled.compactMap(\.sessionId), ["cron_1"])
+            XCTAssertEqual(Self.ordinaryStorage(of: second), Self.ordinaryStorage(of: first))
+            XCTAssertEqual(Self.ordinaryStorage(of: third), Self.ordinaryStorage(of: first))
+        }
+    }
+
+    /// Every input of the grouping recomputes it, to what a fresh grouping gives.
+    @MainActor
+    func testSessionListGroupsRecomputeForEachRealChange() async throws {
+        let counts = LockedSessionMutationRequestCounts()
+        let viewModel = try makeViewModel { request in
+            switch request.url?.path {
+            case "/api/sessions":
+                let added = counts.incrementLoadCount() > 1
+                    ? #",{"session_id": "gamma", "title": "Gamma", "last_message_at": 400}"#
+                    : ""
+                return apiTestJSONResponse("""
+                {"sessions": [
+                  {"session_id": "alpha", "title": "Alpha", "last_message_at": 300, "project_id": "p1"},
+                  {"session_id": "beta", "title": "Beta", "last_message_at": 200, "project_id": "p2", "profile": "work"},
+                  {"session_id": "cron_1", "title": "Nightly", "updated_at": 100}\(added)
+                ]}
+                """, for: request)
+            case "/api/sessions/search":
+                return apiTestJSONResponse("""
+                {"sessions": [{"session_id": "beta", "title": "Beta", "match_type": "content"}], "query": "needle", "count": 1}
+                """, for: request)
+            case "/api/profiles":
+                return apiTestJSONResponse("""
+                {"profiles": [{"name": "main", "is_default": true}, {"name": "work"}], "active": "main"}
+                """, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.load()
+        func ordinary(
+            _ searchText: String = "",
+            project: String? = nil,
+            profile: String? = nil
+        ) -> [String] {
+            viewModel.sessionListGroups(searchText: searchText, selectedProjectID: project, profileFilter: profile)
+                .ordinary.compactMap(\.sessionId)
+        }
+
+        XCTAssertEqual(ordinary(), ["alpha", "beta"])
+        XCTAssertEqual(ordinary("bet"), ["beta"])
+        XCTAssertEqual(ordinary(project: "p1"), ["alpha"])
+        XCTAssertEqual(ordinary(profile: "work"), ["beta"])
+        XCTAssertEqual(viewModel.sessionListGroups(searchText: "", selectedProjectID: nil).totalScheduledCount, 1)
+        XCTAssertEqual(
+            viewModel.sessionListGroups(
+                searchText: "",
+                selectedProjectID: nil,
+                automatedVisibility: AutomatedSessionVisibility(showsCron: false, showsCli: true)
+            ).totalScheduledCount,
+            0
+        )
+
+        // Rows that name no profile belong to the server's default profile.
+        XCTAssertEqual(ordinary(profile: "default"), ["alpha"])
+        await viewModel.loadActiveProfile()
+        XCTAssertEqual(ordinary(profile: "default"), [])
+        XCTAssertEqual(ordinary(profile: "main"), ["alpha"])
+
+        XCTAssertEqual(ordinary("needle"), [])
+        await viewModel.searchSessions(query: "needle", debounceNanoseconds: 0)
+        XCTAssertEqual(ordinary("needle"), ["beta"])
+        viewModel.clearSearchResults()
+        XCTAssertEqual(ordinary("needle"), [])
+
+        XCTAssertEqual(ordinary(), ["alpha", "beta"])
+        await viewModel.load()
+        XCTAssertEqual(ordinary(), ["gamma", "alpha", "beta"])
+    }
+
+    /// The cached paint and the live rows that replace it are different
+    /// inputs, even when the rows are equal.
+    @MainActor
+    func testSessionListGroupsRecomputeWhenLiveRowsReplaceTheCachedPaint() async throws {
+        let context = try makeContext()
+        try cacheCheckingRows(in: context)
+        let viewModel = try makeViewModel { request in
+            apiTestJSONResponse("""
+            {"sessions": [
+              {"session_id": "cached-one", "title": "Cached one", "last_message_at": 100},
+              {"session_id": "cached-two", "title": "Cached two", "last_message_at": 200}
+            ]}
+            """, for: request)
+        }
+        viewModel.showCachedSessions(modelContext: context)
+        XCTAssertTrue(viewModel.isCheckingCachedRows)
+        let cached = viewModel.sessionListGroups(searchText: "", selectedProjectID: nil)
+
+        await viewModel.load()
+        XCTAssertFalse(viewModel.isCheckingCachedRows)
+        let live = viewModel.sessionListGroups(searchText: "", selectedProjectID: nil)
+
+        withExtendedLifetime((cached, live)) {
+            XCTAssertEqual(cached.ordinary.compactMap(\.sessionId), ["cached-two", "cached-one"])
+            XCTAssertEqual(live.ordinary.compactMap(\.sessionId), ["cached-two", "cached-one"])
+            XCTAssertNotEqual(Self.ordinaryStorage(of: live), Self.ordinaryStorage(of: cached))
+        }
+    }
+
+    /// Where a grouping's ordinary rows live: equal only for the same groups.
+    private static func ordinaryStorage(of groups: SessionListGroups) -> UnsafeRawPointer? {
+        groups.ordinary.withUnsafeBufferPointer { UnsafeRawPointer($0.baseAddress) }
+    }
+
     @MainActor
     func testVisibleActiveSessionsMatchStreamingRowsOfVisibleSessions() async throws {
         let viewModel = try makeViewModel { request in

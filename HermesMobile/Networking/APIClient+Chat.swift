@@ -47,6 +47,25 @@ extension APIClient {
         )
     }
 
+    /// `chatStreamStatus` for every stream at once: each one's `active` flag
+    /// or error, in `streamIDs` order.
+    func chatStreamStatuses(streamIDs: [String]) async -> [Result<Bool?, Error>] {
+        await withTaskGroup(of: (Int, Result<Bool?, Error>).self) { group in
+            for (index, streamID) in streamIDs.enumerated() {
+                group.addTask {
+                    do {
+                        return (index, .success(try await self.chatStreamStatus(streamID: streamID).active))
+                    } catch {
+                        return (index, .failure(error))
+                    }
+                }
+            }
+            var statuses = [Result<Bool?, Error>?](repeating: nil, count: streamIDs.count)
+            for await (index, status) in group { statuses[index] = status }
+            return statuses.compactMap { $0 }
+        }
+    }
+
     func approvalPending(sessionID: String) async throws -> ApprovalPendingResponse {
         try await send(endpoint: .approvalPending(sessionID: sessionID), method: "GET")
     }

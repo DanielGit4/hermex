@@ -109,7 +109,9 @@ struct ProfileSwitchFailure: Sendable {
 @MainActor
 @Observable
 final class SessionListViewModel {
-    private(set) var sessions: [SessionSummary] = []
+    private(set) var sessions: [SessionSummary] = [] {
+        didSet { if sessions != oldValue { groupingRevision &+= 1 } }
+    }
     private(set) var isLoading = false
     private(set) var isCreatingSession = false
     private(set) var isCreatingProject = false
@@ -123,7 +125,9 @@ final class SessionListViewModel {
     /// that will replace them is still out. Unlike `isViewingCachedData`
     /// (offline), the server is expected to answer, so the list stays fully
     /// usable; only live state (streaming, attention, unread) is hidden.
-    private(set) var isCheckingCachedRows = false
+    private(set) var isCheckingCachedRows = false {
+        didSet { if isCheckingCachedRows != oldValue { groupingRevision &+= 1 } }
+    }
     private(set) var projects: [ProjectSummary] = []
     private(set) var errorMessage: String?
     private(set) var actionErrorMessage: String?
@@ -136,7 +140,9 @@ final class SessionListViewModel {
     private(set) var activeProfileDisplayName: String?
     private(set) var activeProfileModel: String?
     private(set) var activeProfileProvider: String?
-    private(set) var profileOptions: [ProfileSummary] = []
+    private(set) var profileOptions: [ProfileSummary] = [] {
+        didSet { if profileOptions != oldValue { groupingRevision &+= 1 } }
+    }
     /// The profile this client's server cookie (`hermes_profile`) selects, as
     /// last reported. `activeProfileName` is the user's pick, which New Chat
     /// and every screen reached from the list use; the two differ only while
@@ -164,11 +170,20 @@ final class SessionListViewModel {
     private(set) var attentionStatesBySessionID: [String: SessionRowAttentionState] = [:]
     private(set) var seenMessageTimes: [String: Double]
 
-    private(set) var remoteContentSearchSessionIDs: [String] = []
+    private(set) var remoteContentSearchSessionIDs: [String] = [] {
+        didSet { if remoteContentSearchSessionIDs != oldValue { groupingRevision &+= 1 } }
+    }
     /// `match_preview` per content-matched session from the last search, so a
     /// row can show why it matched. Empty against servers that omit the field.
     private(set) var remoteContentSearchExcerpts: [String: String] = [:]
-    private var activeRemoteSearchQuery: String?
+    private var activeRemoteSearchQuery: String? {
+        didSet { if activeRemoteSearchQuery != oldValue { groupingRevision &+= 1 } }
+    }
+    /// Bumped whenever an input of `sessionListGroups` other than its
+    /// arguments changes. Observed, so a body that got the stored groups still
+    /// redraws when one does.
+    private var groupingRevision = 0
+    @ObservationIgnored private var storedGroups: (key: GroupingKey, groups: SessionListGroups)?
     private var sessionOpenGeneration = 0
     /// The profile the list moved the server to, away from the pick, to reach
     /// a row or follow a chat. A profile reload that still finds the server
@@ -201,10 +216,20 @@ final class SessionListViewModel {
     private var firstReturnLoad: (revision: Int, sessionIDs: Set<String>)?
     private var returnRevision = 0
     private var activeLoadCount = 0
+    /// The list-wide session events stream, open while a monitor polls, and
+    /// what it says about which rows need probing. Made on first use.
+    @ObservationIgnored private var sessionEventsClient: SSEStreamingClient?
+    @ObservationIgnored private var attentionWatch = SessionAttentionWatch()
 
-    init(server: URL, client: APIClient? = nil, unreadStore: SessionUnreadStore = SessionUnreadStore()) {
+    init(
+        server: URL,
+        client: APIClient? = nil,
+        unreadStore: SessionUnreadStore = SessionUnreadStore(),
+        sessionEventsClient: SSEStreamingClient? = nil
+    ) {
         self.server = server
         self.unreadStore = unreadStore
+        self.sessionEventsClient = sessionEventsClient
         seenMessageTimes = unreadStore.load(for: server)
         let resolvedClient = client ?? APIClient(baseURL: server)
         self.client = resolvedClient
@@ -362,12 +387,23 @@ final class SessionListViewModel {
     /// ordinary rows. The Scheduled badge counts every non-archived cron row
     /// of the filtered profiles (#125: not narrowed by project or search); a
     /// messaging badge counts its platform's rows without the search query.
+    /// The list's body asks on every pass, so the last answer is kept until
+    /// an argument or `groupingRevision` changes.
     func sessionListGroups(
         searchText: String,
         selectedProjectID: String?,
         automatedVisibility: AutomatedSessionVisibility = .showAll,
         profileFilter: String? = nil
     ) -> SessionListGroups {
+        let key = GroupingKey(
+            revision: groupingRevision,
+            query: Self.normalizedSearchQuery(searchText),
+            selectedProjectID: selectedProjectID,
+            automatedVisibility: automatedVisibility,
+            profileFilter: profileFilter
+        )
+        if let storedGroups, storedGroups.key == key { return storedGroups.groups }
+
         let visible = visibleSessions(
             searchText: searchText,
             selectedProjectID: selectedProjectID,
@@ -375,7 +411,7 @@ final class SessionListViewModel {
             profileFilter: profileFilter
         )
         var messagingTotals: [String: Int]?
-        if !Self.normalizedSearchQuery(searchText).isEmpty {
+        if !key.query.isEmpty {
             var totals: [String: Int] = [:]
             for session in filteredSessions(
                 among: sessions,
@@ -388,7 +424,7 @@ final class SessionListViewModel {
             messagingTotals = totals
         }
 
-        return SessionListGroups(
+        let groups = SessionListGroups(
             partitioning: visible,
             totalScheduledCount: automatedVisibility.showsCron
                 ? sessions.filter {
@@ -397,6 +433,16 @@ final class SessionListViewModel {
                 : 0,
             messagingTotals: messagingTotals
         )
+        storedGroups = (key, groups)
+        return groups
+    }
+
+    private struct GroupingKey: Equatable {
+        let revision: Int
+        let query: String
+        let selectedProjectID: String?
+        let automatedVisibility: AutomatedSessionVisibility
+        let profileFilter: String?
     }
 
     // MARK: - Profiles in the list
@@ -768,34 +814,70 @@ final class SessionListViewModel {
         lastError == nil ? .unchanged : .failed
     }
 
+    /// Opens the session events stream for an active-row monitor. Monitors
+    /// overlap while SwiftUI swaps one poll task for the next, so the stream
+    /// closes only when the last one calls `stopSessionEvents()`.
+    func startSessionEvents() {
+        guard attentionWatch.retain() else { return }
+        openSessionEvents()
+    }
+
+    func stopSessionEvents() {
+        guard attentionWatch.release() else { return }
+        sessionEventsClient?.stop()
+    }
+
+    private func openSessionEvents() {
+        let events = sessionEventsClient ?? SSEClient()
+        sessionEventsClient = events
+        attentionWatch.opened()
+        let connection = attentionWatch.connection
+        events.start(url: client.sessionEventsURL) { [weak self] event in
+            guard let self, attentionWatch.receive(event, from: connection) else { return }
+            sessionEventsClient?.stop()
+        }
+    }
+
+    /// One monitor tick over the visible rows' streams: a stream that ended
+    /// reloads the list, otherwise the visible rows' attention is refreshed.
+    /// `forceAttentionProbes` asks about every visible row even while the
+    /// session events stream says nothing changed.
     @discardableResult
     func refreshActiveSessionStatesIfNeeded(
         streamIDs rawStreamIDs: [String],
+        forceAttentionProbes: Bool = false,
         modelContext: ModelContext? = nil
     ) async -> ActiveSessionStateRefreshResult {
         guard !isViewingCachedData, !isLoading else { return .unchanged }
+
+        switch attentionWatch.tick() {
+        case .none: break
+        case .close: sessionEventsClient?.stop()
+        case .reopen: openSessionEvents()
+        }
 
         let streamIDs = Self.normalizedStreamIDs(rawStreamIDs)
         guard !streamIDs.isEmpty else {
             return await load(modelContext: modelContext) ? .reloaded : loadFailureRefreshResult
         }
 
-        for streamID in streamIDs {
-            do {
-                let response = try await client.chatStreamStatus(streamID: streamID)
-                guard response.active == false else { continue }
+        // All checks go out at once; the first ended stream, 401 or
+        // cancellation in `streamIDs` order decides, as one by one did.
+        for status in await client.chatStreamStatuses(streamIDs: streamIDs) {
+            switch status {
+            case .success(let active):
+                guard active == false else { continue }
                 return await load(modelContext: modelContext) ? .reloaded : loadFailureRefreshResult
-            } catch {
+            case .failure(let error):
                 guard !isCancellationError(error) else { return .unchanged }
                 if case APIError.unauthorized = error {
                     lastError = error
                     return .failed
                 }
-                continue
             }
         }
 
-        return await refreshAttentionStates()
+        return await refreshAttentionStates(streamIDs: Set(streamIDs), force: forceAttentionProbes)
     }
 
     /// The attention state a row should show, or nil while nothing is pending.
@@ -891,22 +973,32 @@ final class SessionListViewModel {
         return timestamp
     }
 
-    /// One approval probe and one clarification probe per streaming row, on the
-    /// tick the caller already runs. Sessions without an active stream are never
-    /// probed, and there is no separate polling loop or timer. A row's two
-    /// probes go out together, so N streaming rows cost about N round trips per
-    /// tick instead of 2N.
-    private func refreshAttentionStates() async -> ActiveSessionStateRefreshResult {
+    /// One approval probe and one clarification probe per visible streaming
+    /// row that `attentionWatch` (or `force`) says may have changed, on the
+    /// tick the caller already runs. Rows outside `streamIDs` keep what they
+    /// showed. A row's two probes go out together, so N probed rows cost about
+    /// N round trips per tick instead of 2N.
+    private func refreshAttentionStates(
+        streamIDs: Set<String>,
+        force: Bool
+    ) async -> ActiveSessionStateRefreshResult {
         let streamingSessions = sessions.filter { SessionRowView.isActiveStreaming($0) }
         guard !streamingSessions.isEmpty else {
             clearAttentionStates()
             return .unchanged
         }
 
-        var refreshed: [String: SessionRowAttentionState] = [:]
+        let streamingSessionIDs = Set(streamingSessions.compactMap { Self.nonEmpty($0.sessionId) })
+        var refreshed = attentionStatesBySessionID.filter { streamingSessionIDs.contains($0.key) }
+        let generation = attentionWatch.generation
+        var answeredRuns: [(sessionID: String, streamID: String)] = []
 
         for session in streamingSessions {
-            guard let sessionID = Self.nonEmpty(session.sessionId) else { continue }
+            guard let sessionID = Self.nonEmpty(session.sessionId),
+                  let streamID = Self.nonEmpty(session.activeStreamId),
+                  streamIDs.contains(streamID),
+                  force || attentionWatch.needsProbe(sessionID: sessionID, streamID: streamID)
+            else { continue }
 
             async let pendingApproval = client.approvalPending(sessionID: sessionID)
             async let pendingClarification = client.clarifyPending(sessionID: sessionID)
@@ -951,8 +1043,10 @@ final class SessionListViewModel {
                 hasPendingApproval: hasPendingApproval,
                 hasPendingClarification: hasPendingClarification
             )
+            if probeErrors.isEmpty { answeredRuns.append((sessionID, streamID)) }
         }
 
+        attentionWatch.noteProbed(answeredRuns, at: generation, streamingSessionIDs: streamingSessionIDs)
         guard refreshed != attentionStatesBySessionID else { return .unchanged }
         attentionStatesBySessionID = refreshed
         return .unchanged
