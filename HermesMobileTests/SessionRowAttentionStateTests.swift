@@ -591,6 +591,202 @@ final class SessionRowAttentionStateTests: XCTestCase {
         XCTAssertEqual(viewModel.attentionStatesBySessionID, ["waiting": .approval])
     }
 
+    // MARK: - Monitor fan-out
+
+    /// While the session events stream is live, a tick with nothing new to
+    /// ask costs one status request per visible stream and no probes.
+    @MainActor
+    func testLiveEventsLeaveTwoQuietRowsAtOneStatusRequestEachPerTick() async throws {
+        let server = StreamingRowsServer()
+        let events = ScriptedSSEStreamingClient()
+        let viewModel = try makeViewModel(sessionEvents: events, handler: server.handle)
+        await viewModel.load()
+        viewModel.startSessionEvents()
+        events.emit(.heartbeat)
+        server.resetCounts()
+
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.fullTick, "new streams are probed once")
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .working, "b": .working])
+
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.statusOnlyTick)
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .working, "b": .working])
+        XCTAssertEqual(events.startedURLs.map(\.absoluteString), ["https://example.test/api/sessions/events"])
+    }
+
+    /// An approval raised before the server registered the subscription never
+    /// arrives as an event, so the tick after the first keepalive asks again.
+    @MainActor
+    func testFirstHeartbeatProbesEveryVisibleRowOnce() async throws {
+        let server = StreamingRowsServer()
+        let events = ScriptedSSEStreamingClient()
+        let viewModel = try makeViewModel(sessionEvents: events, handler: server.handle)
+        await viewModel.load()
+        viewModel.startSessionEvents()
+        server.resetCounts()
+
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.fullTick)
+
+        server.raiseApproval(for: "a")
+        events.emit(.heartbeat)
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.fullTick)
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .approval, "b": .working])
+
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.statusOnlyTick)
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .approval, "b": .working])
+    }
+
+    /// A streaming row outside the visible stream set is not asked about, and
+    /// keeps the badge it had.
+    @MainActor
+    func testHiddenStreamingRowIsNotProbedAndKeepsItsBadge() async throws {
+        let server = StreamingRowsServer()
+        let viewModel = try makeViewModel(sessionEvents: ScriptedSSEStreamingClient(), handler: server.handle)
+        await viewModel.load()
+        server.raiseApproval(for: "b")
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .working, "b": .approval])
+        server.resetCounts()
+
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: ["stream-a"])
+
+        XCTAssertEqual(
+            server.takeCounts(),
+            ["/api/chat/stream/status": 1, "/api/approval/pending": 1, "/api/clarify/pending": 1]
+        )
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .working, "b": .approval])
+    }
+
+    /// Steady state makes no probes; a `sessions_changed` makes the next tick
+    /// ask, so an approval or a question shows within one cycle.
+    @MainActor
+    func testAttentionRaisedWhileLiveShowsOnTheNextTick() async throws {
+        let server = StreamingRowsServer()
+        let events = ScriptedSSEStreamingClient()
+        let viewModel = try makeViewModel(sessionEvents: events, handler: server.handle)
+        await viewModel.load()
+        viewModel.startSessionEvents()
+        events.emit(.heartbeat)
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        server.resetCounts()
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.statusOnlyTick)
+
+        server.raiseApproval(for: "a")
+        events.emit(.sessionsChanged)
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .approval, "b": .working])
+
+        server.raiseClarification(for: "b")
+        events.emit(.sessionsChanged)
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .approval, "b": .input])
+
+        server.resetCounts()
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.statusOnlyTick)
+    }
+
+    /// Until a keepalive confirms the stream, and again after it fails, every
+    /// tick probes as it did before the stream existed. A failed stream is
+    /// reopened on a later tick.
+    @MainActor
+    func testWithoutALiveStreamEveryTickProbes() async throws {
+        let server = StreamingRowsServer()
+        let events = ScriptedSSEStreamingClient()
+        let viewModel = try makeViewModel(sessionEvents: events, handler: server.handle)
+        await viewModel.load()
+        viewModel.startSessionEvents()
+        server.resetCounts()
+
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.fullTick.mapValues { $0 * 2 })
+        server.raiseApproval(for: "a")
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .approval, "b": .working])
+
+        events.emit(.heartbeat)
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        server.resetCounts()
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.statusOnlyTick)
+
+        events.emit(.transportError("The network connection was lost."))
+        server.raiseClarification(for: "b")
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.fullTick)
+        XCTAssertEqual(viewModel.attentionStatesBySessionID, ["a": .approval, "b": .input])
+        XCTAssertEqual(events.startedURLs.count, 2, "the failed stream is reopened")
+    }
+
+    /// A stream that stops sending keepalives without reporting an error is
+    /// no longer trusted: ticks probe again and the stream is reopened.
+    @MainActor
+    func testSilentStreamFallsBackToProbing() async throws {
+        let server = StreamingRowsServer()
+        let events = ScriptedSSEStreamingClient()
+        let viewModel = try makeViewModel(sessionEvents: events, handler: server.handle)
+        await viewModel.load()
+        viewModel.startSessionEvents()
+        events.emit(.heartbeat)
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        server.resetCounts()
+
+        for _ in 0..<5 {
+            await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        }
+
+        XCTAssertGreaterThan(server.takeCounts()["/api/approval/pending", default: 0], 0)
+        XCTAssertEqual(events.startedURLs.count, 2)
+    }
+
+    /// The return to the list and the restart after the app becomes active
+    /// force one probe of every visible row, live stream or not.
+    @MainActor
+    func testForcedTickProbesEveryVisibleRowWhileLive() async throws {
+        let server = StreamingRowsServer()
+        let events = ScriptedSSEStreamingClient()
+        let viewModel = try makeViewModel(sessionEvents: events, handler: server.handle)
+        await viewModel.load()
+        viewModel.startSessionEvents()
+        events.emit(.heartbeat)
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        server.resetCounts()
+        await viewModel.refreshActiveSessionStatesIfNeeded(streamIDs: StreamingRowsServer.streamIDs)
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.statusOnlyTick)
+
+        await viewModel.refreshActiveSessionStatesIfNeeded(
+            streamIDs: StreamingRowsServer.streamIDs,
+            forceAttentionProbes: true
+        )
+
+        XCTAssertEqual(server.takeCounts(), StreamingRowsServer.fullTick)
+    }
+
+    /// Monitors overlap while SwiftUI swaps one poll task for the next, so the
+    /// stream closes only when the last one stops.
+    @MainActor
+    func testSessionEventsStreamClosesWithTheLastMonitor() throws {
+        let events = ScriptedSSEStreamingClient()
+        let viewModel = try makeViewModel(sessionEvents: events) { request in
+            apiTestJSONResponse("{}", for: request)
+        }
+
+        viewModel.startSessionEvents()
+        viewModel.startSessionEvents()
+        viewModel.stopSessionEvents()
+        XCTAssertEqual(events.startedURLs.count, 1)
+        XCTAssertEqual(events.stopCount, 0)
+
+        viewModel.stopSessionEvents()
+        XCTAssertEqual(events.stopCount, 1)
+    }
+
     // MARK: - Helpers
 
     /// These fakes are old servers (no `all_profiles`), whose plain list the
@@ -599,6 +795,7 @@ final class SessionRowAttentionStateTests: XCTestCase {
     @MainActor
     private func makeViewModel(
         unreadStore: SessionUnreadStore? = nil,
+        sessionEvents: ScriptedSSEStreamingClient? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) throws -> SessionListViewModel {
         MockURLProtocol.requestHandler = { request in
@@ -616,8 +813,79 @@ final class SessionRowAttentionStateTests: XCTestCase {
         return SessionListViewModel(
             server: server,
             client: APIClient(baseURL: server, session: session),
-            unreadStore: unreadStore ?? SessionUnreadStore(defaults: unreadDefaults)
+            unreadStore: unreadStore ?? SessionUnreadStore(defaults: unreadDefaults),
+            sessionEventsClient: sessionEvents
         )
+    }
+}
+
+/// Two streaming rows, `a` and `b`, whose approvals and questions a test
+/// raises. Counts requests by path, under a lock, from the mock's queue.
+private final class StreamingRowsServer: @unchecked Sendable {
+    static let streamIDs = ["stream-a", "stream-b"]
+    static let fullTick = ["/api/chat/stream/status": 2, "/api/approval/pending": 2, "/api/clarify/pending": 2]
+    static let statusOnlyTick = ["/api/chat/stream/status": 2]
+
+    private let lock = NSLock()
+    private var approvals: Set<String> = []
+    private var clarifications: Set<String> = []
+    private var counts: [String: Int] = [:]
+
+    func raiseApproval(for sessionID: String) {
+        lock.withLock { _ = approvals.insert(sessionID) }
+    }
+
+    func raiseClarification(for sessionID: String) {
+        lock.withLock { _ = clarifications.insert(sessionID) }
+    }
+
+    func resetCounts() {
+        lock.withLock { counts = [:] }
+    }
+
+    /// The requests since the last reset, by path; resets them.
+    func takeCounts() -> [String: Int] {
+        lock.withLock {
+            defer { counts = [:] }
+            return counts
+        }
+    }
+
+    func handle(_ request: URLRequest) -> (HTTPURLResponse, Data) {
+        let path = request.url?.path ?? ""
+        let sessionID = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first { $0.name == "session_id" }?
+            .value ?? ""
+        let (hasApproval, hasClarification) = lock.withLock {
+            counts[path, default: 0] += 1
+            return (approvals.contains(sessionID), clarifications.contains(sessionID))
+        }
+
+        switch path {
+        case "/api/sessions":
+            return apiTestJSONResponse("""
+            {"sessions": [
+              {"session_id": "a", "title": "A", "active_stream_id": "stream-a"},
+              {"session_id": "b", "title": "B", "active_stream_id": "stream-b"}
+            ]}
+            """, for: request)
+        case "/api/chat/stream/status":
+            return apiTestJSONResponse(#"{"active": true}"#, for: request)
+        case "/api/approval/pending":
+            return apiTestJSONResponse(
+                hasApproval ? #"{"pending": {"approval_id": "ap-1"}, "pending_count": 1}"# : #"{"pending": null}"#,
+                for: request
+            )
+        case "/api/clarify/pending":
+            return apiTestJSONResponse(
+                hasClarification ? #"{"pending": {"question": "Which branch?"}}"# : #"{"pending": null}"#,
+                for: request
+            )
+        default:
+            XCTFail("Unexpected request to \(path)")
+            return apiTestJSONResponse("{}", for: request)
+        }
     }
 }
 

@@ -56,6 +56,7 @@ final class ContractReadinessTests: XCTestCase {
                 path: "/api/sessions/search",
                 query: ["q": "billing plan", "content": "1", "depth": "5", "all_profiles": "1"]
             ),
+            .init(name: "session events", method: "GET", endpoint: .sessionEvents, path: "/api/sessions/events"),
             .init(
                 name: "session detail",
                 method: "GET",

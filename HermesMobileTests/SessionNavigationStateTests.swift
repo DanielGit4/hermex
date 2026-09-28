@@ -418,6 +418,16 @@ final class SessionNavigationStateTests: XCTestCase {
         )
     }
 
+    /// Backgrounded or inactive, the list polls nothing; becoming active again
+    /// is a new ID, so SwiftUI restarts the poll.
+    func testActiveRowPollPausesWhileTheAppIsNotActive() {
+        XCTAssertFalse(activeRowMonitorID(isSceneActive: false).shouldPoll)
+        XCTAssertFalse(activeRowMonitorID(isSceneActive: false).needsTickOnReturn)
+        XCTAssertFalse(activeRowMonitorID(isRegularWidth: true, isSceneActive: false).shouldPoll)
+        XCTAssertTrue(activeRowMonitorID(isSceneActive: true).shouldPoll)
+        XCTAssertNotEqual(activeRowMonitorID(isSceneActive: false), activeRowMonitorID(isSceneActive: true))
+    }
+
     func testActiveRowPollStillSkipsIdleAndCachedLists() {
         XCTAssertFalse(activeRowMonitorID(hasActiveRows: false).shouldPoll)
         XCTAssertFalse(activeRowMonitorID(isViewingCachedData: true).shouldPoll)
@@ -440,7 +450,8 @@ final class SessionNavigationStateTests: XCTestCase {
                     hasActiveRows: true,
                     isViewingCachedData: false,
                     isRegularWidth: false,
-                    destination: nil
+                    destination: nil,
+                    isSceneActive: true
                 )
             },
             refreshActiveRows: { taskID in
@@ -474,14 +485,16 @@ final class SessionNavigationStateTests: XCTestCase {
         hasActiveRows: Bool = true,
         isViewingCachedData: Bool = false,
         isRegularWidth: Bool = false,
-        destination: SessionNavigationDestination? = nil
+        destination: SessionNavigationDestination? = nil,
+        isSceneActive: Bool = true
     ) -> ActiveSessionMonitorTaskID {
         ActiveSessionMonitorTaskID(
             streamIDs: ["stream-1"],
             hasActiveRows: hasActiveRows,
             isViewingCachedData: isViewingCachedData,
             isRegularWidth: isRegularWidth,
-            destination: destination
+            destination: destination,
+            isSceneActive: isSceneActive
         )
     }
 

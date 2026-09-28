@@ -15,6 +15,8 @@ enum Endpoint {
         excludeHidden: Bool = false
     )
     case sessionsSearch(query: String, content: Bool, depth: Int, allProfiles: Bool = false)
+    /// SSE: `sessions_changed` whenever any session's list state moves.
+    case sessionEvents
     case session(id: String, includeMessages: Bool, messageLimit: Int?, messageBefore: Int?, expandRenderable: Bool = false)
     case sessionStatus(id: String)
     case importCLISession
@@ -178,6 +180,8 @@ enum Endpoint {
             return "/api/sessions"
         case .sessionsSearch:
             return "/api/sessions/search"
+        case .sessionEvents:
+            return "/api/sessions/events"
         case .session:
             return "/api/session"
         case .sessionStatus:

@@ -1877,18 +1877,21 @@ struct ActiveSessionMonitorTaskID: Hashable {
     let isViewingCachedData: Bool
     let isListVisible: Bool
     let isRegularWidth: Bool
+    let isSceneActive: Bool
 
     init(
         streamIDs: [String],
         hasActiveRows: Bool,
         isViewingCachedData: Bool,
         isRegularWidth: Bool,
-        destination: SessionNavigationDestination?
+        destination: SessionNavigationDestination?,
+        isSceneActive: Bool = true
     ) {
         self.streamIDs = streamIDs
         self.hasActiveRows = hasActiveRows
         self.isViewingCachedData = isViewingCachedData
         self.isRegularWidth = isRegularWidth
+        self.isSceneActive = isSceneActive
         isListVisible = isRegularWidth || destination == nil || destination == .utility(.scheduled)
     }
 

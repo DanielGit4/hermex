@@ -741,7 +741,7 @@ final class ChatStreamCoordinator {
             case .done:
                 // Duplicate done after completion — already finalized; ignore.
                 return
-            case .heartbeat, .ignored:
+            case .heartbeat, .ignored, .sessionsChanged:
                 break
             case .transportError, .cancelled, .error, .streamEnd:
                 // Settled completion wins: tear down exactly once without
@@ -842,7 +842,7 @@ final class ChatStreamCoordinator {
             if recoveryState == .checking {
                 setRecoveryStateIfChanged(.idle)
             }
-        case .ignored:
+        case .ignored, .sessionsChanged:
             break
         }
     }

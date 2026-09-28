@@ -34,6 +34,12 @@ final class SessionListGroupingTimingTests: XCTestCase {
         XCTAssertEqual(timing.groups.scheduled.count, 10)
         XCTAssertEqual(timing.groups.messaging.reduce(0) { $0 + $1.sessions.count }, 660)
         XCTAssertLessThan(timing.afterGroupingMedian, .milliseconds(100))
+
+        let line = "TIMING grouping memo hit 700 rows: median \(Self.format(timing.memoHitMedian)) "
+            + "(\(timing.memoHitRuns) runs), against a regroup of \(Self.format(timing.afterGroupingMedian))"
+        print(line)
+        XCTContext.runActivity(named: line) { _ in }
+        XCTAssertLessThan(timing.memoHitMedian, timing.afterGroupingMedian / 10)
     }
 
     // MARK: - Cron runs in the all-profiles list
@@ -230,6 +236,8 @@ final class SessionListGroupingTimingTests: XCTestCase {
     private struct Timing {
         let groups: SessionListGroups
         let afterGroupingMedian: Duration
+        let memoHitMedian: Duration
+        let memoHitRuns: Int
     }
 
     @MainActor
@@ -250,6 +258,9 @@ final class SessionListGroupingTimingTests: XCTestCase {
             client: APIClient(baseURL: server, session: URLSession(configuration: configuration))
         )
         let visibility = AutomatedSessionVisibility.showAll
+        // Shows the same rows (none are Claude Code imports) under another
+        // key, so alternating the two regroups on every "after" run.
+        let sameRows = AutomatedSessionVisibility(showsCron: true, showsCli: true, showsClaudeCode: false, showsSubagents: true)
         let clock = ContinuousClock()
 
         var loads: [Duration] = []
@@ -264,15 +275,27 @@ final class SessionListGroupingTimingTests: XCTestCase {
         var before: [Duration] = []
         var after: [Duration] = []
         var groups: SessionListGroups?
-        for _ in 0..<iterations {
+        for iteration in 0..<iterations {
             var start = clock.now
             let legacy = Self.legacyGroups(viewModel.sessions, visibility: visibility)
             before.append(clock.now - start)
             XCTAssertEqual(legacy.ordinary.count + legacy.scheduled.count, rows.count)
 
             start = clock.now
-            groups = viewModel.sessionListGroups(searchText: "", selectedProjectID: nil, automatedVisibility: visibility)
+            groups = viewModel.sessionListGroups(
+                searchText: "",
+                selectedProjectID: nil,
+                automatedVisibility: iteration.isMultiple(of: 2) ? visibility : sameRows
+            )
             after.append(clock.now - start)
+        }
+
+        var memoHits: [Duration] = []
+        for _ in 0..<iterations {
+            let start = clock.now
+            let hit = viewModel.sessionListGroups(searchText: "", selectedProjectID: nil, automatedVisibility: sameRows)
+            memoHits.append(clock.now - start)
+            XCTAssertEqual(hit.ordinary.count, groups?.ordinary.count)
         }
 
         let beforeMedian = Self.median(before)
@@ -282,7 +305,12 @@ final class SessionListGroupingTimingTests: XCTestCase {
         print(line)
         XCTContext.runActivity(named: line) { _ in }
 
-        return Timing(groups: try XCTUnwrap(groups), afterGroupingMedian: afterMedian)
+        return Timing(
+            groups: try XCTUnwrap(groups),
+            afterGroupingMedian: afterMedian,
+            memoHitMedian: Self.median(memoHits),
+            memoHitRuns: iterations
+        )
     }
 
     /// The pre-change path for an empty query and no project: filter by

@@ -81,6 +81,9 @@ enum SSEEvent: Equatable {
     case error(String)
     case transportError(String)
     case heartbeat
+    /// `sessions_changed` on `/api/sessions/events`: some session's list
+    /// state moved, attention included. The payload is not needed.
+    case sessionsChanged
     case ignored
 }
 
@@ -291,6 +294,8 @@ struct SSEEventDecoder {
             return .streamEnd
         case "cancel":
             return .cancelled
+        case "sessions_changed":
+            return .sessionsChanged
         case "error", "apperror":
             // "apperror" is one of the four socket-closing frames (stream_end, cancel,
             // error, apperror). The docs describe its payload as {error, type, session,

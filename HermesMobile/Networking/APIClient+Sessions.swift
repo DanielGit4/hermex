@@ -53,6 +53,10 @@ extension APIClient {
         return .sessionList(visible, addingHiddenRowsFrom: try await plainList)
     }
 
+    nonisolated var sessionEventsURL: URL {
+        Endpoint.sessionEvents.url(relativeTo: baseURL)
+    }
+
     func searchSessions(
         query: String,
         content: Bool = true,

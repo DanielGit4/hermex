@@ -664,6 +664,21 @@ final class SSEClientTests: XCTestCase {
         XCTAssertEqual(event, .error("The stream returned a malformed error event."))
     }
 
+    func testSessionsChangedDecodesThePinnedUpstreamPayload() {
+        // Pinned upstream `_handle_session_events_stream` (routes.py 17830).
+        let event = SSEEventDecoder.decode(
+            eventType: "sessions_changed",
+            data: #"{"type": "sessions_changed", "version": 42, "reason": "attention_pending", "profile": "default", "session_id": "session-abc", "future_field": true}"#
+        )
+
+        XCTAssertEqual(event, .sessionsChanged)
+    }
+
+    func testMalformedSessionsChangedStillSignalsAChange() {
+        XCTAssertEqual(SSEEventDecoder.decode(eventType: "sessions_changed", data: "{"), .sessionsChanged)
+        XCTAssertEqual(SSEEventDecoder.decode(eventType: "sessions_changed", data: ""), .sessionsChanged)
+    }
+
     func testUnknownStreamEventTypeIsIgnored() {
         let event = SSEEventDecoder.decode(
             eventType: "future_server_event",

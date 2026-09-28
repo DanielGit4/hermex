@@ -201,10 +201,17 @@ final class SessionListViewModel {
     private var firstReturnLoad: (revision: Int, sessionIDs: Set<String>)?
     private var returnRevision = 0
     private var activeLoadCount = 0
+    @ObservationIgnored private var sessionEventsClient: SSEStreamingClient?
 
-    init(server: URL, client: APIClient? = nil, unreadStore: SessionUnreadStore = SessionUnreadStore()) {
+    init(
+        server: URL,
+        client: APIClient? = nil,
+        unreadStore: SessionUnreadStore = SessionUnreadStore(),
+        sessionEventsClient: SSEStreamingClient? = nil
+    ) {
         self.server = server
         self.unreadStore = unreadStore
+        self.sessionEventsClient = sessionEventsClient
         seenMessageTimes = unreadStore.load(for: server)
         let resolvedClient = client ?? APIClient(baseURL: server)
         self.client = resolvedClient
@@ -768,9 +775,14 @@ final class SessionListViewModel {
         lastError == nil ? .unchanged : .failed
     }
 
+    func startSessionEvents() {}
+
+    func stopSessionEvents() {}
+
     @discardableResult
     func refreshActiveSessionStatesIfNeeded(
         streamIDs rawStreamIDs: [String],
+        forceAttentionProbes: Bool = false,
         modelContext: ModelContext? = nil
     ) async -> ActiveSessionStateRefreshResult {
         guard !isViewingCachedData, !isLoading else { return .unchanged }
