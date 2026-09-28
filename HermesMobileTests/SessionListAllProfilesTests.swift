@@ -715,6 +715,44 @@ final class SessionListAllProfilesTests: XCTestCase {
         XCTAssertEqual((chat.lastError as? APIError)?.mismatchedSessionProfile, "opensource")
     }
 
+    /// Lending a chat its own profile and taking it back is not the user's
+    /// profile change: the next chat still reuses the lists the last one
+    /// fetched. Picking a profile in the list is, and the next chat asks again.
+    @MainActor
+    func testALoanKeepsTheListsChatsReuseAndAPickExpiresThem() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [
+            Self.webui("mine", profile: "default", at: 10),
+            Self.webui("open-1", profile: "opensource", at: 20)
+        ])
+        let cache = ServerCatalogCache()
+        let viewModel = SessionListViewModel(server: server, client: makeClient(fake, cache: cache))
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        let loader = ChatComposerConfigLoader(client: makeClient(fake, cache: cache))
+        let chat = ChatComposerConfigState(currentWorkspace: "/work/default", currentProfile: "default")
+        _ = await loader.loadConfiguration(from: chat)
+
+        let opened = try await openChat(try row("open-1", in: viewModel), in: viewModel)
+        await viewModel.destinationDidChange(from: .session(opened), to: nil).value
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default"])
+        fake.clearRequests()
+        _ = await loader.loadConfiguration(from: chat)
+        // The fake keeps no cookie jar, so the list's profile read during the
+        // return shares this chat's scope and the loader moves the profile
+        // back; a real server's cookie keys that read to the lent profile.
+        XCTAssertEqual(fake.requests.filter { $0.hasPrefix("GET ") }, ["GET /api/reasoning"],
+                       "a loan and its return keep the lists fresh")
+
+        let pick = try XCTUnwrap(viewModel.profileOptions.first { $0.normalizedName == "openai_sol" })
+        let didSwitch = await viewModel.switchActiveProfile(pick)
+        XCTAssertTrue(didSwitch)
+        fake.clearRequests()
+        _ = await loader.loadConfiguration(from: ChatComposerConfigState(currentWorkspace: "/work/openai_sol",
+                                                                         currentProfile: "openai_sol"))
+        XCTAssertEqual(Set(fake.requests), ["GET /api/profiles", "GET /api/models", "GET /api/workspaces",
+                                            "GET /api/commands", "GET /api/reasoning"], "the pick expires them")
+    }
+
     // MARK: - Offline cache
 
     @MainActor
@@ -826,15 +864,18 @@ final class SessionListAllProfilesTests: XCTestCase {
         XCTAssertEqual(Set(fake.servedProfiles), [profile], "\(fake.requests)", file: file, line: line)
     }
 
-    private func makeClient(_ fake: AllProfilesServerFake) -> APIClient {
-        makeClient { try fake.handle($0) }
+    private func makeClient(_ fake: AllProfilesServerFake, cache: ServerCatalogCache? = nil) -> APIClient {
+        makeClient(cache: cache) { try fake.handle($0) }
     }
 
-    private func makeClient(handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)) -> APIClient {
+    private func makeClient(
+        cache: ServerCatalogCache? = nil,
+        handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    ) -> APIClient {
         MockURLProtocol.requestHandler = handler
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
-        return APIClient(baseURL: server, session: URLSession(configuration: configuration))
+        return APIClient(baseURL: server, session: URLSession(configuration: configuration), catalogCache: cache)
     }
 
     private func makeContext() throws -> ModelContext {

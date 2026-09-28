@@ -709,7 +709,8 @@ final class ChatViewModel {
         let resolvedClient = client ?? APIClient(
             baseURL: server,
             followSessionProfile: followSessionProfile ?? { owner in
-                guard let response = try? await APIClient(baseURL: server).switchProfile(name: owner) else {
+                guard let response = try? await APIClient(baseURL: server)
+                    .switchProfile(name: owner, keepsFreshCatalogs: true) else {
                     return false
                 }
                 return response.error?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true

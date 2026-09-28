@@ -1,8 +1,16 @@
 import Foundation
 
 extension APIClient {
-    func workspaces() async throws -> WorkspacesResponse {
-        try await send(endpoint: .workspaces, method: "GET")
+    /// Asks the server unless `reusingFresh` finds a fresh answer for this server
+    /// and profile; a success becomes the fresh answer. Its `last` moves on every
+    /// chat start without expiring it, so never seed a workspace from a reused answer.
+    func workspaces(reusingFresh: Bool = false) async throws -> WorkspacesResponse {
+        let scope = catalogScope
+        if reusingFresh, let fresh = await catalogCache.freshWorkspaces(for: scope) { return fresh }
+        let startedAt = catalogCache.clock()
+        let response: WorkspacesResponse = try await send(endpoint: .workspaces, method: "GET")
+        await catalogCache.storeWorkspaces(response, scope: scope, fetchedAt: startedAt)
+        return response
     }
 
     func workspaceSuggestions(prefix: String) async throws -> WorkspaceSuggestionsResponse {

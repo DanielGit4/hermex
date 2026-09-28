@@ -293,6 +293,156 @@ final class ChatComposerConfigLoaderTests: APIClientTestCase {
         XCTAssertNil(result.configurationError)
         XCTAssertTrue(result.state.isSingleProfileMode)
     }
+
+    // MARK: - Reusing fresh lists
+
+    private static let everyList = ["/api/commands", "/api/models", "/api/profiles", "/api/reasoning", "/api/workspaces"]
+
+    func testASecondLoadInTheSameProfileAsksOnlyForReasoning() async {
+        let log = ConfigRequestLog()
+        let client = makeListServer(cache: ServerCatalogCache(), log: log)
+
+        let first = await load(client, log: log)
+        let second = await load(client, log: log)
+
+        XCTAssertEqual(first.paths, Self.everyList)
+        XCTAssertEqual(second.paths, ["/api/reasoning"])
+        XCTAssertEqual(second.state, first.state, "the reused lists configure the chat the same way")
+        XCTAssertEqual(second.state.currentModel, "gpt-5.4")
+        XCTAssertEqual(second.state.agentCommands.map(\.name), ["status"])
+    }
+
+    func testListsOlderThanFiveMinutesAreAskedForAgain() async {
+        let clock = CatalogTestClock()
+        let log = ConfigRequestLog()
+        let client = makeListServer(cache: ServerCatalogCache(now: clock.now), log: log)
+        _ = await load(client, log: log)
+
+        clock.advance(by: 299)
+        let reused = await load(client, log: log)
+        clock.advance(by: 2)
+        let refetched = await load(client, log: log)
+
+        XCTAssertEqual(reused.paths, ["/api/reasoning"])
+        XCTAssertEqual(refetched.paths, Self.everyList)
+    }
+
+    func testAChatWithoutAWorkspaceAsksForWorkspacesEvenWhenFresh() async {
+        let log = ConfigRequestLog()
+        let client = makeListServer(cache: ServerCatalogCache(), log: log)
+        _ = await load(client, log: log)
+
+        let newChat = await load(client, log: log, state: ChatComposerConfigState())
+
+        XCTAssertEqual(newChat.paths, ["/api/reasoning", "/api/workspaces"], "a reused `last` may be stale")
+        XCTAssertEqual(newChat.state.currentWorkspace, "/tmp/workspace")
+    }
+
+    func testSettingsAndWorkspaceWritesExpireTheListsAndAFailedWriteDoesNot() async {
+        let writes: [(String, @Sendable (APIClient) async throws -> Void)] = [
+            ("default model", { _ = try await $0.saveDefaultModel(model: "gpt-6") }),
+            ("settings", { _ = try await $0.updateSettings(showCliSessions: true) }),
+            ("workspace", { _ = try await $0.addWorkspace(path: "/tmp/other") })
+        ]
+        for (name, write) in writes {
+            let log = ConfigRequestLog()
+            let failing = makeListServer(cache: ServerCatalogCache(), log: log, writeStatus: 500)
+            _ = await load(failing, log: log)
+            try? await write(failing)
+            let afterFailure = await load(failing, log: log)
+            XCTAssertEqual(afterFailure.paths, ["/api/reasoning"], "a failed \(name) write changed nothing")
+
+            let client = makeListServer(cache: ServerCatalogCache(), log: log)
+            _ = await load(client, log: log)
+            do {
+                try await write(client)
+            } catch {
+                XCTFail("\(name) write failed: \(error)")
+            }
+            let afterWrite = await load(client, log: log)
+            XCTAssertEqual(afterWrite.paths, Self.everyList, "a \(name) write expires the lists")
+        }
+    }
+
+    @MainActor
+    func testTheComposerProfilePickerExpiresTheLists() async throws {
+        let log = ConfigRequestLog()
+        let client = makeListServer(cache: ServerCatalogCache(), log: log)
+        let viewModel = ChatViewModel(
+            session: SessionSummary(sessionId: "session-1"),
+            server: URL(string: "https://example.test")!,
+            client: client,
+            streamClient: ScriptedSSEStreamingClient(),
+            approvalStreamClient: ScriptedSSEStreamingClient(),
+            clarifyStreamClient: ScriptedSSEStreamingClient()
+        )
+        await viewModel.loadComposerConfiguration()
+        let work = try XCTUnwrap(viewModel.profileOptions.first { $0.normalizedName == "work" })
+        let before = log.values.count
+
+        _ = await viewModel.switchProfile(work, startNewSession: false)
+
+        let afterSwitch = Set(log.values.dropFirst(before))
+        XCTAssertTrue(afterSwitch.isSuperset(of: ["/api/profile/switch", "/api/profiles", "/api/models", "/api/commands"]),
+                      "\(afterSwitch)")
+    }
+
+    /// A server that answers the composer's lists and the writes that expire
+    /// them, logging each path. Writes answer `writeStatus`.
+    private func makeListServer(cache: ServerCatalogCache, log: ConfigRequestLog, writeStatus: Int = 200) -> APIClient {
+        MockURLProtocol.requestHandler = { request in
+            let path = request.url?.path ?? ""
+            log.append(path)
+            switch path {
+            case "/api/profiles":
+                return apiTestJSONResponse("""
+                {"active": "default", "profiles": [{"name": "default", "model": "gpt-5.4", "is_default": true}, {"name": "work"}]}
+                """, for: request)
+            case "/api/models":
+                return apiTestJSONResponse(#"{"default_model": "gpt-5.4", "groups": []}"#, for: request)
+            case "/api/reasoning":
+                return apiTestJSONResponse(#"{"reasoning_effort": "medium"}"#, for: request)
+            case "/api/workspaces":
+                return apiTestJSONResponse(#"{"workspaces": [{"path": "/tmp/workspace"}], "last": "/tmp/workspace"}"#, for: request)
+            case "/api/commands":
+                return apiTestJSONResponse(#"{"commands": [{"name": "status"}]}"#, for: request)
+            case "/api/profile/switch":
+                return apiTestJSONResponse(#"{"active": "work"}"#, for: request)
+            default:
+                return apiTestJSONResponse("{}", for: request, status: writeStatus)
+            }
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        return APIClient(baseURL: URL(string: "https://example.test")!, session: URLSession(configuration: configuration),
+                         catalogCache: cache)
+    }
+
+    /// One composer load; the paths it asked for, sorted.
+    private func load(
+        _ client: APIClient,
+        log: ConfigRequestLog,
+        state: ChatComposerConfigState = ChatComposerConfigState(currentWorkspace: "/tmp/workspace")
+    ) async -> (paths: [String], state: ChatComposerConfigState) {
+        let before = log.values.count
+        let result = await ChatComposerConfigLoader(client: client).loadConfiguration(from: state)
+        XCTAssertNil(result.configurationError)
+        return (log.values.dropFirst(before).sorted(), result.state)
+    }
+}
+
+/// A clock tests move forward, for `ServerCatalogCache(now:)`.
+final class CatalogTestClock: @unchecked Sendable {
+    private let lock = NSLock()
+    private var offset: TimeInterval = 0
+
+    func advance(by seconds: TimeInterval) {
+        lock.withLock { offset += seconds }
+    }
+
+    var now: @Sendable () -> Date {
+        { [self] in Date().addingTimeInterval(lock.withLock { offset }) }
+    }
 }
 
 /// Request paths in arrival order. Handlers run concurrently off the test's

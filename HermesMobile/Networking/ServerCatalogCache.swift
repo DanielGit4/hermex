@@ -11,6 +11,12 @@ import Foundation
 /// its file, later reads are memory. Disk I/O runs on the actor, never on the
 /// main thread. Providers are written as a projection without `base_url` or
 /// `auth_error`, which can carry credentials; models are written as sent.
+///
+/// It also keeps the last `/api/profiles`, `/api/workspaces` and
+/// `/api/commands` answers in memory, so the next chat opened on the same
+/// server and profile within `freshness` reuses them and `/api/models` instead
+/// of asking again. An answer is fresh when it was fetched in this launch,
+/// less than `freshness` ago, and after the server's last `expireFresh`.
 actor ServerCatalogCache {
     struct Scope: Hashable, Sendable {
         let serverKey: String
@@ -46,14 +52,52 @@ actor ServerCatalogCache {
     static let shared = ServerCatalogCache(directory: FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask)[0]
         .appendingPathComponent("ServerCatalog", isDirectory: true))
 
+    /// How long an answer may stand in for a new request.
+    static let freshness: TimeInterval = 300
+
     /// A nil directory is an isolated memory cache, used by fixtures.
     let directory: URL?
+    /// Stamps fetches, clears and expiries; tests move it forward.
+    nonisolated let clock: @Sendable () -> Date
+    /// Anything fetched earlier, such as a models file from the last launch, is never fresh.
+    private let launchedAt: Date
     private var models: [Scope: Entry<ModelsResponse>] = [:]
     private var providers: [Scope: Entry<ProvidersResponse>] = [:]
+    private var profiles: [Scope: Entry<ProfilesResponse>] = [:]
+    private var workspaces: [Scope: Entry<WorkspacesResponse>] = [:]
+    private var commands: [Scope: Entry<CommandsResponse>] = [:]
     private var readFromDisk: Set<Key> = []
     private var clearedAt: [String: Date] = [:]
+    private var expiredAt: [String: Date] = [:]
 
-    init(directory: URL? = nil) { self.directory = directory }
+    init(directory: URL? = nil, now: @escaping @Sendable () -> Date = { Date() }) {
+        self.directory = directory
+        clock = now
+        launchedAt = now()
+    }
+
+    func freshModels(for scope: Scope) -> ModelsResponse? { fresh(models(for: scope), scope: scope) }
+    func freshProfiles(for scope: Scope) -> ProfilesResponse? { fresh(profiles[scope], scope: scope) }
+    func freshWorkspaces(for scope: Scope) -> WorkspacesResponse? { fresh(workspaces[scope], scope: scope) }
+    func freshCommands(for scope: Scope) -> CommandsResponse? { fresh(commands[scope], scope: scope) }
+
+    func storeProfiles(_ response: ProfilesResponse, scope: Scope, fetchedAt: Date) {
+        store(response, scope: scope, fetchedAt: fetchedAt, in: &profiles)
+    }
+
+    func storeWorkspaces(_ response: WorkspacesResponse, scope: Scope, fetchedAt: Date) {
+        store(response, scope: scope, fetchedAt: fetchedAt, in: &workspaces)
+    }
+
+    func storeCommands(_ response: CommandsResponse, scope: Scope, fetchedAt: Date) {
+        store(response, scope: scope, fetchedAt: fetchedAt, in: &commands)
+    }
+
+    /// Ends every profile's fresh answers for `server`, including fetches still
+    /// running. Nothing is deleted: models stay usable as last-known rows.
+    func expireFresh(server: URL, now: Date? = nil) {
+        expiredAt[Scope.hash(server.absoluteString)] = now ?? clock()
+    }
 
     func models(for scope: Scope) -> Entry<ModelsResponse>? {
         let key = Key(scope: scope, kind: .models)
@@ -97,13 +141,16 @@ actor ServerCatalogCache {
         write(file, for: Key(scope: scope, kind: .providers))
     }
 
-    /// Drops every profile's catalogs for `server`, in memory and on disk. A fetch
-    /// that started before this call cannot write them back afterwards.
-    func remove(server: URL, now: Date = Date()) throws {
+    /// Drops every profile's catalogs and lists for `server`, in memory and on
+    /// disk. A fetch that started before this call cannot write them back afterwards.
+    func remove(server: URL, now: Date? = nil) throws {
         let serverKey = Scope.hash(server.absoluteString)
-        clearedAt[serverKey] = now
+        clearedAt[serverKey] = now ?? clock()
         models = models.filter { $0.key.serverKey != serverKey }
         providers = providers.filter { $0.key.serverKey != serverKey }
+        profiles = profiles.filter { $0.key.serverKey != serverKey }
+        workspaces = workspaces.filter { $0.key.serverKey != serverKey }
+        commands = commands.filter { $0.key.serverKey != serverKey }
         readFromDisk = readFromDisk.filter { $0.scope.serverKey != serverKey }
         guard let directory else { return }
         let folder = directory.appendingPathComponent(serverKey, isDirectory: true)
@@ -114,6 +161,19 @@ actor ServerCatalogCache {
     /// Rejects a fetch that started before a clear, or before the answer already held.
     private func accepts(_ fetchedAt: Date, scope: Scope, current: Date?) -> Bool {
         fetchedAt > (clearedAt[scope.serverKey] ?? .distantPast) && fetchedAt >= (current ?? .distantPast)
+    }
+
+    private func store<Value: Sendable>(_ value: Value, scope: Scope, fetchedAt: Date, in entries: inout [Scope: Entry<Value>]) {
+        guard accepts(fetchedAt, scope: scope, current: entries[scope]?.fetchedAt) else { return }
+        entries[scope] = Entry(value: value, fetchedAt: fetchedAt)
+    }
+
+    private func fresh<Value: Sendable>(_ entry: Entry<Value>?, scope: Scope) -> Value? {
+        guard let entry, entry.fetchedAt >= launchedAt,
+              entry.fetchedAt > (expiredAt[scope.serverKey] ?? .distantPast)
+        else { return nil }
+        let age = clock().timeIntervalSince(entry.fetchedAt)
+        return age >= 0 && age < Self.freshness ? entry.value : nil
     }
 
     private func fileURL(_ key: Key) -> URL? {

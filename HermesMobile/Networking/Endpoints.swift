@@ -152,6 +152,18 @@ enum Endpoint {
     case transcribe
     case tts
 
+    /// A successful write here can change the profiles, models, workspaces or
+    /// commands a chat reuses, or their defaults, so `APIClient` expires them.
+    var expiresFreshCatalogs: Bool {
+        switch self {
+        case .createProfile, .defaultModel, .settings, .updatesApply,
+             .workspaceAdd, .workspaceRemove, .workspaceRename, .workspaceReorder:
+            return true
+        default:
+            return false
+        }
+    }
+
     var path: String {
         switch self {
         case .health:

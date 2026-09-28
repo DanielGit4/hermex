@@ -15,10 +15,10 @@ actor APIClient {
     /// Read when building each request so live edits apply without rebuilding the
     /// client. Defaults to the process-wide store; tests inject a fixed list (#255).
     private let customHeaderProvider: @Sendable () -> [CustomHeader]
-    /// Last-known `/api/models` and `/api/providers` answers. The scope comes from
-    /// the session's cookie jar, so a client on the shared session uses the
-    /// process-wide cache and a client on its own session gets its own, unless
-    /// one is passed in.
+    /// Last-known `/api/models` and `/api/providers` answers, and the fresh
+    /// lists a chat reuses. The scope comes from the session's cookie jar, so a
+    /// client on the shared session uses the process-wide cache and a client on
+    /// its own session gets its own, unless one is passed in.
     let catalogCache: ServerCatalogCache
     /// Set on a chat's client: moves the profile cookie to a session's owner
     /// after a 409 `session_profile_mismatch`, and reports whether it did, so
@@ -171,7 +171,11 @@ actor APIClient {
             request.httpBody = encodedBody
         }
 
-        return try await sendPreparedRequest(request)
+        let result = try await sendPreparedRequest(request)
+        if method != "GET", endpoint.expiresFreshCatalogs {
+            await catalogCache.expireFresh(server: baseURL)
+        }
+        return result
     }
 
     /// Multipart POST using the same URLSession + `APIError` mapping as `sendData`.

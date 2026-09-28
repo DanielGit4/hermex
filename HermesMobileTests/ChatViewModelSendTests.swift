@@ -6630,6 +6630,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let firstProfilesStarted = expectation(description: "first profiles request started")
         let releaseFirstProfiles = DispatchSemaphore(value: 0)
         let profileRequests = LockedCounter()
+        let reasoningRequests = LockedCounter()
         var didReleaseFirstProfiles = false
         func releaseProfilesIfNeeded() {
             guard !didReleaseFirstProfiles else { return }
@@ -6691,6 +6692,7 @@ final class ChatViewModelSendTests: XCTestCase {
                 }
                 """, for: request)
             case "/api/reasoning":
+                _ = reasoningRequests.increment()
                 return apiTestJSONResponse(#"{"reasoning_effort": "medium"}"#, for: request)
             case "/api/workspaces":
                 return apiTestJSONResponse("""
@@ -6729,7 +6731,10 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(viewModel.selectedWorkspacePath, selectedWorkspace)
         XCTAssertEqual(viewModel.selectedModelID, "gpt-5.4")
         XCTAssertEqual(viewModel.selectedModelProviderID, "openai")
-        XCTAssertEqual(profileRequests.count, 2)
+        // The selection makes the load run again; the rerun reuses the
+        // profiles the first run fetched moments ago and asks reasoning again.
+        XCTAssertEqual(reasoningRequests.count, 2)
+        XCTAssertEqual(profileRequests.count, 1)
         XCTAssertNil(viewModel.composerConfigurationErrorMessage)
     }
 
