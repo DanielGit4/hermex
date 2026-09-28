@@ -29,6 +29,13 @@ developed by Hermes Kanban cards worked by Claude Code. Read this file together 
   Personal Teams cannot sign Push). Those builds expire after 7 days. Once Daniel's own
   Apple Developer Program membership exists: TestFlight via
   `.github/workflows/fork-testflight.yml` (disabled until secrets are set), with push.
+- `scripts/fork-install-device` builds the Debug configuration with the Swift optimizer
+  on (`SWIFT_OPTIMIZATION_LEVEL=-O SWIFT_COMPILATION_MODE=wholemodule
+  GCC_OPTIMIZATION_LEVEL=s`), so the phone runs the fast app while the bundle ID,
+  signing, entitlements and DEBUG-only tools (Streaming Lab) stay the same. It takes a
+  few minutes longer. `scripts/fork-install-device --debug` builds today's unoptimized
+  (`-Onone`) app: use it to step through code or inspect variables in Xcode's debugger,
+  or to check whether a phone-only bug comes from the optimizer.
 - Lanes never run `fork-install-device` and never use `-allowProvisioningUpdates`;
   device installs are Daniel's step.
 - `scripts/test-sim` needs `HERMEX_BUNDLE_ID=com.danielgit4.hermexdev`.

@@ -2,7 +2,11 @@
 # Fork-only: build "Hermex Dev" and install it on Daniel's iPhone with the free
 # Personal Team (Config/Local.xcconfig -> DEVELOPMENT_TEAM).
 #
-# Usage: scripts/fork-install-device [hardware-udid]
+# Usage: scripts/fork-install-device [--debug] [hardware-udid]
+#
+# The default build is the Debug configuration (bundle ID, signing, entitlements and the
+# DEBUG-only tools such as the Streaming Lab) compiled with the Swift optimizer on.
+# --debug builds it unoptimized (-Onone) for stepping through code in Xcode's debugger.
 #
 # First run: plug the iPhone in by USB, unlock it, tap "Trust This Computer", and
 # turn on Settings > Privacy & Security > Developer Mode (the phone restarts; confirm
@@ -14,6 +18,18 @@ set -euo pipefail
 repo=${0:A:h:h}
 cd "$repo"
 
+# Optimizer on top of the Debug configuration: the variant measured in the Sep 28 perf
+# baseline. Command-line settings outrank the project's Debug -Onone and every xcconfig.
+optimize=(SWIFT_OPTIMIZATION_LEVEL=-O SWIFT_COMPILATION_MODE=wholemodule GCC_OPTIMIZATION_LEVEL=s)
+wanted=""
+for arg in "$@"; do
+  case $arg in
+    --debug) optimize=() ;;
+    -*) echo "Usage: scripts/fork-install-device [--debug] [hardware-udid]" >&2; exit 2 ;;
+    *) wanted=$arg ;;
+  esac
+done
+
 if ! grep -qE '^DEVELOPMENT_TEAM *= *[A-Z0-9]{10}' Config/Local.xcconfig 2>/dev/null; then
   echo "Config/Local.xcconfig has no DEVELOPMENT_TEAM; see FORK.md." >&2
   exit 1
@@ -24,7 +40,7 @@ fi
 # and building for that exact device is what registers it with the Personal Team.
 devices_json=$(mktemp -t hermex-devices)
 xcrun devicectl list devices --quiet --json-output "$devices_json" >/dev/null 2>&1 || true
-read -r udid dev_mode name <<<"$(/usr/bin/python3 - "$devices_json" "${1:-}" <<'PY'
+read -r udid dev_mode name <<<"$(/usr/bin/python3 - "$devices_json" "$wanted" <<'PY'
 import json, sys
 wanted = sys.argv[2]
 try:
@@ -64,7 +80,13 @@ build=(xcodebuild
   -project HermesMobile.xcodeproj -scheme HermesMobile -configuration Debug
   -destination "platform=iOS,id=$udid" -derivedDataPath "$dd"
   -xcconfig Config/ForkPersonalTeam.xcconfig -allowProvisioningUpdates
+  "${optimize[@]}"
   build)
+if (( ${#optimize} )); then
+  echo "Building Hermex Dev with the Swift optimizer (--debug for an unoptimized build)."
+else
+  echo "Building Hermex Dev unoptimized (-Onone)."
+fi
 if command -v xcbeautify >/dev/null; then
   "${build[@]}" | xcbeautify
 else
