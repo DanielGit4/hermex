@@ -353,6 +353,79 @@ final class SessionListMutationTests: XCTestCase {
         XCTAssertNotNil(viewModel.lastError)
     }
 
+    // MARK: - Cached rows while the list checks with the server
+
+    /// A cold launch paints this server's cached rows while the list request
+    /// is out, then replaces them in place with the server's. Unread and
+    /// streaming state never come from the cache.
+    @MainActor
+    func testCachedRowsShowWhileTheServerHoldsTheListRequest() async throws {
+        let context = try makeContext()
+        let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
+        try CacheStore.cacheSessions(
+            [
+                SessionSummary(sessionId: "idle", title: "Cached idle", lastMessageAt: 100),
+                SessionSummary(
+                    sessionId: "streaming",
+                    title: "Cached streaming",
+                    lastMessageAt: 200,
+                    activeStreamId: "stale-stream",
+                    isStreaming: true
+                ),
+                SessionSummary(sessionId: "newer", title: "Cached newer", lastMessageAt: 300)
+            ],
+            serverURL: serverURL,
+            in: context
+        )
+        let unreadSuite = "SessionListMutationTests." + UUID().uuidString
+        let unreadDefaults = try XCTUnwrap(UserDefaults(suiteName: unreadSuite))
+        defer { unreadDefaults.removePersistentDomain(forName: unreadSuite) }
+        let unreadStore = SessionUnreadStore(defaults: unreadDefaults)
+        unreadStore.save(["idle": 100, "streaming": 200, "newer": 250], for: serverURL)
+        let gate = ResponseGate()
+        let arrived = expectation(description: "The list request reached the server")
+        let viewModel = try makeHeldListViewModel(gate: gate, arrived: arrived, unreadStore: unreadStore) { request in
+            apiTestJSONResponse("""
+            {
+              "sessions": [
+                {"session_id": "idle", "title": "Live idle", "last_message_at": 100},
+                {"session_id": "streaming", "title": "Live finished", "last_message_at": 400},
+                {"session_id": "newer", "title": "Live newer", "last_message_at": 300},
+                {"session_id": "fresh", "title": "Live fresh", "last_message_at": 500}
+              ]
+            }
+            """, for: request)
+        }
+        defer { gate.release() }
+
+        let load = Task { await viewModel.load(modelContext: context) }
+        await fulfillment(of: [arrived], timeout: 5)
+
+        XCTAssertEqual(
+            Set(viewModel.sessions.compactMap(\.sessionId)),
+            ["idle", "streaming", "newer"],
+            "This server's cached rows paint before the server answers"
+        )
+        XCTAssertTrue(viewModel.isLoading)
+        XCTAssertFalse(viewModel.isViewingCachedData, "Checking is not the offline state")
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertTrue(viewModel.sessions.allSatisfy { !viewModel.isUnread($0) }, "No unread from the cache")
+        XCTAssertEqual(viewModel.visibleActiveSessions(searchText: "", selectedProjectID: nil), [])
+
+        gate.release()
+        let loaded = await load.value
+
+        XCTAssertTrue(loaded)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["idle", "streaming", "newer", "fresh"])
+        XCTAssertEqual(
+            viewModel.sessions.compactMap(\.title),
+            ["Live idle", "Live finished", "Live newer", "Live fresh"]
+        )
+        XCTAssertFalse(viewModel.isViewingCachedData)
+        XCTAssertTrue(viewModel.isUnread(try XCTUnwrap(viewModel.sessions.first { $0.sessionId == "newer" })),
+                      "Unread returns once the rows are live")
+    }
+
     @MainActor
     func testCreateSessionReturnsEmptyPlaceholderWithoutInsertingIntoSessionList() async throws {
         let context = try makeContext()
@@ -3352,6 +3425,28 @@ final class SessionListMutationTests: XCTestCase {
         let client = try makeClient(server: server, handler: handler)
 
         return SessionListViewModel(server: server, client: client)
+    }
+
+    /// A view model for `https://example.test` whose list request fulfils
+    /// `arrived`, then waits at `gate` on the mock's queue before `respond`
+    /// answers, so a test can look at the list while the server holds it.
+    @MainActor
+    private func makeHeldListViewModel(
+        gate: ResponseGate,
+        arrived: XCTestExpectation,
+        unreadStore: SessionUnreadStore = SessionUnreadStore(),
+        respond: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
+    ) throws -> SessionListViewModel {
+        gate.hold()
+        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let client = try makeClient(server: server) { request in
+            if request.url?.path == "/api/sessions" {
+                arrived.fulfill()
+                gate.wait()
+            }
+            return try respond(request)
+        }
+        return SessionListViewModel(server: server, client: client, unreadStore: unreadStore)
     }
 
     private func makeClient(
