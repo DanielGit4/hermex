@@ -4,8 +4,9 @@ import SwiftData
 enum CachePolicy {
     static let ttl: TimeInterval = 7 * 24 * 60 * 60
     static let maxMessages = 5_000
-    /// How stale an unchanged cached message may get before a window write
-    /// bumps its `cachedAt`/`expiresAt` again (see `CachedMessage.refresh`).
+    /// How stale an unchanged cached row may get before a message window write
+    /// or a session list refresh bumps its `cachedAt`/`expiresAt` again (see
+    /// `CachedMessage.refresh` and `CachedSession.refresh`).
     static let rowRefreshInterval: TimeInterval = 60 * 60
 }
 
@@ -63,6 +64,9 @@ final class CachedSession {
         "\(serverURLString)|session|\(sessionID)"
     }
 
+    /// Writes every field of `session` into this row and stamps it with `cachedAt`.
+    /// Used for new rows and single-session writes; list refreshes go through
+    /// `refresh` so unchanged rows stay clean.
     func apply(_ session: SessionSummary, cachedAt: Date = Date()) {
         title = session.title
         workspace = session.workspace
@@ -96,6 +100,59 @@ final class CachedSession {
         isReadOnly = session.isReadOnly
         handoffState = session.handoffState
         handoffPlatform = session.handoffPlatform
+        stamp(cachedAt)
+    }
+
+    /// Upserts `session` into an existing row during a list refresh. A row that
+    /// already holds exactly this session is not rewritten; only its
+    /// `cachedAt`/`expiresAt` move forward, and at most once per
+    /// `CachePolicy.rowRefreshInterval`, so recaching an unchanged list dirties no row.
+    func refresh(from session: SessionSummary, cachedAt: Date) {
+        guard matches(session) else {
+            apply(session, cachedAt: cachedAt)
+            return
+        }
+        if cachedAt.timeIntervalSince(self.cachedAt) >= CachePolicy.rowRefreshInterval {
+            stamp(cachedAt)
+        }
+    }
+
+    private func matches(_ session: SessionSummary) -> Bool {
+        title == session.title
+            && workspace == session.workspace
+            && model == session.model
+            && modelProvider == session.modelProvider
+            && messageCount == session.messageCount
+            && createdAt == session.createdAt
+            && updatedAt == session.updatedAt
+            && lastMessageAt == session.lastMessageAt
+            && pinned == session.pinned
+            && archived == session.archived
+            && projectId == session.projectId
+            && profile == session.profile
+            && inputTokens == session.inputTokens
+            && outputTokens == session.outputTokens
+            && estimatedCost == session.estimatedCost
+            && activeStreamId == session.activeStreamId
+            && isStreaming == session.isStreaming
+            && isCliSession == session.isCliSession
+            && userMessageCount == session.userMessageCount
+            && hasPendingUserMessage == session.hasPendingUserMessage
+            && pendingStartedAt == session.pendingStartedAt
+            && worktreePath == session.worktreePath
+            && sourceTag == session.sourceTag
+            && rawSource == session.rawSource
+            && sessionSource == session.sessionSource
+            && sourceLabel == session.sourceLabel
+            && parentSessionId == session.parentSessionId
+            && relationshipType == session.relationshipType
+            && readOnly == session.readOnly
+            && isReadOnly == session.isReadOnly
+            && handoffState == session.handoffState
+            && handoffPlatform == session.handoffPlatform
+    }
+
+    private func stamp(_ cachedAt: Date) {
         self.cachedAt = cachedAt
         expiresAt = cachedAt.addingTimeInterval(CachePolicy.ttl)
     }

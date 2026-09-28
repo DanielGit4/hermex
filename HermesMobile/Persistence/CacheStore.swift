@@ -145,7 +145,7 @@ enum CacheStore {
             guard let sessionID = session.sessionId else { continue }
             let cacheKey = CachedSession.cacheKey(serverURLString: serverURLString, sessionID: sessionID)
             if let cachedSession = cachedSessionsByKey[cacheKey] {
-                cachedSession.apply(session, cachedAt: cachedAt)
+                cachedSession.refresh(from: session, cachedAt: cachedAt)
             } else {
                 let cachedSession = CachedSession(serverURLString: serverURLString, session: session, cachedAt: cachedAt)
                 context.insert(cachedSession)
@@ -158,7 +158,12 @@ enum CacheStore {
             context.delete(staleSession)
         }
 
-        try saveAndTrim(context, now: cachedAt)
+        // An unchanged refresh must not touch the store. Expired rows of other
+        // servers wait for the next write that changes something; reads already
+        // filter `expiresAt > now`.
+        if context.hasChanges {
+            try saveAndTrim(context, now: cachedAt)
+        }
     }
 
     @MainActor
