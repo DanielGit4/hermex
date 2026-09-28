@@ -136,6 +136,34 @@ final class SessionListGroupingTimingTests: XCTestCase {
         XCTAssertLessThan(Self.median(after), .seconds(2))
     }
 
+    // MARK: - Cached paint at launch
+
+    /// What painting the cached rows adds to a cold launch's main thread: the
+    /// SwiftData read of a real-size list and its filter, on a fresh view model.
+    @MainActor
+    func testCachedPaintOfARealSizeList() throws {
+        let context = try Self.makeContext()
+        try CacheStore.cacheSessions(try Self.realSizeCachedList(), serverURL: Self.serverURL, in: context)
+        let clock = ContinuousClock()
+        let runs = 7
+
+        var paints: [Duration] = []
+        var painted = 0
+        for _ in 0..<runs {
+            let viewModel = SessionListViewModel(server: Self.serverURL)
+            let start = clock.now
+            viewModel.showCachedSessions(modelContext: context)
+            paints.append(clock.now - start)
+            painted = viewModel.sessions.count
+        }
+
+        let line = "TIMING cached paint: \(painted) rows, median \(Self.format(Self.median(paints))) (\(runs) runs)"
+        print(line)
+        XCTContext.runActivity(named: line) { _ in }
+        XCTAssertEqual(painted, 890)
+        XCTAssertLessThan(Self.median(paints), .seconds(1))
+    }
+
     @MainActor
     private func assertScheduledIsBounded(
         _ server: CronFloodServer,
@@ -323,6 +351,56 @@ final class SessionListGroupingTimingTests: XCTestCase {
                 "profile": profiles[index % profiles.count]
             ]
         }
+    }
+
+    /// 890 rows shaped like `CacheStoreTests.realSizeList()`: 680 Telegram
+    /// chats, 200 cron runs and 10 WebUI chats, with profiles cycling.
+    private static func realSizeCachedList() throws -> [SessionSummary] {
+        let telegram: [[String: Any]] = (0..<680).map { index in
+            [
+                "session_id": "tg-\(index)",
+                "title": "Telegram chat \(index)",
+                "message_count": 30,
+                "last_message_at": 1_770_000_000 - Double(index) * 7_200,
+                "is_cli_session": true,
+                "raw_source": "telegram",
+                "source_tag": "telegram",
+                "session_source": "messaging",
+                "source_label": "Telegram"
+            ]
+        }
+        let cron: [[String: Any]] = (0..<200).map { index in
+            let updatedAt = 1_769_000_000 - Double(index) * 3_600
+            return [
+                "session_id": "cron_job_\(index)",
+                "title": "Nightly job \(index % 4)",
+                "message_count": 2,
+                "created_at": updatedAt - 30,
+                "updated_at": updatedAt,
+                "source_tag": "cron",
+                "project_id": "p-cron"
+            ]
+        }
+        let webUI: [[String: Any]] = (0..<10).map { index in
+            [
+                "session_id": "webui-\(index)",
+                "title": "WebUI chat \(index)",
+                "message_count": 12,
+                "last_message_at": 1_770_000_000 - Double(index) * 60,
+                "session_source": "webui",
+                "workspace": "/Users/daniel/workspace/project-\(index % 4)"
+            ]
+        }
+        let rows = (telegram + cron + webUI).enumerated().map { index, row in
+            row.merging(["profile": profiles[index % profiles.count]]) { _, profile in profile }
+        }
+        let decoder = JSONDecoder()
+        decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let response = try decoder.decode(
+            SessionsResponse.self,
+            from: try JSONSerialization.data(withJSONObject: ["sessions": rows])
+        )
+        return try XCTUnwrap(response.sessions)
     }
 
     private static func cronRows(_ count: Int) -> [[String: Any]] {

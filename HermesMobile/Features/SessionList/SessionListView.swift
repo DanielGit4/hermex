@@ -299,17 +299,28 @@ struct SessionListView: View {
                 // owns navigation precedence and is awaited before stored selection
                 // restoration.
                 await SessionListInitialLoad.run(
+                    showCachedSessions: {
+                        viewModel.showCachedSessions(modelContext: modelContext)
+                    },
                     resolvePendingDeepLink: {
                         await openPendingDeepLinkedSessionIfNeeded()
                     },
                     loadSessions: {
                         await loadSessionRows()
                     },
-                    restoreSelection: {
-                        didCompleteInitialLoad = true
+                    restoreSelection: { sessionsLoaded in
+                        if sessionsLoaded {
+                            didCompleteInitialLoad = true
+                            // A chat closed before the server answered dropped that
+                            // answer and could not ask again yet; ask now.
+                            if viewModel.isCheckingCachedRows { refreshAfterReturningIfNeeded() }
+                        }
                         // Ordered after the deep link so restoreIfNeeded() sees the
                         // explicit destination and leaves the stored selection alone.
-                        restoreLastSelectedSessionIfNeeded()
+                        // Only the server's rows may clear a stored selection.
+                        restoreLastSelectedSessionIfNeeded(
+                            clearsMissingSelection: sessionsLoaded && viewModel.sessionLoadError == nil
+                        )
                     },
                     loadProjects: {
                         await loadProjectsIfLive()
@@ -1636,11 +1647,11 @@ struct SessionListView: View {
         persistLastSelectedSession()
     }
 
-    private func restoreLastSelectedSessionIfNeeded() {
+    private func restoreLastSelectedSessionIfNeeded(clearsMissingSelection: Bool) {
         guard pendingWebuiPush == nil else { return }
         navigationState.restoreIfNeeded(
             from: viewModel.sessions,
-            clearsMissingSelection: viewModel.sessionLoadError == nil,
+            clearsMissingSelection: clearsMissingSelection,
             pendingDeepLinkedSessionID: pendingDeepLinkedSessionID
         )
         persistLastSelectedSession()
@@ -1652,23 +1663,31 @@ struct SessionListView: View {
 
 }
 
-/// Orders the session list's cold-start load. Restore needs only the session
-/// rows, so it runs as soon as they arrive and the pending deep link has
-/// resolved; projects and the active profile load afterwards, side by side.
+/// Orders the session list's cold-start load. The cached rows paint before
+/// the sessions request starts, so the pending deep link and a first restore
+/// resolve against them without waiting for the network; restore runs again
+/// once the server answered (`sessionsLoaded`). Projects and the active
+/// profile load afterwards, side by side.
 enum SessionListInitialLoad {
     @MainActor
     static func run(
+        showCachedSessions: @MainActor () -> Void,
         resolvePendingDeepLink: @escaping @MainActor () async -> Void,
         loadSessions: @escaping @MainActor () async -> Void,
-        restoreSelection: @MainActor () -> Void,
+        restoreSelection: @MainActor (_ sessionsLoaded: Bool) -> Void,
         loadProjects: @escaping @MainActor () async -> Void,
         loadActiveProfile: @escaping @MainActor () async -> Void
     ) async {
+        // Before the `async let`: its child may not start before this task's
+        // first suspension, and the early restore needs the rows.
+        showCachedSessions()
         async let sessions: Void = loadSessions()
         await resolvePendingDeepLink()
+        guard !Task.isCancelled else { return }
+        restoreSelection(false)
         await sessions
         guard !Task.isCancelled else { return }
-        restoreSelection()
+        restoreSelection(true)
         await loadProjectsAndActiveProfile(loadProjects: loadProjects, loadActiveProfile: loadActiveProfile)
     }
 

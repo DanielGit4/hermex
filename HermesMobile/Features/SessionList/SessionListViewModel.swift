@@ -119,6 +119,11 @@ final class SessionListViewModel {
     private(set) var isRenamingProject = false
     private(set) var isMovingSession = false
     private(set) var isViewingCachedData = false
+    /// True while the list shows this server's cached rows and the request
+    /// that will replace them is still out. Unlike `isViewingCachedData`
+    /// (offline), the server is expected to answer, so the list stays fully
+    /// usable; only live state (streaming, attention, unread) is hidden.
+    private(set) var isCheckingCachedRows = false
     private(set) var projects: [ProjectSummary] = []
     private(set) var errorMessage: String?
     private(set) var actionErrorMessage: String?
@@ -277,13 +282,15 @@ final class SessionListViewModel {
 
     /// The visible rows that are still streaming, for the list's active-row
     /// monitor. Filters to streaming rows first (usually zero to two), so a
-    /// body pass does not filter and sort every session to find them.
+    /// body pass does not filter and sort every session to find them. Cached
+    /// rows being checked have none: their stream IDs are stale.
     func visibleActiveSessions(
         searchText: String,
         selectedProjectID: String?,
         automatedVisibility: AutomatedSessionVisibility = .showAll,
         profileFilter: String? = nil
     ) -> [SessionSummary] {
+        guard !isCheckingCachedRows else { return [] }
         let activeSessions = sessions.filter(SessionRowView.isActiveStreaming)
         guard !activeSessions.isEmpty else { return [] }
         return visibleSessions(
@@ -477,6 +484,19 @@ final class SessionListViewModel {
         return profileName(of: session) == profileFilter
     }
 
+    /// Paints this server's cached rows while the list is still empty, so a
+    /// cold launch shows them until `load` replaces them in place. A cache
+    /// read error paints nothing.
+    func showCachedSessions(modelContext: ModelContext) {
+        guard sessions.isEmpty, !isViewingCachedData,
+              let cachedSessions = try? CacheStore.cachedSessions(serverURL: server, in: modelContext)
+                  .filter(\.shouldAppearInSessionList),
+              !cachedSessions.isEmpty
+        else { return }
+        sessions = cachedSessions
+        isCheckingCachedRows = true
+    }
+
     @discardableResult
     func load(modelContext: ModelContext? = nil, animation: Animation? = nil) async -> Bool {
         // Overlapping requests for the same return share its mark. A later
@@ -502,6 +522,7 @@ final class SessionListViewModel {
             activeLoadCount -= 1
             isLoading = activeLoadCount > 0
         }
+        if let modelContext { showCachedSessions(modelContext: modelContext) }
 
         // A profile switch that overlaps this load may land after the server
         // answered, so only a load clear of switches reports the profile.
@@ -525,6 +546,7 @@ final class SessionListViewModel {
             reconcileUnread(visibleSessions, allSessions: allSessions, returnedFromIDs: returnedFromIDs)
             applySessions(visibleSessions, archivedCount: response.archivedCount, animation: animation)
             isViewingCachedData = false
+            isCheckingCachedRows = false
 
             if let modelContext {
                 do {
@@ -541,7 +563,13 @@ final class SessionListViewModel {
 
             lastError = error
             sessionLoadError = error
-            if CacheFallbackPolicy.shouldUseCache(for: error), let modelContext {
+            if CacheFallbackPolicy.shouldUseCache(for: error), isCheckingCachedRows {
+                // The rows on screen already are this server's cache.
+                isCheckingCachedRows = false
+                isViewingCachedData = true
+                errorMessage = nil
+                clearAttentionStates()
+            } else if CacheFallbackPolicy.shouldUseCache(for: error), let modelContext {
                 do {
                     let cachedSessions = try CacheStore.cachedSessions(serverURL: server, in: modelContext)
                         .filter(\.shouldAppearInSessionList)
@@ -562,6 +590,11 @@ final class SessionListViewModel {
                     errorMessage = lastError?.localizedDescription
                 }
             } else {
+                // A real server error never shows cached rows.
+                if isCheckingCachedRows {
+                    sessions = []
+                    isCheckingCachedRows = false
+                }
                 isViewingCachedData = false
                 errorMessage = error.localizedDescription
             }
@@ -772,8 +805,10 @@ final class SessionListViewModel {
 
     /// A settled row is unread only when its server timestamp moved past the
     /// last timestamp this device showed. No phone clock enters the comparison.
+    /// Rows still being checked are never unread: their timestamps are cached.
     func isUnread(_ session: SessionSummary) -> Bool {
-        guard let sessionID = Self.nonEmpty(session.sessionId),
+        guard !isCheckingCachedRows,
+              let sessionID = Self.nonEmpty(session.sessionId),
               let timestamp = Self.messageTime(for: session),
               let seen = seenMessageTimes[sessionID],
               !SessionRowView.isActiveStreaming(session),
@@ -783,7 +818,8 @@ final class SessionListViewModel {
     }
 
     func canToggleUnread(_ session: SessionSummary) -> Bool {
-        Self.nonEmpty(session.sessionId) != nil
+        !isCheckingCachedRows
+            && Self.nonEmpty(session.sessionId) != nil
             && Self.messageTime(for: session) != nil
             && !SessionRowView.isActiveStreaming(session)
             && session.hasPendingUserMessage != true

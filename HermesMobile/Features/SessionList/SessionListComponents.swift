@@ -560,6 +560,10 @@ struct SessionListRowsSection: View {
                     ProgressView()
                         .controlSize(.small)
                         .accessibilityLabel("Searching sessions")
+                } else if viewModel.isCheckingCachedRows {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Loading sessions")
                 }
             }
         }
@@ -641,6 +645,7 @@ struct SessionInteractiveRow: View {
                 showsMessageCount: showsMessageCount,
                 showsWorkspace: showsWorkspace,
                 isViewingCachedData: viewModel.isViewingCachedData,
+                showsLiveState: !viewModel.isCheckingCachedRows,
                 isUnread: viewModel.isUnread(session),
                 attentionState: viewModel.attentionState(for: session),
                 searchExcerpt: viewModel.searchExcerpt(for: session, searchText: searchText),

@@ -145,6 +145,25 @@ final class SessionRowAttentionStateTests: XCTestCase {
         )
     }
 
+    /// While the list checks its cached rows, a stale stream resolves no
+    /// attention, and the row reads neither Working nor Cached.
+    func testRowWithoutLiveStateReadsNeitherWorkingNorCached() {
+        let streaming = SessionSummary(sessionId: "s", activeStreamId: "stream-1", isStreaming: true)
+
+        XCTAssertEqual(
+            SessionRowView.accessibilityStateLabels(for: streaming, isViewingCachedData: false, showsLiveState: false),
+            []
+        )
+        XCTAssertEqual(
+            SessionRowView.accessibilityStateLabels(for: streaming, isViewingCachedData: false),
+            ["Working"]
+        )
+        XCTAssertEqual(
+            SessionRowView.accessibilityStateLabels(for: streaming, isViewingCachedData: true),
+            ["Cached"]
+        )
+    }
+
     func testCachedRowCanReadUnreadWithoutHidingTheCachedState() {
         let session = SessionSummary(sessionId: "s", lastMessageAt: 200)
 

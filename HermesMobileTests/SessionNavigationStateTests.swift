@@ -95,6 +95,7 @@ final class SessionNavigationStateTests: XCTestCase {
         let recorder = SessionInitialLoadEventRecorder()
 
         await SessionListInitialLoad.run(
+            showCachedSessions: {},
             resolvePendingDeepLink: {
                 await recorder.record(.deepLinkStarted)
                 try? await Task.sleep(nanoseconds: 50_000_000)
@@ -103,7 +104,7 @@ final class SessionNavigationStateTests: XCTestCase {
             loadSessions: {
                 await recorder.record(.refreshStarted)
             },
-            restoreSelection: {},
+            restoreSelection: { _ in },
             loadProjects: {},
             loadActiveProfile: {}
         )
@@ -130,9 +131,10 @@ final class SessionNavigationStateTests: XCTestCase {
 
         let initialLoad = Task { @MainActor in
             await SessionListInitialLoad.run(
+                showCachedSessions: { log.events.append("cached") },
                 resolvePendingDeepLink: { log.events.append("deepLink") },
                 loadSessions: { log.events.append("sessions") },
-                restoreSelection: { log.events.append("restore") },
+                restoreSelection: { sessionsLoaded in log.events.append(sessionsLoaded ? "restore" : "early restore") },
                 loadProjects: {
                     restoredWithBothLoadsInFlight.fulfill()
                     await projects.wait()
@@ -147,13 +149,64 @@ final class SessionNavigationStateTests: XCTestCase {
         }
 
         await fulfillment(of: [restoredWithBothLoadsInFlight], timeout: 5)
-        XCTAssertEqual(Set(log.events), ["deepLink", "sessions", "restore"])
+        XCTAssertEqual(Set(log.events), ["cached", "deepLink", "early restore", "sessions", "restore"])
         XCTAssertEqual(log.events.last, "restore")
 
         profile.release()
         projects.release()
         await initialLoad.value
         XCTAssertEqual(Set(log.events.suffix(2)), ["projects", "profile"])
+    }
+
+    /// Cached rows paint before the sessions request starts, so the deep link
+    /// and a first restore resolve against them while the server still holds
+    /// the list; restore runs again once it answered, then projects and profile.
+    @MainActor
+    func testInitialLoadRestoresFromCachedRowsWhileTheSessionsAreHeld() async {
+        let log = InitialLoadLog()
+        let sessions = HeldInitialLoad()
+        let restoredEarly = expectation(description: "restore while the sessions are held")
+
+        let initialLoad = Task { @MainActor in
+            await SessionListInitialLoad.run(
+                showCachedSessions: { log.events.append("cached") },
+                resolvePendingDeepLink: { log.events.append("deepLink") },
+                loadSessions: {
+                    await sessions.wait()
+                    log.events.append("sessions")
+                },
+                restoreSelection: { sessionsLoaded in
+                    log.events.append(sessionsLoaded ? "restore" : "early restore")
+                    if !sessionsLoaded { restoredEarly.fulfill() }
+                },
+                loadProjects: { log.events.append("projects") },
+                loadActiveProfile: { log.events.append("profile") }
+            )
+        }
+
+        await fulfillment(of: [restoredEarly], timeout: 5)
+        XCTAssertEqual(log.events, ["cached", "deepLink", "early restore"])
+
+        sessions.release()
+        await initialLoad.value
+        XCTAssertEqual(Array(log.events.prefix(5)), ["cached", "deepLink", "early restore", "sessions", "restore"])
+        XCTAssertEqual(Set(log.events.suffix(2)), ["projects", "profile"])
+    }
+
+    /// The first restore may open the stored chat from cached rows before the
+    /// server answers; once the user leaves it, the restore after the answer
+    /// does not open it again.
+    func testRestoreDoesNotReopenAChatTheUserLeft() {
+        let stored = SessionSummary(sessionId: "stored")
+        var state = SessionNavigationState(lastSelectedSessionID: "stored")
+
+        state.restoreIfNeeded(from: [stored], clearsMissingSelection: false)
+        XCTAssertEqual(state.destination, .session(stored))
+        state.clearDestination()
+        state.restoreIfNeeded(from: [stored])
+
+        XCTAssertNil(state.destination)
+        XCTAssertEqual(state.lastSelectedSessionID, "stored")
     }
 
     func testExplicitNewChatRouteOverridesStoredSelection() {
