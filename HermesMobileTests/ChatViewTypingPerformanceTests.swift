@@ -163,6 +163,43 @@ import XCTest
         )
     }
 
+    /// A second chat in the same profile asks the server only for what is its
+    /// own: the transcript, pending approval, yolo state, git state and
+    /// reasoning. Profiles, models, workspaces and commands come from the
+    /// first chat's answers. The fixture serves one session, so the second
+    /// chat is the same one reopened in a new `ChatView`.
+    func testASecondChatInTheSameProfileAsksOnlyForItsOwnState() async throws {
+        let fixture = try ChatTypingFixture(messageCount: 40, servesNewestWindow: true)
+        defer { fixture.tearDown() }
+        let original = try XCTUnwrap(MockURLProtocol.requestHandler)
+        let ledger = RequestLedger()
+        MockURLProtocol.requestHandler = { request in
+            let response = try original(request)
+            ledger.record(request)
+            return response
+        }
+
+        try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture) {
+                fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
+        }
+        let first = ledger.drain()
+        let sessionRequests = fixture.sessionRequestCount
+        try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture) {
+                fixture.sessionRequestCount > sessionRequests && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
+        }
+        let second = ledger.drain()
+
+        let secondPaths = second.map(\.path).sorted()
+        print("CHAT-OPEN-REQUESTS first=\(first.count) second=\(second.count) secondPaths=\(secondPaths.joined(separator: ","))")
+        XCTAssertLessThanOrEqual(second.count, 5, "A second chat asked again: \(second.map(\.pathAndQuery))")
+        let perChat: Set = ["/api/session", "/api/approval/pending", "/api/session/yolo", "/api/git-info", "/api/reasoning"]
+        XCTAssertEqual(secondPaths.filter { !perChat.contains($0) }, [], "Only the chat's own state is asked for again")
+    }
+
     func testReportsOwnerPassCostInALongChat() async throws {
         try requireReportOptIn()
         let passes = try await forceOwnerPassesInHostedChat(messageCount: 500, count: 3)
@@ -1123,6 +1160,32 @@ private final class RequestCounter: @unchecked Sendable {
         lock.withLock {
             counts.total += 1
             if isSession { counts.sessions += 1 }
+        }
+    }
+}
+
+/// Every request the mocked server answered, in arrival order; written from
+/// URLSession's loading queue.
+private final class RequestLedger: @unchecked Sendable {
+    struct Request {
+        let path: String
+        let pathAndQuery: String
+    }
+
+    private let lock = NSLock()
+    private var requests: [Request] = []
+
+    func record(_ request: URLRequest) {
+        let path = request.url?.path ?? ""
+        let query = request.url?.query.map { "?" + $0 } ?? ""
+        lock.withLock { requests.append(Request(path: path, pathAndQuery: path + query)) }
+    }
+
+    /// The requests so far; the ledger starts empty again.
+    func drain() -> [Request] {
+        lock.withLock {
+            defer { requests = [] }
+            return requests
         }
     }
 }
