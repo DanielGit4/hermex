@@ -85,7 +85,9 @@ private struct TranscriptMediaThumbnailView: View {
     let onPreviewMedia: ((TranscriptMediaReference) -> Void)?
 
     @State private var image: UIImage?
-    @State private var didAttemptLoad = false
+    /// The key whose load finished with no image; it stays failed while scrolling.
+    @State private var failedKey: TranscriptMediaImageCacheKey?
+    @State private var isNearScreen = false
 
     private let thumbnailWidth: CGFloat = 210
     private let thumbnailHeight: CGFloat = 132
@@ -99,6 +101,7 @@ private struct TranscriptMediaThumbnailView: View {
                     loadMediaData: loadMediaData,
                     onPreviewMedia: onPreviewMedia
                 )
+                .id(reference.id)
             } else {
                 TranscriptMediaUnavailableChip(reference: reference)
             }
@@ -111,20 +114,22 @@ private struct TranscriptMediaThumbnailView: View {
             }
             .buttonStyle(.chatTactile(.thumbnail))
             .accessibilityLabel(imageButtonAccessibilityLabel)
-            .task(id: imageCacheKey) {
-                guard let loadMediaImage else { return }
-                image = nil
-                didAttemptLoad = false
-                let loadedImage = await TranscriptMediaImageCache.shared.image(
-                    for: reference,
-                    cacheNamespace: cacheNamespace,
-                    loadMediaImage: loadMediaImage
-                )
-                guard !Task.isCancelled else { return }
-                await MainActor.run {
-                    image = loadedImage
-                    didAttemptLoad = true
+            .onNearScreenChange { isNearScreen = $0 }
+            .task(id: ChatImageLoadRequest(key: imageCacheKey, isNearScreen: isNearScreen)) {
+                // Far from the screen the image is released, so the cache's budget bounds memory.
+                let key = imageCacheKey
+                guard isNearScreen, failedKey != key, let loadMediaImage else {
+                    image = nil
+                    return
                 }
+                image = ChatImageCaches.transcriptMedia.cachedImage(for: key)
+                guard image == nil else { return }
+                let loadedImage = await ChatImageCaches.transcriptMedia.image(for: key) {
+                    await loadMediaImage(reference)
+                }
+                guard !Task.isCancelled else { return }
+                image = loadedImage
+                failedKey = loadedImage == nil ? key : nil
             }
         case .audio where loadMediaData != nil:
             if let loadMediaData {
@@ -168,8 +173,12 @@ private struct TranscriptMediaThumbnailView: View {
         TranscriptMediaImageCacheKey(namespace: cacheNamespace, reference: reference)
     }
 
+    private var didFailLoad: Bool {
+        failedKey == imageCacheKey
+    }
+
     private var imageButtonAccessibilityLabel: String {
-        if image == nil, didAttemptLoad, reference.isExtensionlessRemoteMediaCandidate {
+        if image == nil, didFailLoad, reference.isExtensionlessRemoteMediaCandidate {
             return String(localized: "Open media video \(reference.displayName)")
         }
 
@@ -189,7 +198,7 @@ private struct TranscriptMediaThumbnailView: View {
                     RoundedRectangle(cornerRadius: 10, style: .continuous)
                         .stroke(Color(.separator).opacity(0.35), lineWidth: 0.5)
                 )
-        } else if didAttemptLoad {
+        } else if didFailLoad {
             if reference.isExtensionlessRemoteMediaCandidate {
                 TranscriptMediaVideoTile(reference: reference)
             } else {
@@ -213,6 +222,7 @@ private struct TranscriptMediaResolvedRemoteView: View {
     let onPreviewMedia: ((TranscriptMediaReference) -> Void)?
 
     @State private var resolvedMedia: ResolvedMedia?
+    @State private var isNearScreen = false
 
     var body: some View {
         Group {
@@ -255,16 +265,14 @@ private struct TranscriptMediaResolvedRemoteView: View {
                     }
             }
         }
-        .task(id: reference.id) {
-            resolvedMedia = nil
-            guard let data = await loadMediaData(reference) else {
-                guard !Task.isCancelled else { return }
-                resolvedMedia = .unavailable
-                return
-            }
-
+        // Identity follows the reference (`.id` at the call site), so a resolved
+        // result is kept; only an unresolved tile starts a load, near the screen.
+        .onNearScreenChange { isNearScreen = $0 }
+        .task(id: isNearScreen) {
+            guard isNearScreen, resolvedMedia == nil else { return }
+            let data = await ChatImageLoadLimiter.shared.run { await loadMediaData(reference) }
             guard !Task.isCancelled else { return }
-            resolvedMedia = Self.resolve(data)
+            resolvedMedia = data.map(Self.resolve) ?? .unavailable
         }
     }
 
@@ -604,54 +612,6 @@ private struct TranscriptMediaUnavailableChip: View {
         case .unsupported:
             "doc"
         }
-    }
-}
-
-private actor TranscriptMediaImageCache {
-    static let shared = TranscriptMediaImageCache()
-
-    private var cache: [TranscriptMediaImageCacheKey: UIImage] = [:]
-    private var inFlight: [TranscriptMediaImageCacheKey: Task<UIImage?, Never>] = [:]
-
-    func image(
-        for reference: TranscriptMediaReference,
-        cacheNamespace: String,
-        loadMediaImage: @escaping (TranscriptMediaReference) async -> Data?
-    ) async -> UIImage? {
-        let key = TranscriptMediaImageCacheKey(namespace: cacheNamespace, reference: reference)
-        if let cached = cache[key] {
-            return cached
-        }
-
-        if let task = inFlight[key] {
-            return await task.value
-        }
-
-        let task = Task<UIImage?, Never> {
-            guard let data = await loadMediaImage(reference) else {
-                return nil
-            }
-            return UIImage(data: data)
-        }
-
-        inFlight[key] = task
-        let image = await task.value
-        inFlight[key] = nil
-
-        if let image {
-            cache[key] = image
-        }
-        return image
-    }
-}
-
-struct TranscriptMediaImageCacheKey: Hashable {
-    let namespace: String
-    let referenceID: String
-
-    init(namespace: String, reference: TranscriptMediaReference) {
-        self.namespace = namespace
-        referenceID = reference.id
     }
 }
 
