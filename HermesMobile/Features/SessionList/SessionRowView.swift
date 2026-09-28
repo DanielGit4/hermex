@@ -9,6 +9,8 @@ struct SessionRowView: View {
     var showsMessageCount = true
     var showsWorkspace = true
     var isViewingCachedData = false
+    /// False while the list checks its cached rows: their stream fields are stale.
+    var showsLiveState = true
     var isUnread = false
     /// The resolved attention state for this row, supplied by the screen that
     /// polls the server (`SessionListViewModel`). Screens that do not poll pass
@@ -26,7 +28,7 @@ struct SessionRowView: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            if Self.isActiveStreaming(session) && !isViewingCachedData {
+            if Self.isActiveStreaming(session) && !isViewingCachedData && showsLiveState {
                 ActiveSessionStreamingIndicator()
                     .padding(.top, streamingIndicatorTopPadding)
             } else if isUnread && effectiveAttentionState == nil {
@@ -106,6 +108,7 @@ struct SessionRowView: View {
     static func accessibilityStateLabels(
         for session: SessionSummary,
         isViewingCachedData: Bool,
+        showsLiveState: Bool = true,
         attentionState: SessionRowAttentionState? = nil,
         isUnread: Bool = false,
         profileLabel: String? = nil
@@ -115,7 +118,7 @@ struct SessionRowView: View {
         if let state = effectiveAttentionState(
             for: session,
             attentionState: attentionState,
-            isViewingCachedData: isViewingCachedData
+            isViewingCachedData: isViewingCachedData || !showsLiveState
         ) {
             labels.append(state.accessibilityLabel)
         } else if isUnread {
@@ -233,7 +236,7 @@ struct SessionRowView: View {
         Self.effectiveAttentionState(
             for: session,
             attentionState: attentionState,
-            isViewingCachedData: isViewingCachedData
+            isViewingCachedData: isViewingCachedData || !showsLiveState
         )
     }
 
@@ -428,6 +431,7 @@ struct SessionRowView: View {
         parts.append(contentsOf: Self.accessibilityStateLabels(
             for: session,
             isViewingCachedData: isViewingCachedData,
+            showsLiveState: showsLiveState,
             attentionState: attentionState,
             isUnread: isUnread,
             profileLabel: profileLabel

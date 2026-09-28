@@ -1,3 +1,4 @@
+import os
 import SwiftData
 import XCTest
 @testable import HermesMobile
@@ -799,6 +800,67 @@ final class SessionListAllProfilesTests: XCTestCase {
         let groups = offline.sessionListGroups(searchText: "", selectedProjectID: nil, profileFilter: "opensource")
         XCTAssertEqual(groups.ordinary.compactMap(\.sessionId), ["o-webui"])
         XCTAssertEqual(groups.messaging.map(\.platform), ["whatsapp"])
+    }
+
+    /// Cached rows being checked are not the offline state, so a profile
+    /// switch goes through; the reload after it keeps the live rows on screen
+    /// (it never paints the cache over them) and ends on the new profile's.
+    @MainActor
+    func testAProfileSwitchWhileCachedRowsAreCheckingReloadsTheNewProfilesRows() async throws {
+        let context = try makeContext()
+        try CacheStore.cacheSessions(
+            [SessionSummary(sessionId: "cached", title: "Cached", lastMessageAt: 5, profile: "default")],
+            serverURL: server,
+            in: context
+        )
+        let fake = AllProfilesServerFake(active: "default", rows: [
+            Self.webui("d1", profile: "default", at: 10),
+            Self.webui("o1", profile: "opensource", at: 20)
+        ], honorsAllProfiles: false)
+        let arrivals = [expectation(description: "first list request"), expectation(description: "reload's list request")]
+        let listRequests = OSAllocatedUnfairLock(initialState: 0)
+        let gate = ResponseGate()
+        gate.hold()
+        defer { gate.release() }
+        let viewModel = SessionListViewModel(server: server, client: makeClient { request in
+            // Answered for the profile the server was on when the request arrived.
+            let response = try fake.handle(request)
+            guard request.url?.path == "/api/sessions" else { return response }
+            let index = listRequests.withLock { count in
+                defer { count += 1 }
+                return count
+            }
+            if index < arrivals.count { arrivals[index].fulfill() }
+            gate.wait()
+            return response
+        })
+
+        let initial = Task { await viewModel.load(modelContext: context) }
+        await fulfillment(of: [arrivals[0]], timeout: 5)
+        XCTAssertTrue(viewModel.isCheckingCachedRows)
+
+        let pick = ProfileSummary(name: "opensource", path: nil, isDefault: false, isActive: false,
+                                  gatewayRunning: nil, model: nil, provider: nil, hasEnv: nil, skillCount: nil)
+        let didSwitch = await viewModel.switchActiveProfile(pick)
+        XCTAssertTrue(didSwitch, "Checking rows are not offline rows")
+        XCTAssertNil(viewModel.activeProfileErrorMessage)
+        XCTAssertEqual(viewModel.activeProfileName, "opensource")
+
+        gate.release()
+        await initial.value
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["d1"])
+        try CacheStore.cacheSessions([SessionSummary(sessionId: "stale")], serverURL: server, in: context)
+
+        gate.hold()
+        let reload = Task { await viewModel.load(modelContext: context) }
+        await fulfillment(of: [arrivals[1]], timeout: 5)
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["d1"], "Rows on screen are never repainted from the cache")
+        XCTAssertFalse(viewModel.isCheckingCachedRows)
+
+        gate.release()
+        await reload.value
+        XCTAssertEqual(viewModel.sessions.compactMap(\.sessionId), ["o1"])
+        XCTAssertFalse(viewModel.isCheckingCachedRows)
     }
 
     // MARK: - Helpers

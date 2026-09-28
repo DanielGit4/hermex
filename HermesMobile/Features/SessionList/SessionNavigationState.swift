@@ -14,7 +14,12 @@ enum SessionNavigationDestination: Hashable, Identifiable {
 }
 
 struct SessionNavigationState: Equatable {
-    private(set) var destination: SessionNavigationDestination?
+    private(set) var destination: SessionNavigationDestination? {
+        didSet { if destination != nil { hasOpenedDestination = true } }
+    }
+    /// Set once any destination opens, restored or chosen, so a later restore
+    /// never reopens a chat the user already left.
+    private var hasOpenedDestination = false
     private(set) var lastSelectedSessionID: String?
     private(set) var rootRevision = 0
     private var newChatSessionID: String?
@@ -86,8 +91,9 @@ struct SessionNavigationState: Equatable {
         deepLinkedSessionLoadID = nil
     }
 
-    /// Restores only when no explicit route already won. Deep links, shared drafts,
-    /// and App Intent requests therefore take precedence over the stored selection.
+    /// Restores only when no destination has opened yet. Deep links, shared drafts,
+    /// and App Intent requests therefore take precedence over the stored selection,
+    /// and a chat the first restore opened stays closed once the user leaves it.
     /// A pending or in-flight deep link (not yet resolved into a destination) also
     /// blocks the restore, so its network load is never pre-empted by the stored
     /// selection; the stored ID is kept for a later restore.
@@ -96,7 +102,7 @@ struct SessionNavigationState: Equatable {
         clearsMissingSelection: Bool = true,
         pendingDeepLinkedSessionID: String? = nil
     ) {
-        guard destination == nil,
+        guard !hasOpenedDestination,
               deepLinkedSessionLoadID == nil,
               Self.normalized(pendingDeepLinkedSessionID) == nil,
               let lastSelectedSessionID
