@@ -400,9 +400,10 @@ final class SessionListAllProfilesTests: XCTestCase {
         let didPin = await viewModel.setPinned(true, for: try row("open-1", in: viewModel))
 
         XCTAssertTrue(didPin)
+        // The pin on the row's profile, then the list back on the pick.
         XCTAssertEqual(fake.requests, [
-            "POST /api/profile/switch", "POST /api/session/pin", "GET /api/sessions", "GET /api/sessions",
-            "POST /api/profile/switch"
+            "POST /api/profile/switch", "POST /api/session/pin", "POST /api/profile/switch",
+            "GET /api/sessions", "GET /api/sessions"
         ])
         XCTAssertEqual(fake.violations, [])
         XCTAssertEqual(viewModel.activeProfileName, "default")
@@ -524,6 +525,58 @@ final class SessionListAllProfilesTests: XCTestCase {
         XCTAssertEqual(fake.violations, [])
         XCTAssertEqual(viewModel.serverProfileName, "opensource")
         XCTAssertEqual(viewModel.activeProfileName, "default")
+    }
+
+    /// An action on another profile's row or project reloads the list only
+    /// once the server is back on the pick. The list's second request follows
+    /// the cookie, so a reload on the owner's profile swapped the pick's cron
+    /// runs in Scheduled for the owner's. Each action still loads the list
+    /// once at most; rename patches the row in place.
+    @MainActor
+    func testScheduledKeepsThePicksCronRunsAfterARowActionOnAnotherProfile() async throws {
+        let cronRuns: Set = ["cron-1", "cron-2", "cron-3"]
+        let fake = AllProfilesServerFake(
+            active: "default",
+            rows: ["open-rename", "open-pin", "open-archive", "open-move", "open-delete"].map {
+                Self.webui($0, profile: "opensource", at: 20)
+            } + cronRuns.map {
+                Self.webui($0, profile: "default", at: 30, [
+                    "session_source": "cron", "source_tag": "cron", "project_id": "cron-project", "default_hidden": true
+                ])
+            },
+            projects: [["project_id": "p-open", "name": "Open work", "profile": "opensource"]]
+        )
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        await viewModel.loadProjects()
+        func scheduled() -> Set<String> {
+            Set(viewModel.sessionListGroups(searchText: "", selectedProjectID: nil).scheduled.compactMap(\.sessionId))
+        }
+        XCTAssertEqual(scheduled(), cronRuns)
+
+        let actions: [(name: String, listRequests: Int, run: @MainActor () async throws -> Void)] = [
+            ("rename", 0, { _ = await viewModel.rename(try self.row("open-rename", in: viewModel), to: "Renamed") }),
+            ("pin", 2, { _ = await viewModel.setPinned(true, for: try self.row("open-pin", in: viewModel)) }),
+            ("archive", 2, { _ = await viewModel.archive(try self.row("open-archive", in: viewModel)) }),
+            ("move", 2, { await viewModel.move(try self.row("open-move", in: viewModel), to: "p-open") }),
+            ("delete", 2, { _ = await viewModel.delete(try self.row("open-delete", in: viewModel)) }),
+            ("delete project", 2, { _ = await viewModel.delete(try XCTUnwrap(viewModel.projects.first)) })
+        ]
+        for (name, listRequests, run) in actions {
+            fake.clearRequests()
+            try await run()
+
+            let listProfiles = zip(fake.requests, fake.servedProfiles).compactMap { request, profile in
+                request == "GET /api/sessions" ? profile : nil
+            }
+            XCTAssertNil(viewModel.actionErrorMessage, name)
+            XCTAssertEqual(listProfiles, Array(repeating: "default", count: listRequests), "\(name): \(fake.requests)")
+            XCTAssertEqual(scheduled(), cronRuns, name)
+            XCTAssertEqual(fake.violations, [], name)
+            XCTAssertEqual(viewModel.activeProfileName, "default", name)
+            XCTAssertEqual(fake.activeProfile, "default", name)
+        }
     }
 
     /// A screen opened while the return is pending, such as a deep link from a
@@ -924,7 +977,8 @@ final class SessionSourceLabelTests: XCTestCase {
     }
 }
 
-/// A scripted hermes-webui for the all-profiles list. Only `/api/profile/switch`
+/// A scripted hermes-webui for the all-profiles list. `exclude_hidden=1`
+/// drops `default_hidden` rows, as upstream does. Only `/api/profile/switch`
 /// moves the client's profile, and every session-scoped request for a session
 /// on another profile, `GET /api/session` and the import included, gets the
 /// server's 409 and is recorded as a violation. Handlers run off the test's
@@ -1013,7 +1067,10 @@ final class AllProfilesServerFake: @unchecked Sendable {
             switch (method, url.path) {
             case ("GET", "/api/sessions"):
                 let allProfiles = honorsAllProfiles && query["all_profiles"] == "1"
-                let listed = rows.filter { !unlistedSessionIDs.contains($0["session_id"] as? String ?? "") }
+                var listed = rows.filter { !unlistedSessionIDs.contains($0["session_id"] as? String ?? "") }
+                if query["exclude_hidden"] == "1" {
+                    listed = listed.filter { $0["default_hidden"] as? Bool != true }
+                }
                 return try respond([
                     "sessions": allProfiles ? listed : listed.filter { ($0["profile"] as? String ?? "default") == active },
                     "all_profiles": allProfiles,

@@ -1170,7 +1170,8 @@ final class SessionListViewModel {
     /// Runs a row action on `profile` (nil: wherever the server is): the list
     /// lends the server profile to it first and returns it to the chat on
     /// screen, or to the pick, once `action` has finished. `failure` is the
-    /// result when the loan fails.
+    /// result when the loan fails. A list reload goes after this call, not in
+    /// `action`, so it runs on the profile the loan returned to.
     private func onServerProfile<T>(
         _ profile: String?,
         failure: T,
@@ -1340,10 +1341,8 @@ final class SessionListViewModel {
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
 
-        return await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
-            await mutate(modelContext: modelContext, animation: animation) {
-                try await sessionMutator.setPinned(pinned, sessionID: sessionId)
-            }
+        return await mutate(on: Self.nonEmpty(session.profile), modelContext: modelContext, animation: animation) {
+            try await sessionMutator.setPinned(pinned, sessionID: sessionId)
         }
     }
 
@@ -1360,10 +1359,8 @@ final class SessionListViewModel {
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
 
-        return await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
-            await mutate(modelContext: modelContext, animation: animation) {
-                try await sessionMutator.archive(sessionID: sessionId)
-            }
+        return await mutate(on: Self.nonEmpty(session.profile), modelContext: modelContext, animation: animation) {
+            try await sessionMutator.archive(sessionID: sessionId)
         }
     }
 
@@ -1380,10 +1377,8 @@ final class SessionListViewModel {
         guard beginSessionMutation(sessionId) else { return false }
         defer { endSessionMutation(sessionId) }
 
-        return await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
-            await mutate(modelContext: modelContext, animation: animation) {
-                try await sessionMutator.delete(sessionID: sessionId)
-            }
+        return await mutate(on: Self.nonEmpty(session.profile), modelContext: modelContext, animation: animation) {
+            try await sessionMutator.delete(sessionID: sessionId)
         }
     }
 
@@ -1577,10 +1572,8 @@ final class SessionListViewModel {
         isMovingSession = true
         defer { isMovingSession = false }
 
-        _ = await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
-            await mutate(modelContext: modelContext) {
-                try await sessionMutator.move(sessionID: sessionId, to: projectID)
-            }
+        _ = await mutate(on: Self.nonEmpty(session.profile), modelContext: modelContext) {
+            try await sessionMutator.move(sessionID: sessionId, to: projectID)
         }
     }
 
@@ -1612,8 +1605,9 @@ final class SessionListViewModel {
         }
 
         // On the session's profile: the move is session-scoped, and the new
-        // project belongs to the profile whose cookie creates it.
-        return await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
+        // project belongs to the profile whose cookie creates it. The list
+        // reloads once the profile is back, as after any row action.
+        let didMove = await onServerProfile(Self.nonEmpty(session.profile), failure: false) {
             do {
                 let createResponse = try await client.createProject(name: name, color: color)
                 guard let project = createResponse.project else {
@@ -1628,7 +1622,6 @@ final class SessionListViewModel {
 
                 upsertProject(project)
                 try await sessionMutator.move(sessionID: sessionId, to: projectID)
-                await load(modelContext: modelContext)
                 return true
             } catch {
                 guard !isCancellationError(error) else { return false }
@@ -1638,6 +1631,8 @@ final class SessionListViewModel {
                 return false
             }
         }
+        if didMove { await load(modelContext: modelContext) }
+        return didMove
     }
 
     /// Creates a new project without moving any session into it.
@@ -1700,12 +1695,12 @@ final class SessionListViewModel {
         lastError = nil
         defer { isDeletingProject = false }
 
-        // Only the owning profile's cookie may delete a project.
-        return await onServerProfile(Self.nonEmpty(project.profile) ?? activeProfileName, failure: false) {
+        // Only the owning profile's cookie may delete a project. The list
+        // reloads once the profile is back, as after any row action.
+        let didDelete = await onServerProfile(Self.nonEmpty(project.profile) ?? activeProfileName, failure: false) {
             do {
                 _ = try await client.deleteProject(id: projectID)
                 projects.removeAll { $0.projectId == projectID }
-                await load(modelContext: modelContext)
                 return true
             } catch {
                 guard !isCancellationError(error) else { return false }
@@ -1715,6 +1710,8 @@ final class SessionListViewModel {
                 return false
             }
         }
+        if didDelete { await load(modelContext: modelContext) }
+        return didDelete
     }
 
     func rename(_ project: ProjectSummary, named rawName: String, color: String?) async -> Bool {
@@ -2020,24 +2017,33 @@ final class SessionListViewModel {
         activeProfileProvider = Self.nonEmpty(profile?.provider)
     }
 
+    /// Runs a row's `operation` on `profile` (see `onServerProfile`), then
+    /// reloads the list once the server profile is back: the list's second
+    /// request follows the cookie, and on the row's profile it would bring
+    /// that profile's hidden rows instead of the pick's.
     private func mutate(
+        on profile: String?,
         modelContext: ModelContext? = nil,
         animation: Animation? = nil,
         _ operation: () async throws -> Void
     ) async -> Bool {
-        actionErrorMessage = nil
-        lastError = nil
+        let didMutate = await onServerProfile(profile, failure: false) {
+            actionErrorMessage = nil
+            lastError = nil
 
-        do {
-            try await operation()
-            return await load(modelContext: modelContext, animation: animation)
-        } catch {
-            guard !isCancellationError(error) else { return false }
+            do {
+                try await operation()
+                return true
+            } catch {
+                guard !isCancellationError(error) else { return false }
 
-            lastError = error
-            actionErrorMessage = error.localizedDescription
-            return false
+                lastError = error
+                actionErrorMessage = error.localizedDescription
+                return false
+            }
         }
+        guard didMutate else { return false }
+        return await load(modelContext: modelContext, animation: animation)
     }
 
     private func isCancellationError(_ error: Error) -> Bool {
