@@ -86,7 +86,7 @@ struct MessageComposerView: View {
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(HeaderLogoColor.storageKey) private var headerLogoColorHex = HeaderLogoColor.defaultHex
-    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
+    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = PrimaryActionTintSettings.defaultIsEnabled
     @ScaledMetric(relativeTo: .body) private var actionIconSize: CGFloat = 16
     @ScaledMetric(relativeTo: .body) private var plusIconSize: CGFloat = 20
 
@@ -851,9 +851,10 @@ struct MessageComposerView: View {
         Button(action: actionButtonTapped) {
             actionButtonLabel
                 .frame(width: circleSize, height: circleSize)
-                .background(actionButtonBackground)
+                .background(actionAppearance.background)
                 .foregroundStyle(actionButtonForeground)
                 .clipShape(Circle())
+                .overlay { if let edge = actionAppearance.edge { Circle().strokeBorder(edge, lineWidth: 1) } }
         }
         .buttonStyle(.chatTactile(.icon))
         .disabled(isActionButtonDisabled)
@@ -1163,7 +1164,6 @@ struct MessageComposerView: View {
         )
     }
 
-    private var actionButtonBackground: Color { actionAppearance.background }
     private var actionButtonForeground: Color { actionAppearance.foreground }
 
     private var trimmedDraftMessage: String {

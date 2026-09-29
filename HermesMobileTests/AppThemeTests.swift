@@ -89,6 +89,58 @@ final class AppThemeTests: XCTestCase {
 }
 
 final class PrimaryActionTintSettingsTests: XCTestCase {
+    private static let yellow = "#FFD700"
+    private static let white = "#FFFFFF"
+    private var suiteName: String!
+    private var defaults: UserDefaults!
+
+    override func setUp() {
+        super.setUp()
+        suiteName = "PrimaryActionTintSettingsTests-\(UUID().uuidString)"
+        defaults = UserDefaults(suiteName: suiteName)
+        defaults.removePersistentDomain(forName: suiteName)
+    }
+
+    override func tearDown() {
+        defaults.removePersistentDomain(forName: suiteName)
+        defaults = nil
+        suiteName = nil
+        super.tearDown()
+    }
+
+    func testDefaultIsOn() {
+        XCTAssertTrue(PrimaryActionTintSettings.defaultIsEnabled)
+    }
+
+    /// New installs and users who never touched the toggle get the tint.
+    func testUnsetKeyReadsOn() {
+        XCTAssertNil(defaults.object(forKey: PrimaryActionTintSettings.isEnabledKey))
+        XCTAssertTrue(PrimaryActionTintSettings.isEnabled(in: defaults))
+        XCTAssertNil(defaults.object(forKey: PrimaryActionTintSettings.isEnabledKey), "Reading never writes the key")
+    }
+
+    func testExplicitFalseStaysOff() {
+        defaults.set(false, forKey: PrimaryActionTintSettings.isEnabledKey)
+        XCTAssertFalse(PrimaryActionTintSettings.isEnabled(in: defaults))
+    }
+
+    func testExplicitTrueStaysOn() {
+        defaults.set(true, forKey: PrimaryActionTintSettings.isEnabledKey)
+        XCTAssertTrue(PrimaryActionTintSettings.isEnabled(in: defaults))
+    }
+
+    /// A light fill is one that takes dark ink, so Green (luminance just over
+    /// the ink threshold) counts too.
+    func testNeedsEdgeOnlyForLightFillsInLightMode() {
+        for hex in [Self.yellow, Self.white, "#34C759"] {
+            XCTAssertTrue(PrimaryActionTintSettings.needsEdge(themeHex: hex, colorScheme: .light), hex)
+            XCTAssertFalse(PrimaryActionTintSettings.needsEdge(themeHex: hex, colorScheme: .dark), hex)
+        }
+        for hex in ["#5B7CFF", "#AF52DE", "#FF3B30"] {
+            XCTAssertFalse(PrimaryActionTintSettings.needsEdge(themeHex: hex, colorScheme: .light), hex)
+        }
+    }
+
     func testStorageKeyIsStable() {
         XCTAssertEqual(
             PrimaryActionTintSettings.isEnabledKey,
@@ -108,6 +160,68 @@ final class PrimaryActionTintSettingsTests: XCTestCase {
         )
         XCTAssertFalse(
             PrimaryActionTintSettings.usesThemeColor(isEnabled: false, controlIsEnabled: false)
+        )
+    }
+}
+
+/// The Send button's colors, shared by the Sessions and Bot composers.
+final class ChatComposerActionAppearanceTests: XCTestCase {
+    private static let yellow = "#FFD700"
+
+    func testLightThemeColorInLightModeGetsDarkInkAndAnEdge() {
+        let appearance = send(themeHex: Self.yellow, colorScheme: .light)
+
+        XCTAssertEqual(appearance.background, HeaderLogoColor.color(for: Self.yellow))
+        XCTAssertEqual(appearance.foreground, .black)
+        XCTAssertNotNil(appearance.edge)
+    }
+
+    func testWhiteInDarkModeHasNoEdge() {
+        let appearance = send(themeHex: "#FFFFFF", colorScheme: .dark)
+
+        XCTAssertEqual(appearance.background, HeaderLogoColor.color(for: "#FFFFFF"))
+        XCTAssertNil(appearance.edge)
+    }
+
+    func testDarkThemeColorGetsWhiteInkAndNoEdge() {
+        let appearance = send(themeHex: "#5B7CFF", colorScheme: .light)
+
+        XCTAssertEqual(appearance.foreground, .white)
+        XCTAssertNil(appearance.edge)
+    }
+
+    /// An empty draft keeps the muted Send: no theme color, no edge.
+    func testDisabledSendKeepsItsMutedLook() {
+        let appearance = send(themeHex: Self.yellow, colorScheme: .light, isDisabled: true)
+
+        XCTAssertNotEqual(appearance.background, HeaderLogoColor.color(for: Self.yellow))
+        XCTAssertNil(appearance.edge)
+    }
+
+    func testStopHasNoEdge() {
+        let appearance = send(themeHex: Self.yellow, colorScheme: .light, isStop: true)
+
+        XCTAssertEqual(appearance.foreground, .red)
+        XCTAssertNil(appearance.edge)
+    }
+
+    func testTintOffHasNoEdge() {
+        let appearance = send(themeHex: Self.yellow, colorScheme: .light, tintsPrimaryActions: false)
+
+        XCTAssertEqual(appearance.background, .black)
+        XCTAssertNil(appearance.edge)
+    }
+
+    private func send(
+        themeHex: String,
+        colorScheme: ColorScheme,
+        isStop: Bool = false,
+        isDisabled: Bool = false,
+        tintsPrimaryActions: Bool = true
+    ) -> ChatComposerActionAppearance {
+        ChatComposerActionAppearance(
+            isStop: isStop, isDisabled: isDisabled, colorScheme: colorScheme,
+            tintsPrimaryActions: tintsPrimaryActions, themeHex: themeHex
         )
     }
 }
