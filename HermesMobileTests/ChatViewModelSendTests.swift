@@ -2148,6 +2148,69 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(viewModel.activeStreamID, "stream-123")
     }
 
+    /// `/yolo` offers the opposite of the chat's current bypass state and sends
+    /// nothing until the user confirms.
+    @MainActor
+    func testYoloSlashCommandAsksBeforeChangingApprovalBypass() async throws {
+        let requests = LockedStrings()
+        let viewModel = try makeViewModel { request in
+            requests.append("\(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+            guard request.url?.path == "/api/session/yolo" else {
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+            return apiTestJSONResponse(#"{"yolo_enabled": true}"#, for: request)
+        }
+
+        let enableResult = await SlashCommandExecutor.execute(text: "/yolo", viewModel: viewModel)
+
+        XCTAssertEqual(enableResult, .executed(message: nil))
+        XCTAssertEqual(requests.values, [])
+
+        await viewModel.refreshApprovalBypassState()
+        XCTAssertTrue(viewModel.isSessionApprovalBypassEnabled)
+
+        let disableResult = await SlashCommandExecutor.execute(text: "/yolo", viewModel: viewModel)
+
+        XCTAssertEqual(disableResult, .executed(message: nil))
+        XCTAssertEqual(requests.values, ["GET /api/session/yolo"])
+        XCTAssertTrue(viewModel.isSessionApprovalBypassEnabled)
+    }
+
+    @MainActor
+    func testYoloSlashCommandRefusesWhenApprovalsCannotChange() async throws {
+        let context = try makeContext()
+        let serverURL = try XCTUnwrap(URL(string: "https://example.test"))
+        try CacheStore.cacheMessages(
+            [ChatMessage(role: "user", content: "Cached question", timestamp: 1_770_000_001, messageId: "cached-user")],
+            serverURL: serverURL,
+            sessionID: "session-abc",
+            in: context
+        )
+        let cachedViewModel = try makeViewModel { request in
+            guard request.url?.path == "/api/session" else {
+                XCTFail("/yolo should not call the server while viewing cached data.")
+                throw URLError(.badURL)
+            }
+            throw URLError(.timedOut)
+        }
+        await cachedViewModel.loadMessages(modelContext: context)
+        XCTAssertTrue(cachedViewModel.isViewingCachedData)
+
+        let cachedResult = await SlashCommandExecutor.execute(text: "/yolo", viewModel: cachedViewModel)
+
+        XCTAssertEqual(cachedResult, .unsupported(friendlyMessage: "Reconnect to the server to change approvals."))
+
+        let newChatViewModel = try makeViewModel(sessionSummary: SessionSummary(sessionId: nil)) { request in
+            XCTFail("/yolo should not call the server without a session: \(request.url?.path ?? "nil")")
+            throw URLError(.badURL)
+        }
+
+        let newChatResult = await SlashCommandExecutor.execute(text: "/yolo", viewModel: newChatViewModel)
+
+        XCTAssertEqual(newChatResult, .unsupported(friendlyMessage: "Send a message first, then change approvals."))
+    }
+
     @MainActor
     func testLiveStreamEventsUpdateTranscriptBeforeCompletion() async throws {
         let streamClient = SpySSEStreamingClient()

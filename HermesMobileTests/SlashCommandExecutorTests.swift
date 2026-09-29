@@ -107,6 +107,14 @@ final class SlashCommandExecutorTests: XCTestCase {
         )
     }
 
+    func testParseYoloAsTheApprovalBypassCommand() {
+        let parsed = SlashCommandExecutor.parse("/yolo")
+        XCTAssertEqual(parsed?.command?.name, "yolo")
+        XCTAssertEqual(parsed?.command?.noEcho, true)
+        XCTAssertEqual(parsed?.args, "")
+        XCTAssertFalse(SlashCommandExecutor.isKnownUnsupportedCommand("yolo"))
+    }
+
     func testParseBusyInputCommands() {
         for name in ["queue", "steer", "interrupt", "status", "btw", "background", "bg", "goal"] {
             let parsed = SlashCommandExecutor.parse("/\(name)")
