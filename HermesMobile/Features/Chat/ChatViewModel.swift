@@ -850,6 +850,11 @@ final class ChatViewModel {
         currentWorkspace
     }
 
+    /// The profile this chat runs on, trimmed; nil when none is known.
+    var effectiveProfileName: String? {
+        Self.nonEmpty(selectedProfileName ?? currentProfile)
+    }
+
     var selectedProfileTitle: String {
         let profileName = selectedProfileName ?? currentProfile
         guard let profileName, !profileName.isEmpty else {

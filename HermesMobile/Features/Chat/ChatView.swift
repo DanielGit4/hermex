@@ -1714,6 +1714,7 @@ struct ChatView: View {
     private var headerSubtitle: String? {
         ChatToolbarSubtitleResolver.subtitle(
             workspacePath: viewModel.selectedWorkspacePath,
+            profileName: viewModel.effectiveProfileName,
             profileTitle: viewModel.selectedProfileTitle
         )
     }
@@ -3198,9 +3199,16 @@ struct ChatToolbarActionSlot<Content: View>: View {
 }
 
 enum ChatToolbarSubtitleResolver {
-    static func subtitle(workspacePath: String?, profileTitle: String?) -> String? {
+    /// The workspace basename, followed by " · <profile>" when the chat runs
+    /// on a profile other than `default` (the composer row no longer shows
+    /// it); without a workspace, the profile title unless it is generic.
+    static func subtitle(workspacePath: String?, profileName: String?, profileTitle: String?) -> String? {
         if let workspace = nonEmpty(workspacePath) {
-            return workspace.lastPathComponentFallback
+            let basename = workspace.lastPathComponentFallback
+            guard let name = nonEmpty(profileName), name != "default",
+                  let profile = nonEmpty(profileTitle)
+            else { return basename }
+            return "\(basename) · \(profile)"
         }
 
         guard let profile = nonEmpty(profileTitle), profile != "Profile" else {
