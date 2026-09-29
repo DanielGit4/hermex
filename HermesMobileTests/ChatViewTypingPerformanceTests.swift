@@ -1019,6 +1019,50 @@ import XCTest
         }
     }
 
+    /// A running turn's "Working for" counter ticks once a second inside its
+    /// own `TimelineView`: ten seconds of a quiet run re-run the working row
+    /// about ten times and no pass of the chat screen, its transcript or any
+    /// message row. Heartbeats keep the transport fresh so no "Checking" state
+    /// starts. Prints one `WORKING-ROW-PERF` line.
+    func testARunningTurnReRunsOnlyItsWorkingRow() async throws {
+        let fixture = try ChatTypingFixture(messageCount: 40, answersChatStart: true)
+        defer { fixture.tearDown() }
+        let stream = ScriptedSSEStreamingClient()
+        let viewModel = fixture.makeStreamingViewModel(stream: stream)
+        fixture.viewModel = viewModel
+        defer { fixture.viewModel = nil }
+
+        try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture) {
+                fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
+            let didStart = await viewModel.sendMessage("Summarize what changed in the parser.")
+            XCTAssertTrue(didStart, "The turn must start a stream")
+            stream.emit(.token("Streaming "))
+            try await settle(window, fixture: fixture) { true }
+
+            let before = ViewBodyProbe.counts ?? [:]
+            for _ in 0..<10 {
+                stream.emit(.heartbeat)
+                try await Task.sleep(for: .seconds(1))
+                await renderFrames(2)
+            }
+            let passes = (ViewBodyProbe.counts ?? [:]).merging(before) { $0 - $1 }
+            let sites: [ViewBodyProbe.Site] = [
+                .workingRow, .chatView, .chatViewport, .transcript, .transcriptBlock, .transcriptRow, .messageBubble
+            ]
+            print((["WORKING-ROW-PERF seconds=10"] + sites.map { "\($0.rawValue)=\(passes[$0] ?? 0)" }).joined(separator: " "))
+
+            for site in sites.dropFirst() {
+                XCTAssertEqual(passes[site] ?? 0, 0, "The running timer re-ran \(site.rawValue)")
+            }
+            XCTAssertTrue((9...13).contains(passes[.workingRow] ?? 0), "The working row must tick about once a second")
+
+            stream.emit(.done(DoneStreamEvent()))
+            try await settle(window, fixture: fixture) { true }
+        }
+    }
+
     /// Streams eight words into a 40-message chat with haptics on, the
     /// streaming pulse set to `isEnabled` and no throttle window, then
     /// restores both settings.

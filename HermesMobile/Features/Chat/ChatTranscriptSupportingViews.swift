@@ -970,6 +970,7 @@ struct ChatWorkingRowView: View {
 
     var body: some View {
         TimelineView(.periodic(from: startedAt, by: 1)) { context in
+            let _ = ViewBodyProbe.hit(.workingRow)
             HStack(spacing: 8) {
                 dots
 
@@ -1270,6 +1271,8 @@ struct PinnedLocalNoticeStack: View {
 enum ViewBodyProbe {
     enum Site: String, CaseIterable {
         case chatView, chatViewport, transcript, transcriptBlock, transcriptRow, messageBubble, composer
+        /// A body: the working row's timeline content, once per tick.
+        case workingRow
         /// Not a body: a reply scrolling into or out of the viewport, which
         /// re-runs its bubble once to start or stop collecting glyphs.
         case replyVisibility
