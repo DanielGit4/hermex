@@ -33,9 +33,9 @@ struct ComposerToolbarEdgeFades: Equatable {
     }
 }
 
-/// Horizontal scroller for the composer toolbar row (add, model, reasoning,
-/// workspace, profile, git branch, mic, context meter). The Stop/Send circle
-/// stays outside it, pinned to the row's trailing edge.
+/// Horizontal scroller for the Bot composer's toolbar row (add, model and
+/// effort, workspace, fast, context meter, mic). The Stop/Send circle stays
+/// outside it, pinned to the row's trailing edge.
 struct ComposerToolbarScroller<Content: View>: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.layoutDirection) private var layoutDirection

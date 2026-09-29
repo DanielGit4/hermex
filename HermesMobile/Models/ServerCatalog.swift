@@ -724,6 +724,19 @@ struct ModelCatalogOption: Identifiable, Equatable, Hashable, Sendable {
     let id: String
     let displayName: String
     let providerID: String?
+
+    /// Claude ids with a mechanical label get a formatted name
+    /// (`ModelDisplayName.full`); every other label is kept as sent.
+    init(id: String, displayName: String, providerID: String?) {
+        self.id = id
+        self.displayName = ModelDisplayName.full(modelID: id, label: displayName)
+        self.providerID = providerID
+    }
+
+    /// The composer chip's name: "Opus 5.5" for a Claude id, else `displayName`.
+    var shortDisplayName: String {
+        ModelDisplayName.short(modelID: id, fullName: displayName)
+    }
 }
 
 extension String {

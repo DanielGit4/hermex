@@ -84,7 +84,6 @@ private struct ComposerQuoteDetailView: View {
 struct MessageComposerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
-    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(HeaderLogoColor.storageKey) private var headerLogoColorHex = HeaderLogoColor.defaultHex
     @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
@@ -206,6 +205,7 @@ struct MessageComposerView: View {
     @State private var noticeMessage: String?
     @State private var showsAllModelsSheet = false
     @State private var showsWorkspaceSheet = false
+    @State private var showsBranchSheet = false
     @State private var optimisticWorkspacePath: String?
     @State private var favoriteModelKeys = ModelFavoritesStore.shared.favoriteKeys
     @State private var recentModelKeys = ModelRecentsStore.shared.recentKeys
@@ -215,7 +215,7 @@ struct MessageComposerView: View {
 
     @State private var deferredUploadFocusPhase: DeferredUploadFocusPhase = .none
     @State private var showMediaPicker = false
-    @State private var presentFilesAfterMediaPickerDismisses = false
+    @State private var pendingPresentationAfterPicker: ComposerPickerFollowUp?
     @State private var showFileImporter = false
     @State private var voiceInput = ComposerVoiceInputController()
     @State private var voiceNoteRecorder = ComposerVoiceNoteRecorder()
@@ -507,8 +507,11 @@ struct MessageComposerView: View {
                         existingCount: pendingAttachments.count,
                         maximum: HermexAttachmentPickerPolicy.maximumSessionImages
                     ),
+                    // Built only while the panel is up: this closure re-runs
+                    // with every keystroke.
+                    composerOptions: showMediaPicker ? composerOptionRows : [],
                     onChooseFiles: {
-                        presentFilesAfterMediaPickerDismisses = true
+                        pendingPresentationAfterPicker = .files
                     },
                     onAdd: { media in
                         guard !media.isEmpty else { return }
@@ -557,15 +560,19 @@ struct MessageComposerView: View {
         }
         .onChange(of: showMediaPicker) { _, isPresented in
             guard !isPresented else { return }
-            guard presentFilesAfterMediaPickerDismisses else {
+            guard let followUp = pendingPresentationAfterPicker else {
                 if !showFileImporter { restoreFocusAfterPresentationDismissalSettles() }
                 return
             }
-            presentFilesAfterMediaPickerDismisses = false
+            pendingPresentationAfterPicker = nil
             prepareForComposerPresentation()
             Task { @MainActor in
                 await Task.yield()
-                showFileImporter = true
+                switch followUp {
+                case .files: showFileImporter = true
+                case .workspace: showsWorkspaceSheet = true
+                case .branch: showsBranchSheet = true
+                }
             }
         }
         .sheet(isPresented: $showsAllModelsSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
@@ -615,6 +622,14 @@ struct MessageComposerView: View {
             )
             .presentationDetents([.medium, .large])
             .presentationDragIndicator(.visible)
+        }
+        .sheet(isPresented: $showsBranchSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
+            ComposerBranchSheet(
+                gitViewModel: gitViewModel,
+                onSelect: { showsBranchSheet = false; onSelectGitBranch($0) },
+                onCreate: { showsBranchSheet = false; onCreateGitBranch($0) },
+                onRefresh: onRefreshGitBranches
+            )
         }
         .sheet(item: $selectedQuote, onDismiss: restoreFocusAfterPresentationIfNeeded) { quote in
             ComposerQuoteDetailView(
@@ -719,6 +734,7 @@ struct MessageComposerView: View {
             || shouldRestoreFocusAfterPresentation
             || showsAllModelsSheet
             || showsWorkspaceSheet
+            || showsBranchSheet
             || showMediaPicker
             || showFileImporter
     }
@@ -784,28 +800,31 @@ struct MessageComposerView: View {
         .modifier(ChatComposerSurfaceStyle(isExpanded: isExpanded))
     }
 
-    /// Card-state row under the surface: a scroller of secondary controls plus
-    /// the pinned Stop/Send circle. Visual order is VoiceOver order.
+    /// Card-state row under the surface. Nothing scrolls: `+` and the model
+    /// chip lead, mic, context ring (once it has data) and Stop/Send are pinned
+    /// trailing, and the chip truncates when space runs out. Workspace, profile
+    /// and branch live in the `+` panel. Visual order is VoiceOver order.
     private var toolbarRow: some View {
         HStack(alignment: .center, spacing: 8) {
-            ComposerToolbarScroller {
-                composerPlusMenu
+            composerPlusMenu
 
-                modelEffortControl
+            modelEffortControl
 
-                workspaceSelector
+            Spacer(minLength: 0)
 
-                profileSelector
-
-                gitBranchPicker
-
+            HStack(spacing: 0) {
                 voiceControlButton
+                    .accessibilityIdentifier("composer.voice")
 
-                ContextWindowIndicatorView(snapshot: contextWindowSnapshot)
-                    .padding(.horizontal, 4)
+                if contextWindowSnapshot?.percentage != nil {
+                    ContextWindowIndicatorView(snapshot: contextWindowSnapshot)
+                        .accessibilityIdentifier("composer.contextRing")
+                }
+
+                actionButton
+                    .accessibilityIdentifier("composer.send")
             }
-
-            actionButton
+            .fixedSize()
         }
     }
 
@@ -915,30 +934,34 @@ struct MessageComposerView: View {
         .buttonStyle(.plain)
         .tint(metaControlColor)
         .disabled(isConfigurationControlDisabled)
-        .accessibilityElement(children: .ignore)
+        // Labelled on the Button itself so it keeps its button trait and
+        // VoiceOver action.
         .accessibilityLabel("Composer options")
+        .accessibilityIdentifier("composer.plus")
     }
 
-    @ViewBuilder
-    private var gitBranchPicker: some View {
-        // One "Git Actions" toggle covers every git control in chat (#189), so the
-        // branch chip goes with the toolbar menu rather than lingering alone.
-        if showsGitControls, gitViewModel.hasRepository {
-            GitBranchPickerButton(
-                currentBranch: gitViewModel.currentBranchName,
-                branches: gitViewModel.branches,
-                isLoading: gitViewModel.isLoadingBranches,
-                isSwitching: gitViewModel.isSwitchingBranch,
-                isDisabled: isReadOnly || isWaitingForStream,
-                onSelect: onSelectGitBranch,
-                onCreate: onCreateGitBranch,
-                onRefresh: onRefreshGitBranches
-            )
-        }
-    }
-
-    private var usesAccessibilityLayout: Bool {
-        dynamicTypeSize.isAccessibilitySize
+    /// Workspace, Profile and Branch rows for the `+` panel. One "Git Actions"
+    /// toggle covers every git control in chat (#189), so Branch follows it.
+    private var composerOptionRows: [ComposerOptionRow] {
+        ComposerOptionRow.sessionRows(
+            workspaceTitle: workspaceTitle,
+            profileTitle: selectedProfileTitle,
+            profileMenu: isSingleProfileMode ? nil : {
+                ComposerProfileMenu.make(
+                    profileOptions: profileOptions,
+                    selectedProfileName: selectedProfileName
+                ) { profile in
+                    onSelectProfile(profile)
+                    showMediaPicker = false
+                }
+            },
+            branchName: showsGitControls && gitViewModel.hasRepository ? gitViewModel.currentBranchName : nil,
+            isConfigurationDisabled: isConfigurationControlDisabled,
+            isBranchDisabled: isReadOnly || isWaitingForStream
+                || gitViewModel.isLoadingBranches || gitViewModel.isSwitchingBranch,
+            onWorkspace: { pendingPresentationAfterPicker = .workspace },
+            onBranch: { pendingPresentationAfterPicker = .branch }
+        )
     }
 
     private var metaControlFont: Font {
@@ -947,33 +970,6 @@ struct MessageComposerView: View {
 
     private var metaChevronFont: Font {
         AppFont.caption2()
-    }
-
-    private var workspaceSelector: some View {
-        ComposerWorkspaceSelectorButton(
-            title: workspaceTitle,
-            isDisabled: isConfigurationControlDisabled,
-            color: metaControlColor,
-            controlFont: metaControlFont,
-            chevronFont: metaChevronFont
-        ) {
-            prepareForComposerPresentation()
-            showsWorkspaceSheet = true
-        }
-    }
-
-    private var profileSelector: some View {
-        ComposerProfileSelectorMenu(
-            profileOptions: profileOptions,
-            selectedProfileName: selectedProfileName,
-            selectedProfileTitle: selectedProfileTitle,
-            isStatic: isSingleProfileMode,
-            isDisabled: isConfigurationControlDisabled,
-            color: metaControlColor,
-            controlFont: metaControlFont,
-            chevronFont: metaChevronFont,
-            onSelectProfile: onSelectProfile
-        )
     }
 
     private var modelEffortControl: some View {
@@ -990,6 +986,7 @@ struct MessageComposerView: View {
             onSelectEffort: onSelectReasoningEffort,
             onShowAllModels: showAllModels
         )
+        .accessibilityIdentifier("composer.modelEffort")
     }
 
     private var currentModelEffortSelection: ComposerModelEffortSelection {

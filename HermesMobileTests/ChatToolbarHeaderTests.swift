@@ -6,6 +6,7 @@ final class ChatToolbarHeaderTests: XCTestCase {
         XCTAssertEqual(
             ChatToolbarSubtitleResolver.subtitle(
                 workspacePath: "/Users/example/hermes-mobile",
+                profileName: nil,
                 profileTitle: "Default"
             ),
             "hermes-mobile"
@@ -16,6 +17,7 @@ final class ChatToolbarHeaderTests: XCTestCase {
         XCTAssertEqual(
             ChatToolbarSubtitleResolver.subtitle(
                 workspacePath: nil,
+                profileName: "work",
                 profileTitle: "Work"
             ),
             "Work"
@@ -23,7 +25,38 @@ final class ChatToolbarHeaderTests: XCTestCase {
     }
 
     func testSubtitleOmitsGenericOrBlankContext() {
-        XCTAssertNil(ChatToolbarSubtitleResolver.subtitle(workspacePath: nil, profileTitle: "Profile"))
-        XCTAssertNil(ChatToolbarSubtitleResolver.subtitle(workspacePath: "   ", profileTitle: "   "))
+        XCTAssertNil(ChatToolbarSubtitleResolver.subtitle(workspacePath: nil, profileName: nil, profileTitle: "Profile"))
+        XCTAssertNil(ChatToolbarSubtitleResolver.subtitle(workspacePath: "   ", profileName: "  ", profileTitle: "   "))
+    }
+
+    /// The profile left the composer row, so a non-default one shows here.
+    func testSubtitleAddsANonDefaultProfileAfterTheWorkspace() {
+        XCTAssertEqual(
+            ChatToolbarSubtitleResolver.subtitle(
+                workspacePath: "/Users/example/hermes-mobile",
+                profileName: " work ",
+                profileTitle: "Work"
+            ),
+            "hermes-mobile · Work"
+        )
+    }
+
+    func testSubtitleKeepsTheDefaultProfileHidden() {
+        XCTAssertEqual(
+            ChatToolbarSubtitleResolver.subtitle(
+                workspacePath: "/Users/example/hermes-mobile",
+                profileName: "default",
+                profileTitle: "Default"
+            ),
+            "hermes-mobile"
+        )
+        XCTAssertEqual(
+            ChatToolbarSubtitleResolver.subtitle(
+                workspacePath: "/Users/example/hermes-mobile",
+                profileName: "   ",
+                profileTitle: "Profile"
+            ),
+            "hermes-mobile"
+        )
     }
 }

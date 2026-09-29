@@ -1,68 +1,8 @@
 import SwiftUI
 
-struct GitBranchPickerButton: View {
-    @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
-
-    let currentBranch: String
-    let branches: GitBranches?
-    let isLoading: Bool
-    let isSwitching: Bool
-    let isDisabled: Bool
-    let onSelect: (GitCheckoutTarget) -> Void
-    let onCreate: (GitCheckoutTarget) -> Void
-    let onRefresh: () -> Void
-
-    @State private var showsPicker = false
-
-    var body: some View {
-        Button {
-            HapticButtonHaptics.tap(isEnabled: isHapticsEnabled)
-            showsPicker = true
-        } label: {
-            // Quiet inline control matching the composer toolbar row: no pill
-            // background, 44 pt tall for the hit target.
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.triangle.branch")
-                    .font(AppFont.subheadline())
-                Text(currentBranch)
-                    .font(AppFont.subheadline())
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Image(systemName: "chevron.down")
-                    .font(AppFont.caption2())
-            }
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 6)
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.chatTactile(.compactControl))
-        .disabled(isDisabled || isLoading || isSwitching)
-        .accessibilityLabel("Current Git branch")
-        .accessibilityValue(currentBranch)
-        .popover(isPresented: $showsPicker, arrowEdge: .bottom) {
-            GitBranchPickerSheet(
-                branches: branches,
-                currentBranch: currentBranch,
-                isLoading: isLoading,
-                isSwitching: isSwitching,
-                onSelect: { target in
-                    showsPicker = false
-                    onSelect(target)
-                },
-                onCreate: { target in
-                    showsPicker = false
-                    onCreate(target)
-                },
-                onRefresh: onRefresh
-            )
-            .frame(minWidth: 300, idealWidth: 360, maxWidth: 400, minHeight: 260, idealHeight: 360, maxHeight: 480)
-            .presentationCompactAdaptation(.popover)
-        }
-    }
-}
-
-private struct GitBranchPickerSheet: View {
+/// Local and remote branches to switch to, plus create and reload. The
+/// Sessions composer opens it from the `+` panel's Branch row.
+struct GitBranchPickerSheet: View {
     let branches: GitBranches?
     let currentBranch: String
     let isLoading: Bool

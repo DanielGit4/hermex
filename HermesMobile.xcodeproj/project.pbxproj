@@ -135,6 +135,10 @@
 		D500000000000000000002 /* TaskAgendaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D500000000000000000001 /* TaskAgendaTests.swift */; };
 		C03910000000000000000012 /* MemoryViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03900000000000000000012 /* MemoryViewModelTests.swift */; };
 		C03910000000000000000013 /* ModelCatalogTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03900000000000000000013 /* ModelCatalogTests.swift */; };
+		D89B786F0000000000000001 /* ModelDisplayName.swift in Sources */ = {isa = PBXBuildFile; fileRef = D89B786F0000000000000002 /* ModelDisplayName.swift */; };
+		D89B786F0000000000000003 /* ChatComposerOptionRows.swift in Sources */ = {isa = PBXBuildFile; fileRef = D89B786F0000000000000004 /* ChatComposerOptionRows.swift */; };
+		D89B786F0000000000000005 /* ModelDisplayNameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D89B786F0000000000000006 /* ModelDisplayNameTests.swift */; };
+		D89B786F0000000000000007 /* ChatComposerBottomRowLayoutTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = D89B786F0000000000000008 /* ChatComposerBottomRowLayoutTests.swift */; };
 		C03910000000000000000014 /* MessageActionContextTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03900000000000000000014 /* MessageActionContextTests.swift */; };
 		C03910000000000000000015 /* SessionIdentityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03900000000000000000015 /* SessionIdentityTests.swift */; };
 		C03910000000000000000016 /* TranscriptDisplayModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = C03900000000000000000016 /* TranscriptDisplayModelTests.swift */; };
@@ -753,6 +757,10 @@
 		D500000000000000000001 /* TaskAgendaTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskAgendaTests.swift; sourceTree = "<group>"; };
 		C03900000000000000000012 /* MemoryViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MemoryViewModelTests.swift; sourceTree = "<group>"; };
 		C03900000000000000000013 /* ModelCatalogTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelCatalogTests.swift; sourceTree = "<group>"; };
+		D89B786F0000000000000002 /* ModelDisplayName.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDisplayName.swift; sourceTree = "<group>"; };
+		D89B786F0000000000000004 /* ChatComposerOptionRows.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatComposerOptionRows.swift; sourceTree = "<group>"; };
+		D89B786F0000000000000006 /* ModelDisplayNameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelDisplayNameTests.swift; sourceTree = "<group>"; };
+		D89B786F0000000000000008 /* ChatComposerBottomRowLayoutTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatComposerBottomRowLayoutTests.swift; sourceTree = "<group>"; };
 		C03900000000000000000014 /* MessageActionContextTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MessageActionContextTests.swift; sourceTree = "<group>"; };
 		C03900000000000000000015 /* SessionIdentityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionIdentityTests.swift; sourceTree = "<group>"; };
 		C03900000000000000000016 /* TranscriptDisplayModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptDisplayModelTests.swift; sourceTree = "<group>"; };
@@ -1409,6 +1417,8 @@
 				D600000000000000000011 /* TaskRunHistoryTests.swift */,
 				C03900000000000000000012 /* MemoryViewModelTests.swift */,
 				C03900000000000000000013 /* ModelCatalogTests.swift */,
+				D89B786F0000000000000006 /* ModelDisplayNameTests.swift */,
+				D89B786F0000000000000008 /* ChatComposerBottomRowLayoutTests.swift */,
 				C03900000000000000000014 /* MessageActionContextTests.swift */,
 				C03900000000000000000015 /* SessionIdentityTests.swift */,
 				C03900000000000000000016 /* TranscriptDisplayModelTests.swift */,
@@ -1578,6 +1588,7 @@
 				1A2B3C4D5E6F7000000000BD /* Workspace.swift */,
 				C03120000000000000F001 /* GitWorkspace.swift */,
 				1A2B3C4D5E6F7000000000BE /* ServerCatalog.swift */,
+				D89B786F0000000000000002 /* ModelDisplayName.swift */,
 				1A2B3C4D5E6F70000000142 /* ModelFavoritesStore.swift */,
 				1A2B3C4D5E6F700000000301 /* ServerAccount.swift */,
 				1A2B3C4D5E6F7000000000DF /* ToolCall.swift */,
@@ -1767,6 +1778,7 @@
 				C04900000000000000000002 /* ChatComposerTextInputView.swift */,
 				C04900000000000000000004 /* ChatComposerVoiceControls.swift */,
 				C042A000000000000000002 /* ChatComposerSelectorControls.swift */,
+				D89B786F0000000000000004 /* ChatComposerOptionRows.swift */,
 				C040F000000000000000002 /* ProviderGlyph.swift */,
 				C0A5C9000000000000000002 /* ChatComposerToolbarScroller.swift */,
 				C042A000000000000000004 /* ChatComposerSelectorSheets.swift */,
@@ -2483,6 +2495,7 @@
 				1A2B3C4D5E6F7000000000AA /* ChatMessage.swift in Sources */,
 				1A2B3C4D5E6F7000000000AD /* Workspace.swift in Sources */,
 				1A2B3C4D5E6F7000000000AE /* ServerCatalog.swift in Sources */,
+				D89B786F0000000000000001 /* ModelDisplayName.swift in Sources */,
 				1A2B3C4D5E6F70000000140 /* ModelFavoritesStore.swift in Sources */,
 				1A2B3C4D5E6F7000000000DE /* ToolCall.swift in Sources */,
 				1A2B3C4D5E6F7000000000A9 /* JSONValue.swift in Sources */,
@@ -2538,6 +2551,7 @@
 					C04900000000000000000001 /* ChatComposerTextInputView.swift in Sources */,
 					C04900000000000000000003 /* ChatComposerVoiceControls.swift in Sources */,
 					C042A000000000000000001 /* ChatComposerSelectorControls.swift in Sources */,
+					D89B786F0000000000000003 /* ChatComposerOptionRows.swift in Sources */,
 					C040F000000000000000001 /* ProviderGlyph.swift in Sources */,
 					C0A5C9000000000000000001 /* ChatComposerToolbarScroller.swift in Sources */,
 					C042A000000000000000003 /* ChatComposerSelectorSheets.swift in Sources */,
@@ -2791,6 +2805,8 @@
 				D600000000000000000012 /* TaskRunHistoryTests.swift in Sources */,
 				C03910000000000000000012 /* MemoryViewModelTests.swift in Sources */,
 				C03910000000000000000013 /* ModelCatalogTests.swift in Sources */,
+				D89B786F0000000000000005 /* ModelDisplayNameTests.swift in Sources */,
+				D89B786F0000000000000007 /* ChatComposerBottomRowLayoutTests.swift in Sources */,
 				C03910000000000000000014 /* MessageActionContextTests.swift in Sources */,
 				C03910000000000000000015 /* SessionIdentityTests.swift in Sources */,
 				C03910000000000000000016 /* TranscriptDisplayModelTests.swift in Sources */,

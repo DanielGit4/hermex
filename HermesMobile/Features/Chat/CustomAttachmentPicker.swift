@@ -334,10 +334,28 @@ enum HermexAttachmentImageProcessor {
 
 enum HermexAttachmentPickerLayoutMetrics {
     static let menuMaximumWidth: CGFloat = 280
+    /// With composer options the card spans the phone, so "Workspace:
+    /// hermes-mobile" fits instead of truncating to a few letters.
+    static let optionsMenuMaximumWidth: CGFloat = 400
     static let menuLeadingPadding: CGFloat = 12
+    static let menuRowHeight: CGFloat = 66
+    static let menuVerticalPadding: CGFloat = 12
+    /// The divider between the attachment choices and the composer options,
+    /// with its padding.
+    static let optionDividerHeight: CGFloat = 9
+    private static let attachmentRowCount = 3
 
-    static func menuWidth(containerWidth: CGFloat) -> CGFloat {
-        min(menuMaximumWidth, max(1, containerWidth - (menuLeadingPadding * 2)))
+    static func menuWidth(containerWidth: CGFloat, hasComposerOptions: Bool = false) -> CGFloat {
+        let maximum = hasComposerOptions ? optionsMenuMaximumWidth : menuMaximumWidth
+        return min(maximum, max(1, containerWidth - (menuLeadingPadding * 2)))
+    }
+
+    /// The menu card's natural height: Files, Camera, Photos, then any
+    /// composer option rows under a divider.
+    static func menuHeight(optionRowCount: Int) -> CGFloat {
+        let rows = CGFloat(attachmentRowCount + optionRowCount) * menuRowHeight
+        let divider = optionRowCount > 0 ? optionDividerHeight : 0
+        return rows + divider + menuVerticalPadding * 2
     }
 }
 
@@ -351,14 +369,17 @@ private struct HermexAttachmentPickerLayout {
     let leadingPadding: CGFloat
     let bottomPadding: CGFloat
 
-    static func resolve(containerSize: CGSize, mode: HermexAttachmentPickerMode) -> Self {
+    static func resolve(containerSize: CGSize, mode: HermexAttachmentPickerMode, optionRowCount: Int) -> Self {
         let width = max(1, containerSize.width)
         let height = max(1, containerSize.height)
         let expanded = mode == .photos || mode == .camera
         let edgePadding: CGFloat = expanded && width >= 700 ? 28 : 12
         let panelWidth = expanded
             ? min(expandedMaximumWidth, max(1, width - (edgePadding * 2)))
-            : HermexAttachmentPickerLayoutMetrics.menuWidth(containerWidth: width)
+            : HermexAttachmentPickerLayoutMetrics.menuWidth(
+                containerWidth: width,
+                hasComposerOptions: optionRowCount > 0
+            )
         let leadingPadding = expanded
             ? (width - panelWidth) / 2
             : HermexAttachmentPickerLayoutMetrics.menuLeadingPadding
@@ -367,7 +388,7 @@ private struct HermexAttachmentPickerLayout {
         let preferredExpandedHeight = max(460, height * 0.66)
         let panelHeight = expanded
             ? min(expandedMaximumHeight, min(preferredExpandedHeight, availableHeight))
-            : min(222, availableHeight)
+            : min(HermexAttachmentPickerLayoutMetrics.menuHeight(optionRowCount: optionRowCount), availableHeight)
         return Self(
             panelSize: CGSize(width: panelWidth, height: panelHeight),
             leadingPadding: leadingPadding,
@@ -529,13 +550,20 @@ struct HermexAttachmentPickerView: View {
     @State private var isDismissing = false
 
     let imageCapacity: Int
+    /// Settings listed under the attachment choices; the Sessions composer
+    /// passes Workspace, Profile and Branch, the Bot composer none.
+    var composerOptions: [ComposerOptionRow] = []
     let onChooseFiles: () -> Void
     let onAdd: ([HermexPickedMedia]) -> Void
     let onDismiss: () -> Void
 
     var body: some View {
         GeometryReader { proxy in
-            let layout = HermexAttachmentPickerLayout.resolve(containerSize: proxy.size, mode: mode)
+            let layout = HermexAttachmentPickerLayout.resolve(
+                containerSize: proxy.size,
+                mode: mode,
+                optionRowCount: composerOptions.count
+            )
             ZStack(alignment: .bottomLeading) {
                 Button(action: dismissPicker) {
                     Color.black.opacity(isVisible ? (mode == .menu ? 0.08 : 0.2) : 0)
@@ -598,7 +626,21 @@ struct HermexAttachmentPickerView: View {
         .clipShape(.rect(cornerRadius: 46, style: .continuous))
     }
 
+    @ViewBuilder
     private var menuPanel: some View {
+        if composerOptions.isEmpty {
+            menuRows
+        } else {
+            // Scrolls only when the rows cannot fit above the keyboard, such
+            // as on a short phone or at an accessibility text size.
+            ViewThatFits(in: .vertical) {
+                menuRows
+                ScrollView { menuRows }
+            }
+        }
+    }
+
+    private var menuRows: some View {
         VStack(spacing: 0) {
             menuRow(title: "Files", systemImage: "paperclip", enabled: !isBusy, action: chooseFiles)
             menuRow(title: "Camera", systemImage: "camera", enabled: imageChoicesAreEnabled) {
@@ -608,8 +650,17 @@ struct HermexAttachmentPickerView: View {
                 animate { mode = .photos }
                 Task { await model.loadLibrary() }
             }
+            if !composerOptions.isEmpty {
+                Divider()
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 4)
+                ForEach(composerOptions) { row in
+                    ComposerOptionRowView(row: row, onPresent: chooseOption)
+                        .disabled(isBusy || isDismissing)
+                }
+            }
         }
-        .padding(.vertical, 12)
+        .padding(.vertical, HermexAttachmentPickerLayoutMetrics.menuVerticalPadding)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Attachment choices")
     }
@@ -816,6 +867,12 @@ struct HermexAttachmentPickerView: View {
     private func chooseFiles() {
         guard !isBusy, !isDismissing else { return }
         onChooseFiles()
+        animateDismissal()
+    }
+
+    private func chooseOption(_ action: () -> Void) {
+        guard !isBusy, !isDismissing else { return }
+        action()
         animateDismissal()
     }
 
