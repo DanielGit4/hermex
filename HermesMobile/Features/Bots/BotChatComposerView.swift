@@ -18,7 +18,7 @@ struct BotChatComposerView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.scenePhase) private var scenePhase
     @AppStorage(HeaderLogoColor.storageKey) private var themeHex = HeaderLogoColor.defaultHex
-    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
+    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = PrimaryActionTintSettings.defaultIsEnabled
     @AppStorage(BotQuickReplyStore.storageKey) private var storedQuickReplies = ""
     /// Decoded once per storage change, not on every keystroke's body pass.
     @State private var quickReplies: [BotQuickReply] = []
@@ -463,6 +463,7 @@ struct BotChatComposerView: View {
                 .background(appearance.background)
                 .foregroundStyle(appearance.foreground)
                 .clipShape(Circle())
+                .overlay { if let edge = appearance.edge { Circle().strokeBorder(edge, lineWidth: 1) } }
         }
         .buttonStyle(.chatTactile(.icon))
         .disabled(!canSend)

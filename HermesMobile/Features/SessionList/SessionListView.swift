@@ -30,10 +30,8 @@ struct SessionListView: View {
     @State private var ratingRequestID: UUID?
     @State private var ratingMoment: RatingPromptMoment = .coldLaunch
     @Environment(\.modelContext) private var modelContext
-    @Environment(\.colorScheme) private var colorScheme
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @State private var viewModel: SessionListViewModel
     @State private var navigationState: SessionNavigationState
     @State private var sessionPendingRename: SessionSummary?
@@ -83,8 +81,6 @@ struct SessionListView: View {
     @AppStorage private var expandedMessagingPlatforms: String
     @AppStorage private var storedProfileFilter: String
     @AppStorage(HeaderLogoColor.storageKey) private var headerLogoColorHex = HeaderLogoColor.defaultHex
-    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
-    @AppStorage(GlassPreference.isEnabledKey) private var isGlassEnabled = GlassPreference.defaultIsEnabled
     @AppStorage(SessionIdentitySettings.displayNameKey) private var identityDisplayName = ""
     @AppStorage(SessionIdentitySettings.initialsKey) private var identityInitials = ""
     @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
@@ -521,7 +517,10 @@ struct SessionListView: View {
             content
 
             if !isSearchingSessions {
-                newSessionButton
+                SessionListNewChatButton(
+                    isViewingCachedData: viewModel.isViewingCachedData,
+                    isCreatingNewChat: navigationState.isCreatingNewChat
+                ) { openNewChat() }
                     .padding(.trailing, 24)
                     .padding(.bottom, 22)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -962,42 +961,6 @@ struct SessionListView: View {
         }
     }
 
-    private var newSessionButton: some View {
-        HapticButton(feedbackStyle: .medium) {
-            openNewChat()
-        } label: {
-            HStack(spacing: 10) {
-                Image(systemName: "square.and.pencil")
-                    .font(.title3.weight(.semibold))
-
-                Text("Chat")
-                    .font(.headline.weight(.semibold))
-            }
-            .foregroundStyle(newSessionButtonForegroundColor)
-            .padding(.horizontal, 22)
-            .frame(height: 58)
-            // Lock the hit region to the visible capsule so taps in the padding,
-            // rounded ends, and icon↔text gap start a new chat instead of falling
-            // through to the session row behind the FAB (issue #242).
-            .contentShape(Capsule())
-            .background {
-                if let fill = newSessionButtonSolidThemeFill {
-                    Capsule().fill(fill)
-                }
-            }
-            .sessionsChromeGlass(
-                isInteractive: true,
-                tint: newSessionButtonGlassTint,
-                fallbackMaterial: .regularMaterial,
-                in: Capsule()
-            )
-        }
-        .buttonStyle(SessionListFloatingChatButtonStyle())
-        .disabled(viewModel.isViewingCachedData || navigationState.isCreatingNewChat)
-        .opacity(viewModel.isViewingCachedData ? 0.45 : 1)
-        .accessibilityLabel("New Session")
-    }
-
     private func sessionListGroups(profileFilter: String?) -> SessionListGroups {
         viewModel.sessionListGroups(
             searchText: searchText,
@@ -1128,50 +1091,6 @@ struct SessionListView: View {
 
     private var selectedHeaderLogoColor: Color {
         HeaderLogoColor.color(for: headerLogoColorHex)
-    }
-
-    private var newSessionButtonUsesThemeColor: Bool {
-        PrimaryActionTintSettings.usesThemeColor(
-            isEnabled: tintsPrimaryActions,
-            controlIsEnabled: !viewModel.isViewingCachedData
-        )
-    }
-
-    private var newSessionButtonSurface: AdaptiveGlassSurface {
-        AdaptiveGlassSurface.resolve(
-            liquidGlassAvailable: GlassPreference.isLiquidGlassSupported,
-            isGlassEnabled: isGlassEnabled,
-            reduceTransparency: reduceTransparency
-        )
-    }
-
-    // The glass tint is dropped on the material/opaque fallback surfaces, so a
-    // themed button would otherwise show its contrast-picked foreground over a
-    // neutral material (e.g. black-on-dark for a light theme color). Draw a
-    // solid header-color fill there so the button stays themed and readable;
-    // the liquid-glass surface keeps tinting via `newSessionButtonGlassTint`.
-    private var newSessionButtonSolidThemeFill: Color? {
-        guard newSessionButtonUsesThemeColor, newSessionButtonSurface != .liquidGlass else {
-            return nil
-        }
-
-        return selectedHeaderLogoColor
-    }
-
-    private var newSessionButtonGlassTint: Color {
-        if newSessionButtonUsesThemeColor {
-            return selectedHeaderLogoColor
-        }
-
-        return colorScheme == .dark ? .white : .black
-    }
-
-    private var newSessionButtonForegroundColor: Color {
-        if newSessionButtonUsesThemeColor {
-            return HeaderLogoColor.prefersDarkForeground(for: headerLogoColorHex) ? .black : .white
-        }
-
-        return colorScheme == .dark ? .black : .white
     }
 
     private var initialsAvatarForegroundColor: Color {

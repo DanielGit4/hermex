@@ -53,4 +53,12 @@ struct ChatComposerActionAppearance {
         if isDisabled { return Color(.secondaryLabel) }
         return colorScheme == .dark ? .black : .white
     }
+
+    /// The outline a light theme fill needs in light mode; `nil` otherwise.
+    var edge: Color? {
+        guard !isStop, usesTheme,
+              PrimaryActionTintSettings.needsEdge(themeHex: themeHex, colorScheme: colorScheme)
+        else { return nil }
+        return PrimaryActionTintSettings.edgeColor
+    }
 }

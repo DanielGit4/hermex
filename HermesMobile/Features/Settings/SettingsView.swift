@@ -86,7 +86,7 @@ struct SettingsView: View {
     @AppStorage(ChatTranscriptDisplaySettings.windowsTranscriptRowsKey) private var windowsTranscriptRows = ChatTranscriptDisplaySettings.defaultWindowsTranscriptRows
     @AppStorage(StreamedTextAnimationSettings.isEnabledKey) private var isStreamedTextAnimationEnabled = true
     @AppStorage(HeaderLogoColor.storageKey) private var headerLogoColorHex = HeaderLogoColor.defaultHex
-    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
+    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = PrimaryActionTintSettings.defaultIsEnabled
     @AppStorage(SessionIdentitySettings.displayNameKey) private var identityDisplayName = ""
     @AppStorage(SessionIdentitySettings.initialsKey) private var identityInitials = ""
     @AppStorage(SectionVisibilitySettings.tasksKey) private var showsTasksSection = true

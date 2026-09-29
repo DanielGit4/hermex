@@ -172,16 +172,31 @@ extension Color {
 
 /// User-facing switch (issue #261) for tinting the primary actions — the
 /// "New Chat" button and the composer "Send" button — with the chosen Header
-/// Logo Color instead of the default monochrome fill. Defaults to off (opt-in);
-/// a control keeps its muted/monochrome look while disabled so a tinted-but-dead
-/// button never reads as interactive.
+/// Logo Color instead of the default monochrome fill. Defaults to on; a stored
+/// explicit `false` (the user turned it off) stays off. Every `@AppStorage` for
+/// the key must default to `defaultIsEnabled`, so an unset key reads the same
+/// everywhere. A control keeps its muted/monochrome look while disabled so a
+/// tinted-but-dead button never reads as interactive.
 enum PrimaryActionTintSettings {
     static let isEnabledKey = "appearance.tintsPrimaryActionsWithThemeColor"
+    static let defaultIsEnabled = true
+    /// The 1 pt inner outline that keeps a light fill visible on a light background.
+    static let edgeColor = Color.black.opacity(0.16)
+
+    static func isEnabled(in defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: isEnabledKey) as? Bool ?? defaultIsEnabled
+    }
 
     /// A primary action adopts the theme color only when the user enabled the
     /// setting *and* the control is currently interactive.
     static func usesThemeColor(isEnabled: Bool, controlIsEnabled: Bool) -> Bool {
         isEnabled && controlIsEnabled
+    }
+
+    /// Whether a theme-colored fill needs `edgeColor` to stand off the
+    /// background: a light fill (the one that takes dark ink) in light mode.
+    static func needsEdge(themeHex: String, colorScheme: ColorScheme) -> Bool {
+        colorScheme == .light && HeaderLogoColor.prefersDarkForeground(for: themeHex)
     }
 }
 

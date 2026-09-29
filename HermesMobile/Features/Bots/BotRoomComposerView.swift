@@ -7,7 +7,7 @@ struct BotRoomComposerView: View {
     let avatars: [String: UIImage]
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage(HeaderLogoColor.storageKey) private var themeHex = HeaderLogoColor.defaultHex
-    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = false
+    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = PrimaryActionTintSettings.defaultIsEnabled
     @State private var selection = ComposerSelection()
     @State private var focused = false
     @State private var inputHeight: CGFloat = 22
@@ -68,6 +68,7 @@ struct BotRoomComposerView: View {
             }
             .frame(minHeight: ChatComposerMetrics.actionSize)
             .background(appearance.background).foregroundStyle(appearance.foreground).clipShape(Capsule())
+            .overlay { if let edge = appearance.edge { Capsule().strokeBorder(edge, lineWidth: 1) } }
         }
         .buttonStyle(.chatTactile(.icon)).disabled(!enabled)
         .accessibilityLabel(stop ? Text("Stop every bot in this room") : Text("Send"))

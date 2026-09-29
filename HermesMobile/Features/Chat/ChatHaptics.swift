@@ -6,6 +6,8 @@ enum ChatHapticFeedback: Equatable {
     case selection
     case success
     case warning
+    /// A heavy impact played at `intensity` (0...1).
+    case impact(intensity: Double)
 }
 
 /// A Bot Chat or room action the host confirmed, published by the model for its
@@ -92,6 +94,28 @@ enum ChatHaptics {
         emit(.selection, isEnabled: isEnabled, performer: performer)
     }
 
+    /// A reasoning effort the server confirmed, felt harder the higher the level.
+    /// Plays after the save returns, so it lands after the menu has closed and
+    /// never stacks on the menu's own feedback.
+    static func effortSelected(_ effort: String, isEnabled: Bool, performer: Performer? = nil) {
+        emit(.impact(intensity: effortIntensity(for: effort)), isEnabled: isEnabled, performer: performer)
+    }
+
+    /// Impact strength for an effort id. Ids the app does not know yet (a newer
+    /// server's vocabulary) sit in the middle.
+    nonisolated static func effortIntensity(for effort: String) -> Double {
+        switch effort.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "none": 0.2
+        case "minimal": 0.25
+        case "low": 0.3
+        case "medium": 0.5
+        case "high": 0.7
+        case "xhigh": 0.85
+        case "max", "ultra": 1.0
+        default: 0.5
+        }
+    }
+
     static func destructiveConfirmationAccepted(isEnabled: Bool, performer: Performer? = nil) {
         emit(.warning, isEnabled: isEnabled, performer: performer)
     }
@@ -172,6 +196,8 @@ enum ChatHaptics {
             UINotificationFeedbackGenerator().notificationOccurred(.success)
         case .warning:
             UINotificationFeedbackGenerator().notificationOccurred(.warning)
+        case .impact(let intensity):
+            UIImpactFeedbackGenerator(style: .heavy).impactOccurred(intensity: CGFloat(intensity))
         }
     }
 }

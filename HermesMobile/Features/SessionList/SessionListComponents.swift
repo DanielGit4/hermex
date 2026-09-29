@@ -1275,6 +1275,112 @@ struct SessionListFloatingChatButtonStyle: ButtonStyle {
     }
 }
 
+/// The Home screen's floating "Chat" button. With Tint New Chat & Send on it
+/// takes the header logo color and auto-contrast ink; a light color in light
+/// mode also gets a thin edge so it stands off the white background.
+struct SessionListNewChatButton: View {
+    @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @AppStorage(HeaderLogoColor.storageKey) private var headerLogoColorHex = HeaderLogoColor.defaultHex
+    @AppStorage(PrimaryActionTintSettings.isEnabledKey) private var tintsPrimaryActions = PrimaryActionTintSettings.defaultIsEnabled
+    @AppStorage(GlassPreference.isEnabledKey) private var isGlassEnabled = GlassPreference.defaultIsEnabled
+
+    let isViewingCachedData: Bool
+    let isCreatingNewChat: Bool
+    let action: () -> Void
+
+    var body: some View {
+        HapticButton(feedbackStyle: .medium) {
+            action()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "square.and.pencil")
+                    .font(.title3.weight(.semibold))
+
+                Text("Chat")
+                    .font(.headline.weight(.semibold))
+            }
+            .foregroundStyle(foregroundColor)
+            .padding(.horizontal, 22)
+            .frame(height: 58)
+            // Lock the hit region to the visible capsule so taps in the padding,
+            // rounded ends, and icon↔text gap start a new chat instead of falling
+            // through to the session row behind the FAB (issue #242).
+            .contentShape(Capsule())
+            .background {
+                if let fill = solidThemeFill {
+                    Capsule().fill(fill)
+                }
+            }
+            // Inside the surface, so the edge rides the glass's press bounce and
+            // shows on the material/opaque fallback alike.
+            .overlay {
+                if usesThemeColor, PrimaryActionTintSettings.needsEdge(themeHex: headerLogoColorHex, colorScheme: colorScheme) {
+                    Capsule().strokeBorder(PrimaryActionTintSettings.edgeColor, lineWidth: 1)
+                }
+            }
+            .sessionsChromeGlass(
+                isInteractive: true,
+                tint: glassTint,
+                fallbackMaterial: .regularMaterial,
+                in: Capsule()
+            )
+        }
+        .buttonStyle(SessionListFloatingChatButtonStyle())
+        .disabled(isViewingCachedData || isCreatingNewChat)
+        .opacity(isViewingCachedData ? 0.45 : 1)
+        .accessibilityLabel("New Session")
+    }
+
+    private var themeColor: Color {
+        HeaderLogoColor.color(for: headerLogoColorHex)
+    }
+
+    private var usesThemeColor: Bool {
+        PrimaryActionTintSettings.usesThemeColor(
+            isEnabled: tintsPrimaryActions,
+            controlIsEnabled: !isViewingCachedData
+        )
+    }
+
+    private var surface: AdaptiveGlassSurface {
+        AdaptiveGlassSurface.resolve(
+            liquidGlassAvailable: GlassPreference.isLiquidGlassSupported,
+            isGlassEnabled: isGlassEnabled,
+            reduceTransparency: reduceTransparency
+        )
+    }
+
+    // The glass tint is dropped on the material/opaque fallback surfaces, so a
+    // themed button would otherwise show its contrast-picked foreground over a
+    // neutral material (e.g. black-on-dark for a light theme color). Draw a
+    // solid header-color fill there so the button stays themed and readable;
+    // the liquid-glass surface keeps tinting via `glassTint`.
+    private var solidThemeFill: Color? {
+        guard usesThemeColor, surface != .liquidGlass else {
+            return nil
+        }
+
+        return themeColor
+    }
+
+    private var glassTint: Color {
+        if usesThemeColor {
+            return themeColor
+        }
+
+        return colorScheme == .dark ? .white : .black
+    }
+
+    private var foregroundColor: Color {
+        if usesThemeColor {
+            return HeaderLogoColor.prefersDarkForeground(for: headerLogoColorHex) ? .black : .white
+        }
+
+        return colorScheme == .dark ? .black : .white
+    }
+}
+
 struct SidebarNavButton: View {
     let title: String
     let assetImage: String

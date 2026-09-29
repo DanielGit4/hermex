@@ -525,7 +525,7 @@ struct ChatView: View {
                 Task {
                     let didSelect = await viewModel.selectReasoningEffort(effort)
                     if didSelect {
-                        ChatHaptics.configurationSelected(isEnabled: isHapticsEnabled)
+                        ChatHaptics.effortSelected(viewModel.selectedReasoningEffort ?? effort, isEnabled: isHapticsEnabled)
                     }
                 }
             },
