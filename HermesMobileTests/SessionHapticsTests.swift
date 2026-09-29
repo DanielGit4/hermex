@@ -33,4 +33,15 @@ final class SessionHapticsTests: XCTestCase {
             .selection
         ])
     }
+
+    @MainActor
+    func testNeedsYouArrivalIsAWarningOnlyWhenHapticsAreOn() {
+        var feedback: [SessionHapticFeedback] = []
+
+        SessionHaptics.needsYouArrived(isEnabled: false) { feedback.append($0) }
+        XCTAssertTrue(feedback.isEmpty)
+
+        SessionHaptics.needsYouArrived(isEnabled: true) { feedback.append($0) }
+        XCTAssertEqual(feedback, [.warning])
+    }
 }
