@@ -135,6 +135,15 @@ final class SlashCommandTests: XCTestCase {
         XCTAssertEqual(alias?.argHint, "prompt")
     }
 
+    func testYoloCommandTogglesApprovalBypassOnTheClient() {
+        let command = SlashCommandCatalog.command(named: "yolo")
+        XCTAssertEqual(command?.handler, .clientSide(.yolo))
+        XCTAssertEqual(command?.noEcho, true)
+        XCTAssertNil(command?.argHint)
+        XCTAssertEqual(SlashCommandCatalog.matching("yo").first?.name, "yolo")
+        XCTAssertTrue(SlashCommandCatalog.builtinNames.contains("yolo"), "An agent `/yolo` must not show twice")
+    }
+
     func testMatchingFindsUnsupportedCommands() {
         XCTAssertTrue(SlashCommandCatalog.matching("que").contains { $0.name == "queue" })
         XCTAssertTrue(SlashCommandCatalog.matching("ste").contains { $0.name == "steer" })

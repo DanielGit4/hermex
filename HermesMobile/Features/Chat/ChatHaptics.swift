@@ -80,6 +80,10 @@ enum ChatHaptics {
         emit(.warning, isEnabled: isEnabled, performer: performer)
     }
 
+    static func approvalBypassDisabled(isEnabled: Bool, performer: Performer? = nil) {
+        emit(.success, isEnabled: isEnabled, performer: performer)
+    }
+
     static func clarificationSubmitted(isEnabled: Bool, performer: Performer? = nil) {
         emit(.selection, isEnabled: isEnabled, performer: performer)
     }

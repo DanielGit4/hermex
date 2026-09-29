@@ -83,8 +83,6 @@ enum SlashCommandExecutor {
             return String(localized: "Theme switching is not available from mobile slash commands.")
         case "voice":
             return String(localized: "Voice commands are not available in the mobile app.")
-        case "yolo":
-            return String(localized: "YOLO mode is not available in the mobile app.")
         default:
             return String(localized: "This command is not available in the mobile app.")
         }
@@ -92,7 +90,7 @@ enum SlashCommandExecutor {
 
     static func isKnownUnsupportedCommand(_ commandName: String) -> Bool {
         switch commandName.lowercased() {
-        case "terminal", "theme", "voice", "yolo":
+        case "terminal", "theme", "voice":
             return true
         default:
             return false

@@ -27,6 +27,22 @@ struct PendingPromptExpiredError: LocalizedError, Equatable {
     }
 }
 
+/// Which way an approval bypass change goes. Every entry point (the bypass
+/// pill, the approval card's "Skip all this session" and `/yolo`) asks for one
+/// and `ChatView` confirms it before anything is sent.
+enum ApprovalBypassChange: Equatable {
+    case enable
+    case disable
+}
+
+/// A bypass-off request the server answered without `"yolo_enabled": false`.
+/// Bypass stays on: approvals are still skipped until the server says otherwise.
+struct ApprovalBypassNotDisabledError: LocalizedError, Equatable {
+    var errorDescription: String? {
+        String(localized: "The server did not turn off approval bypass. Approvals are still skipped.")
+    }
+}
+
 @MainActor
 protocol ChatPendingActionCoordinatorDelegate: AnyObject {
     var pendingActionSessionID: String? { get }
@@ -44,6 +60,9 @@ final class ChatPendingActionCoordinator {
     private(set) var isRespondingToApproval = false
     private(set) var approvalErrorMessage: String?
     private(set) var isSessionApprovalBypassEnabled = false
+    /// The bypass change waiting for the user's confirmation. Nothing is sent while it waits.
+    private(set) var pendingApprovalBypassChange: ApprovalBypassChange?
+    private(set) var isChangingApprovalBypass = false
 
     private(set) var clarificationPrompt: ClarificationPromptState?
     private(set) var isRespondingToClarification = false
@@ -61,6 +80,9 @@ final class ChatPendingActionCoordinator {
     private var approvalHadPendingWhileMonitoring = false
     @ObservationIgnored private var approvalPollingTask: Task<Void, Never>?
     private var approvalStateGeneration = 0
+    /// Bumped when a bypass change settles, so a bypass read that was in flight
+    /// meanwhile cannot overwrite the change's answer.
+    @ObservationIgnored private var approvalBypassGeneration = 0
 
     private var clarificationPendingBySession: [String: ClarificationPromptState] = [:]
     private var clarificationMonitoringSessionID: String?
@@ -89,10 +111,13 @@ final class ChatPendingActionCoordinator {
 
     func refreshApprovalBypassState() async {
         guard let sessionID = delegate?.pendingActionSessionID else { return }
+        let bypassGeneration = approvalBypassGeneration
 
         do {
             let response = try await client.sessionYolo(sessionID: sessionID)
-            guard !Task.isCancelled, delegate?.pendingActionSessionID == sessionID else { return }
+            guard !Task.isCancelled,
+                  delegate?.pendingActionSessionID == sessionID,
+                  approvalBypassGeneration == bypassGeneration else { return }
             isSessionApprovalBypassEnabled = response.yoloEnabled == true
             if isSessionApprovalBypassEnabled {
                 approvalStateGeneration &+= 1
@@ -167,26 +192,74 @@ final class ChatPendingActionCoordinator {
         }
     }
 
+    /// Turns bypass on from the approval card without asking. The app asks first
+    /// through `requestApprovalBypassChange(enabled: true)`.
     @discardableResult
     func skipApprovalsForCurrentSession() async -> Bool {
         guard let prompt = approvalPrompt,
               prompt.sessionID == delegate?.pendingActionSessionID
         else { return false }
 
-        isRespondingToApproval = true
+        return await setApprovalBypass(enabled: true)
+    }
+
+    /// Asks `ChatView` to confirm turning bypass on or off. Sends nothing.
+    func requestApprovalBypassChange(enabled: Bool) {
+        pendingApprovalBypassChange = enabled ? .enable : .disable
+    }
+
+    func cancelApprovalBypassChange() {
+        pendingApprovalBypassChange = nil
+    }
+
+    /// Sends the change the user confirmed. The alert passes the change it
+    /// showed because its dismissal clears `pendingApprovalBypassChange` before
+    /// this runs. Returns `true` once the server answered with that state.
+    @discardableResult
+    func confirmApprovalBypassChange(_ change: ApprovalBypassChange) async -> Bool {
+        pendingApprovalBypassChange = nil
+        return await setApprovalBypass(enabled: change == .enable)
+    }
+
+    private func setApprovalBypass(enabled: Bool) async -> Bool {
+        guard let sessionID = delegate?.pendingActionSessionID, !isChangingApprovalBypass else { return false }
+
+        isChangingApprovalBypass = true
         approvalErrorMessage = nil
         delegate?.pendingActionCoordinatorWillSubmitAction()
-        defer { isRespondingToApproval = false }
+        defer {
+            isChangingApprovalBypass = false
+            approvalBypassGeneration &+= 1
+        }
 
         do {
-            let response = try await client.setSessionYolo(sessionID: prompt.sessionID, enabled: true)
-            isSessionApprovalBypassEnabled = response.yoloEnabled ?? true
-            approvalStateGeneration &+= 1
-            approvalPendingBySession[prompt.sessionID] = nil
-            approvalPrompt = nil
+            let response = try await client.setSessionYolo(sessionID: sessionID, enabled: enabled)
+            guard delegate?.pendingActionSessionID == sessionID else { return false }
+
+            if enabled {
+                // The server also lets every request waiting in this session run once.
+                isSessionApprovalBypassEnabled = response.yoloEnabled ?? true
+                approvalStateGeneration &+= 1
+                approvalPendingBySession[sessionID] = nil
+                approvalPrompt = nil
+                return true
+            }
+
+            // Only an explicit `false` ends the bypass. Anything else fails closed.
+            guard response.yoloEnabled == false else {
+                delegate?.pendingActionCoordinatorDidFailAction(ApprovalBypassNotDisabledError())
+                return false
+            }
+            isSessionApprovalBypassEnabled = false
+            // A request that arrived while bypass was on waits for the user again.
+            renderApprovalPromptForCurrentSession()
+            await refreshApprovalPending(sessionID: sessionID)
             return true
         } catch {
-            approvalErrorMessage = error.localizedDescription
+            guard delegate?.pendingActionSessionID == sessionID else { return false }
+            if approvalPrompt != nil {
+                approvalErrorMessage = error.localizedDescription
+            }
             delegate?.pendingActionCoordinatorDidFailAction(error)
             return false
         }
