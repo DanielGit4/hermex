@@ -57,6 +57,41 @@ final class KanbanLiveUpdateTests: XCTestCase {
         state.setVisible(false)
     }
 
+    func testLiveRefreshNeverMovesTheOpeningStatus() async throws {
+        let client = LiveKanbanClient(boardResults: [.success(.rich), .success(.runningCard)])
+        let stream = KanbanStreamSpy()
+        let state = makeState(client: client, stream: stream, statusChoices: KanbanStatusChoices())
+        await state.load()
+        XCTAssertEqual(state.selectedStatus, "ready")
+        state.setVisible(true)
+
+        stream.emit(.hello(cursor: 11, board: "main"))
+        stream.emit(Self.eventsFrame(cursor: 12, kind: "task.updated"))
+        try await waitUntil { state.snapshot?.latestEventID == 12 }
+
+        XCTAssertEqual(state.statusCount("running"), 1)
+        XCTAssertEqual(state.selectedStatus, "ready")
+        state.setVisible(false)
+    }
+
+    func testManualStatusPickSticksAcrossLiveRefresh() async throws {
+        let client = LiveKanbanClient(boardResults: [.success(.rich), .success(.runningCard)])
+        let stream = KanbanStreamSpy()
+        let state = makeState(client: client, stream: stream, statusChoices: KanbanStatusChoices())
+        await state.load()
+        XCTAssertEqual(state.selectedStatus, "ready")
+        state.chooseStatus("triage")
+        state.setVisible(true)
+
+        stream.emit(.hello(cursor: 11, board: "main"))
+        stream.emit(Self.eventsFrame(cursor: 12, kind: "task.updated"))
+        try await waitUntil { state.snapshot?.latestEventID == 12 }
+
+        XCTAssertEqual(state.statusCount("running"), 1)
+        XCTAssertEqual(state.selectedStatus, "triage")
+        state.setVisible(false)
+    }
+
     func testBurstDuringLiveRefreshQueuesOneFollowUpInsteadOfCancelling() async throws {
         let client = GatedLiveKanbanClient()
         let stream = KanbanStreamSpy()
@@ -690,7 +725,8 @@ final class KanbanLiveUpdateTests: XCTestCase {
         sleep: @escaping @MainActor @Sendable (Duration) async throws -> Void = { duration in
             try await Task.sleep(for: duration)
         },
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        statusChoices: KanbanStatusChoices? = nil
     ) -> KanbanFeatureState {
         KanbanFeatureState(
             server: URL(string: "https://example.test")!,
@@ -698,7 +734,8 @@ final class KanbanLiveUpdateTests: XCTestCase {
             streamClient: stream,
             timing: timing,
             sleep: sleep,
-            defaults: defaults
+            defaults: defaults,
+            statusChoices: statusChoices
         )
     }
 
@@ -936,6 +973,8 @@ private extension KanbanBoardSnapshot {
     static let rich: Self = decode(#"{"changed":true,"latest_event_id":11,"read_only":false,"columns":[{"name":"ready","tasks":[{"id":"CARD-1","status":"ready"}]}]}"#)
     static let newer: Self = decode(#"{"changed":true,"latest_event_id":13,"read_only":false,"columns":[{"name":"ready","tasks":[{"id":"CARD-2","status":"ready"}]}]}"#)
     static let cursor12: Self = decode(#"{"changed":true,"latest_event_id":12,"read_only":false,"columns":[{"name":"ready","tasks":[{"id":"CARD-1","status":"ready"}]}]}"#)
+    /// Cursor 12 with a Running Card, which would win a fresh opening Status.
+    static let runningCard: Self = decode(#"{"changed":true,"latest_event_id":12,"read_only":false,"columns":[{"name":"ready","tasks":[{"id":"CARD-1","status":"ready"}]},{"name":"running","tasks":[{"id":"CARD-2","status":"running"}]}]}"#)
     static let cursor14: Self = decode(#"{"changed":true,"latest_event_id":14,"read_only":false,"columns":[{"name":"ready","tasks":[{"id":"CARD-3","status":"ready"}]}]}"#)
     static let cursor15: Self = decode(#"{"changed":true,"latest_event_id":15,"read_only":false,"columns":[{"name":"ready","tasks":[{"id":"CARD-4","status":"ready"}]}]}"#)
     static let release: Self = decode(#"{"changed":true,"latest_event_id":20,"read_only":false,"columns":[{"name":"triage","tasks":[]}]}"#)

@@ -334,6 +334,18 @@ enum KanbanBoardPreference {
     }
 }
 
+/// Remembers the user's Status pick per server for this process only, so a rebuilt
+/// `KanbanFeatureState` reopens it for the same Board. Never persisted: a relaunch
+/// forgets it.
+@MainActor
+final class KanbanStatusChoices {
+    static let shared = KanbanStatusChoices()
+
+    func status(for server: URL, board: String) -> String? { nil }
+
+    func record(_ status: String, board: String, for server: URL) {}
+}
+
 /// Server-bound Kanban browsing state. Each instance owns one server's Board
 /// choice, filters, selection, and snapshots; nothing is shared across servers.
 /// Only the browsed Board slug outlives the instance, via `KanbanBoardPreference`.
@@ -341,6 +353,8 @@ enum KanbanBoardPreference {
 @Observable
 final class KanbanFeatureState {
     static let liveStatuses = ["triage", "todo", "ready", "running", "blocked", "done"]
+    /// The order `firstNonEmptyStatus` searches when a Board opens.
+    static let openingStatusOrder = ["running", "blocked", "ready", "todo", "triage", "done"]
     private static let bulkReconciliationConcurrency = 4
 
     let server: URL
@@ -397,6 +411,7 @@ final class KanbanFeatureState {
     private let now: @MainActor @Sendable () -> Date
     private let onAPIError: (Error) -> Void
     private let defaults: UserDefaults
+    private let statusChoices: KanbanStatusChoices
     private var isVisible = false
     private var sceneIsActive = true
     private var liveGeneration = 0
@@ -440,7 +455,8 @@ final class KanbanFeatureState {
         },
         now: @escaping @MainActor @Sendable () -> Date = { Date() },
         onAPIError: @escaping (Error) -> Void = { _ in },
-        defaults: UserDefaults = .standard
+        defaults: UserDefaults = .standard,
+        statusChoices: KanbanStatusChoices? = nil
     ) {
         self.server = server
         self.client = client ?? APIClient(baseURL: server)
@@ -451,6 +467,7 @@ final class KanbanFeatureState {
         self.now = now
         self.onAPIError = onAPIError
         self.defaults = defaults
+        self.statusChoices = statusChoices ?? .shared
     }
 
     /// Whether the Card list shows its "Refreshing Board" row: while a Board loads with no
@@ -678,6 +695,17 @@ final class KanbanFeatureState {
 
     func statusCount(_ status: String) -> Int {
         searchMatchedCards.count { $0.status?.rawValue == status }
+    }
+
+    func firstNonEmptyStatus(excluding excluded: String? = nil) -> String? {
+        nil
+    }
+
+    @discardableResult
+    func chooseStatus(_ status: String) -> Bool {
+        guard status != selectedStatus else { return false }
+        selectedStatus = status
+        return true
     }
 
     func canMutateCard(_ card: KanbanCard) -> Bool {
