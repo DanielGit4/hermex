@@ -1,8 +1,13 @@
 import SwiftUI
 
-/// Collapsible card for context-compaction marker messages, replacing the user
-/// bubble they would otherwise render as. Mirrors the web UI's collapsed cards
-/// and follows the `ReasoningBlockView` disclosure pattern.
+/// Collapsible card for context-compaction markers and agent notices,
+/// replacing the user bubble they would otherwise render as. Mirrors the web
+/// UI's collapsed cards and follows the `ReasoningBlockView` disclosure pattern.
+///
+/// An agent notice (background job, subagent delegation) collapses to its
+/// title and, for a background job, its command; expanded, it shows the whole
+/// notice as selectable log text in a capped window, like a tool result. Its
+/// body is only read once expanded, so a long log costs nothing collapsed.
 struct MarkerMessageCardView: View {
     let kind: ChatMarkerMessageKind
     let content: String?
@@ -13,9 +18,33 @@ struct MarkerMessageCardView: View {
     @State private var isExpanded = false
 
     var body: some View {
-        let cardBody = ChatMarkerMessageClassifier.cardBody(for: kind, content: content)
-        let summary = summary(for: cardBody)
+        if kind.isAgentNotice {
+            card(summary: ChatMarkerMessageClassifier.noticeSummary(for: kind, content: content)) {
+                TranscriptLogRowBodyWindow {
+                    Text(ChatMarkerMessageClassifier.cardBody(for: kind, content: content))
+                        .font(AppFont.mono(style: .caption))
+                        .foregroundStyle(.primary)
+                        .textSelection(.enabled)
+                        .forcedLeftToRight()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        } else {
+            let cardBody = ChatMarkerMessageClassifier.cardBody(for: kind, content: content)
+            card(summary: summary(for: cardBody)) {
+                Text(cardBody.isEmpty ? kind.title : cardBody)
+                    .font(AppFont.caption())
+                    .foregroundStyle(.primary)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
+    }
 
+    private func card<ExpandedBody: View>(
+        summary: String?,
+        @ViewBuilder expandedBody: () -> ExpandedBody
+    ) -> some View {
         VStack(alignment: .leading, spacing: isExpanded ? 8 : 0) {
             Button {
                 chatDisclosureToggled()
@@ -26,15 +55,11 @@ struct MarkerMessageCardView: View {
                 header(summary: summary)
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("\(kind.title), \(summary)")
+            .accessibilityLabel(accessibilityLabel(summary: summary))
             .accessibilityHint(isExpanded ? String(localized: "Double tap to collapse details.") : String(localized: "Double tap to expand details."))
 
             if isExpanded {
-                Text(cardBody.isEmpty ? kind.title : cardBody)
-                    .font(AppFont.caption())
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                expandedBody()
                     .transition(ChatMotion.disclosureTransition(reduceMotion: reduceMotion))
             }
         }
@@ -59,25 +84,39 @@ struct MarkerMessageCardView: View {
             return "checklist"
         case .compressionReference:
             return "star"
+        case .backgroundJob(.finished):
+            return "checkmark.circle"
+        case .backgroundJob(.failed), .subagentTaskFailed:
+            return "exclamationmark.triangle"
+        case .backgroundJob(.matched):
+            return "text.magnifyingglass"
+        case .backgroundJob(.ended), .backgroundJobBatch:
+            return "terminal"
+        case .subagentsFinished, .subagentFinished:
+            return "person.2"
         }
     }
 
-    private func header(summary: String) -> some View {
+    private func header(summary: String?) -> some View {
         HStack(alignment: usesStackedHeader ? .top : .center, spacing: 8) {
             Image(systemName: iconName)
                 .font(.system(size: 14, weight: .semibold))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(kind.isFailure ? AnyShapeStyle(Color.red) : AnyShapeStyle(HierarchicalShapeStyle.secondary))
                 .frame(width: 18, height: 18)
 
             if usesStackedHeader {
                 VStack(alignment: .leading, spacing: 1) {
                     titleText
-                    summaryText(summary, lineLimit: 2)
+                    if let summary {
+                        summaryText(summary, lineLimit: 2)
+                    }
                 }
             } else {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     titleText
-                    summaryText(summary, lineLimit: 1)
+                    if let summary {
+                        summaryText(summary, lineLimit: 1)
+                    }
                 }
             }
 
@@ -93,8 +132,9 @@ struct MarkerMessageCardView: View {
     private var titleText: some View {
         Text(kind.title)
             .font(AppFont.caption(weight: .semibold))
-            .foregroundStyle(.primary)
+            .foregroundStyle(kind.isFailure ? AnyShapeStyle(Color.red) : AnyShapeStyle(HierarchicalShapeStyle.primary))
             .lineLimit(1)
+            .layoutPriority(1)
     }
 
     private func summaryText(_ value: String, lineLimit: Int) -> some View {
@@ -102,6 +142,11 @@ struct MarkerMessageCardView: View {
             .font(AppFont.caption())
             .foregroundStyle(.secondary)
             .lineLimit(lineLimit)
+    }
+
+    private func accessibilityLabel(summary: String?) -> Text {
+        guard let summary else { return Text(kind.title) }
+        return Text("\(kind.title), \(summary)")
     }
 
     private func summary(for value: String) -> String {

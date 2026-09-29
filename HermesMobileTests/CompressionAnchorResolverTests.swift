@@ -250,6 +250,27 @@ final class CompressionAnchorResolverTests: XCTestCase {
         XCTAssertEqual(resolution?.placement, .afterLoadedMessageIndex(2))
     }
 
+    func testIndexFallbackCountsAgentNotices() {
+        // The server's `visible_messages_for_anchor` skips only compaction,
+        // task-list and session-arc markers, so a background-job notice is a
+        // visible message there even though the app draws it as a marker row.
+        let messages = [
+            makeMessage(role: "user", content: "First"),
+            makeMessage(
+                role: "user",
+                content: "[IMPORTANT: Background process proc_1 completed (exit_code=0).\nCommand: make\nOutput:\nok]"
+            ),
+            makeMessage(role: "assistant", content: "Second"),
+        ]
+
+        let resolution = resolve(
+            messages: messages,
+            metadata: metadata(visibleIdx: 1, summary: "Summary.")
+        )
+
+        XCTAssertEqual(resolution?.placement, .afterLoadedMessageIndex(1))
+    }
+
     func testIndexWithNoVisibleMessagesPlacesCardAtTop() {
         let messages = [
             makeMessage(role: "tool", content: "tool result"),
