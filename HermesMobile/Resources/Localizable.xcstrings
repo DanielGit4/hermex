@@ -383,6 +383,364 @@
     "Saving…" : {"localizations": {"de": {"stringUnit": {"state": "needs_review", "value": "Wird gespeichert…"}}, "es": {"stringUnit": {"state": "needs_review", "value": "Guardando…"}}, "fr": {"stringUnit": {"state": "needs_review", "value": "Enregistrement…"}}, "it": {"stringUnit": {"state": "needs_review", "value": "Salvataggio…"}}, "pl": {"stringUnit": {"state": "needs_review", "value": "Zapisywanie…"}}, "pt-BR": {"stringUnit": {"state": "needs_review", "value": "Salvando…"}}, "nl": {"stringUnit": {"state": "needs_review", "value": "Opslaan…"}}, "tr": {"stringUnit": {"state": "needs_review", "value": "Kaydediliyor…"}}, "ru": {"stringUnit": {"state": "needs_review", "value": "Сохранение…"}}, "ja": {"stringUnit": {"state": "needs_review", "value": "保存中…"}}, "zh-Hans": {"stringUnit": {"state": "needs_review", "value": "正在保存…"}}, "ko": {"stringUnit": {"state": "needs_review", "value": "저장 중…"}}, "ar": {"stringUnit": {"state": "needs_review", "value": "جارٍ الحفظ…"}}, "he": {"stringUnit": {"state": "needs_review", "value": "שומר…"}}, "ur": {"stringUnit": {"state": "needs_review", "value": "محفوظ ہو رہا ہے…"}}, "zh-Hant": {"stringUnit": {"state": "needs_review", "value": "正在儲存…"}}, "zh-HK": {"stringUnit": {"state": "needs_review", "value": "正在儲存…"}}}},
     "Connect Hermes…" : {"localizations": {"de": {"stringUnit": {"state": "needs_review", "value": "Hermes verbinden…"}}, "es": {"stringUnit": {"state": "needs_review", "value": "Conectar Hermes…"}}, "fr": {"stringUnit": {"state": "needs_review", "value": "Connecter Hermes…"}}, "it": {"stringUnit": {"state": "needs_review", "value": "Connetti Hermes…"}}, "pl": {"stringUnit": {"state": "needs_review", "value": "Połącz z Hermes…"}}, "pt-BR": {"stringUnit": {"state": "needs_review", "value": "Conectar Hermes…"}}, "nl": {"stringUnit": {"state": "needs_review", "value": "Verbind Hermes…"}}, "tr": {"stringUnit": {"state": "needs_review", "value": "Hermes’e bağlan…"}}, "ru": {"stringUnit": {"state": "needs_review", "value": "Подключить Hermes…"}}, "ja": {"stringUnit": {"state": "needs_review", "value": "Hermesに接続…"}}, "zh-Hans": {"stringUnit": {"state": "needs_review", "value": "连接 Hermes…"}}, "ko": {"stringUnit": {"state": "needs_review", "value": "Hermes 연결…"}}, "ar": {"stringUnit": {"state": "needs_review", "value": "الاتصال بـ Hermes…"}}, "he": {"stringUnit": {"state": "needs_review", "value": "חיבור Hermes…"}}, "ur": {"stringUnit": {"state": "needs_review", "value": "Hermes سے منسلک کریں…"}}, "zh-Hant": {"stringUnit": {"state": "needs_review", "value": "連接 Hermes…"}}, "zh-HK": {"stringUnit": {"state": "needs_review", "value": "連接 Hermes…"}}}},
     "Local completion alerts for servers without push notifications." : {"localizations": {"de": {"stringUnit": {"state": "needs_review", "value": "Lokale Abschlussmeldungen für Server ohne Push-Benachrichtigungen."}}, "es": {"stringUnit": {"state": "needs_review", "value": "Avisos locales de finalización para servidores sin notificaciones push."}}, "fr": {"stringUnit": {"state": "needs_review", "value": "Alertes locales de fin de réponse pour les serveurs sans notifications push."}}, "it": {"stringUnit": {"state": "needs_review", "value": "Avvisi locali di completamento per i server senza notifiche push."}}, "pl": {"stringUnit": {"state": "needs_review", "value": "Lokalne alerty o zakończeniu dla serwerów bez powiadomień push."}}, "pt-BR": {"stringUnit": {"state": "needs_review", "value": "Alertas locais de conclusão para servidores sem notificações push."}}, "nl": {"stringUnit": {"state": "needs_review", "value": "Lokale voltooiingsmeldingen voor servers zonder pushmeldingen."}}, "tr": {"stringUnit": {"state": "needs_review", "value": "Push bildirimi olmayan sunucular için yerel tamamlanma uyarıları."}}, "ru": {"stringUnit": {"state": "needs_review", "value": "Локальные оповещения о завершении для серверов без push-уведомлений."}}, "ja": {"stringUnit": {"state": "needs_review", "value": "プッシュ通知のないサーバー向けのローカル完了通知。"}}, "zh-Hans": {"stringUnit": {"state": "needs_review", "value": "为未启用推送通知的服务器提供本地完成提醒。"}}, "ko": {"stringUnit": {"state": "needs_review", "value": "푸시 알림이 없는 서버의 로컬 완료 알림입니다."}}, "ar": {"stringUnit": {"state": "needs_review", "value": "تنبيهات إكمال محلية للخوادم التي لا تستخدم إشعارات الدفع."}}, "he": {"stringUnit": {"state": "needs_review", "value": "התראות סיום מקומיות עבור שרתים ללא התראות Push."}}, "ur": {"stringUnit": {"state": "needs_review", "value": "پش اطلاعات کے بغیر سرورز کے لیے تکمیل کے مقامی الرٹس۔"}}, "zh-Hant": {"stringUnit": {"state": "needs_review", "value": "為未啟用推播通知的伺服器提供本機完成提示。"}}, "zh-HK": {"stringUnit": {"state": "needs_review", "value": "為未啟用推送通知的伺服器提供本機完成提示。"}}}},
+    "%lld waiting" : {
+      "localizations" : {
+        "ar" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld في الانتظار"
+                }
+              },
+              "many" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld في الانتظار"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld في الانتظار"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld في الانتظار"
+                }
+              },
+              "two" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld في الانتظار"
+                }
+              },
+              "zero" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld في الانتظار"
+                }
+              }
+            }
+          }
+        },
+        "de" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld wartet"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld warten"
+                }
+              }
+            }
+          }
+        },
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld waiting"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld waiting"
+                }
+              }
+            }
+          }
+        },
+        "es" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld en espera"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld en espera"
+                }
+              }
+            }
+          }
+        },
+        "fr" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld en attente"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld en attente"
+                }
+              }
+            }
+          }
+        },
+        "he" : {
+          "variations" : {
+            "plural" : {
+              "many" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld ממתינים"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld ממתין"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld ממתינים"
+                }
+              },
+              "two" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld ממתינים"
+                }
+              }
+            }
+          }
+        },
+        "it" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld in attesa"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld in attesa"
+                }
+              }
+            }
+          }
+        },
+        "ja" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld件待機中"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld개 대기 중"
+                }
+              }
+            }
+          }
+        },
+        "nl" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld wacht"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld wachten"
+                }
+              }
+            }
+          }
+        },
+        "pl" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld czekają"
+                }
+              },
+              "many" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld czeka"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld czeka"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld czeka"
+                }
+              }
+            }
+          }
+        },
+        "pt-BR" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld aguardando"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld aguardando"
+                }
+              }
+            }
+          }
+        },
+        "ru" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld ждут"
+                }
+              },
+              "many" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld ждут"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld ждёт"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld ждут"
+                }
+              }
+            }
+          }
+        },
+        "tr" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld bekliyor"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld bekliyor"
+                }
+              }
+            }
+          }
+        },
+        "ur" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld منتظر"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld منتظر"
+                }
+              }
+            }
+          }
+        },
+        "zh-HK" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld 個等待中"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld 个等待中"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hant" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld 個等待中"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "%lld workers" : {
       "localizations" : {
         "ar" : {
@@ -54629,6 +54987,112 @@
         }
       }
     },
+    "Opens %@" : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "يفتح %@"
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Öffnet %@"
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Abre %@"
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Ouvre %@"
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "פותח את %@"
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Apre %@"
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "%@ を開きます"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "%@을(를) 열어요"
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Opent %@"
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Otwiera %@"
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Abre %@"
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Открывает %@"
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "%@ sohbetini açar"
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "%@ کھولتا ہے"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "開啟 %@"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "打开 %@"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "開啟 %@"
+          }
+        }
+      }
+    },
     "Opens Settings. Long press to switch servers." : {
       "localizations" : {
         "ar" : {
@@ -107558,6 +108022,364 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "收合區段"
+          }
+        }
+      }
+    },
+    "%lld chats need you" : {
+      "localizations" : {
+        "ar" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld محادثات تحتاج إليك"
+                }
+              },
+              "many" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld محادثةً تحتاج إليك"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld محادثة تحتاج إليك"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld محادثة تحتاج إليك"
+                }
+              },
+              "two" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld محادثتان تحتاجان إليك"
+                }
+              },
+              "zero" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld محادثة تحتاج إليك"
+                }
+              }
+            }
+          }
+        },
+        "de" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld Chat braucht dich"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld Chats brauchen dich"
+                }
+              }
+            }
+          }
+        },
+        "en" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld chat needs you"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "translated",
+                  "value" : "%lld chats need you"
+                }
+              }
+            }
+          }
+        },
+        "es" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld chat te necesita"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld chats te necesitan"
+                }
+              }
+            }
+          }
+        },
+        "fr" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld discussion a besoin de vous"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld discussions ont besoin de vous"
+                }
+              }
+            }
+          }
+        },
+        "he" : {
+          "variations" : {
+            "plural" : {
+              "many" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld צ׳אטים צריכים אותך"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld צ׳אט צריך אותך"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld צ׳אטים צריכים אותך"
+                }
+              },
+              "two" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld צ׳אטים צריכים אותך"
+                }
+              }
+            }
+          }
+        },
+        "it" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld chat ha bisogno di te"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld chat hanno bisogno di te"
+                }
+              }
+            }
+          }
+        },
+        "ja" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld件のチャットが対応を待っています"
+                }
+              }
+            }
+          }
+        },
+        "ko" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "채팅 %lld개가 기다리고 있어요"
+                }
+              }
+            }
+          }
+        },
+        "nl" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld chat heeft je nodig"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld chats hebben je nodig"
+                }
+              }
+            }
+          }
+        },
+        "pl" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld czaty czekają na ciebie"
+                }
+              },
+              "many" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld czatów czeka na ciebie"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld czat czeka na ciebie"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld czatu czeka na ciebie"
+                }
+              }
+            }
+          }
+        },
+        "pt-BR" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld conversa precisa de você"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld conversas precisam de você"
+                }
+              }
+            }
+          }
+        },
+        "ru" : {
+          "variations" : {
+            "plural" : {
+              "few" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld чата ждут вас"
+                }
+              },
+              "many" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld чатов ждут вас"
+                }
+              },
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld чат ждёт вас"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld чата ждут вас"
+                }
+              }
+            }
+          }
+        },
+        "tr" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld sohbet sizi bekliyor"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld sohbet sizi bekliyor"
+                }
+              }
+            }
+          }
+        },
+        "ur" : {
+          "variations" : {
+            "plural" : {
+              "one" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld چیٹ کو آپ کی ضرورت ہے"
+                }
+              },
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld چیٹس کو آپ کی ضرورت ہے"
+                }
+              }
+            }
+          }
+        },
+        "zh-HK" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld 個聊天需要你處理"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hans" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld 个聊天需要你处理"
+                }
+              }
+            }
+          }
+        },
+        "zh-Hant" : {
+          "variations" : {
+            "plural" : {
+              "other" : {
+                "stringUnit" : {
+                  "state" : "needs_review",
+                  "value" : "%lld 個聊天需要你處理"
+                }
+              }
+            }
           }
         }
       }

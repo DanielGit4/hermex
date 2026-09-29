@@ -30,6 +30,11 @@ enum SessionHaptics {
         emit(.selection, isEnabled: isEnabled, performer: performer)
     }
 
+    /// A chat in Home's scope started waiting for an approval or an answer.
+    static func needsYouArrived(isEnabled: Bool, performer: Performer? = nil) {
+        emit(.warning, isEnabled: isEnabled, performer: performer)
+    }
+
     private static func emit(_ feedback: SessionHapticFeedback, isEnabled: Bool, performer: Performer?) {
         guard isEnabled else { return }
         (performer ?? Self.perform)(feedback)
