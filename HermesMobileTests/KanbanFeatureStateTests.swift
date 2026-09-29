@@ -208,6 +208,10 @@ final class KanbanFeatureStateTests: XCTestCase {
 
         XCTAssertEqual(state.selectedBoardSlug, "release")
         XCTAssertEqual(state.selectedStatus, "blocked")
+
+        // The switch ended the pick: going back to Main opens on its first non-empty Status.
+        await state.selectBoard("main")
+        XCTAssertEqual(state.selectedStatus, "ready")
     }
 
     func testSwitchingToAnAllEmptyBoardOpensOnTriage() async {

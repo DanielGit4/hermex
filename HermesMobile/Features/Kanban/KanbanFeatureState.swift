@@ -351,6 +351,11 @@ final class KanbanStatusChoices {
     func record(_ status: String, board: String, for server: URL) {
         choices[server.absoluteString] = (board, status)
     }
+
+    /// A Board switch ends the pick, so switching back re-opens on the first non-empty Status.
+    func forget(for server: URL) {
+        choices[server.absoluteString] = nil
+    }
 }
 
 /// Server-bound Kanban browsing state. Each instance owns one server's Board
@@ -1173,6 +1178,7 @@ final class KanbanFeatureState {
         resetLiveUpdates(clearCursor: true)
         selectedBoardSlug = slug
         needsOpeningStatus = true
+        statusChoices.forget(for: server)
         boardSelectionNotice = nil
         snapshot = nil
         stats = nil
