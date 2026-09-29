@@ -1191,12 +1191,14 @@ import XCTest
     /// `answersChatStart` answers `/api/chat/start` with a stream, the way
     /// hermes-webui starts a turn, so a send leaves a stream active.
     /// `repliesShowImages` ends every reply with a `MEDIA:` image token and
-    /// answers `/api/media` with a small PNG.
+    /// answers `/api/media` with a small PNG. `appendedMessages` are served
+    /// after the generated turns, as they are.
     init(
         messageCount: Int,
         servesNewestWindow: Bool = false,
         answersChatStart: Bool = false,
-        repliesShowImages: Bool = false
+        repliesShowImages: Bool = false,
+        appendedMessages: [[String: Any]] = []
     ) throws {
         let counter = RequestCounter()
         self.counter = counter
@@ -1210,14 +1212,14 @@ import XCTest
             configurations: ModelConfiguration(isStoredInMemoryOnly: true)
         )
 
-        let messages = Self.messages(count: messageCount, repliesShowImages: repliesShowImages)
+        let messages = Self.messages(count: messageCount, repliesShowImages: repliesShowImages) + appendedMessages
         let windowStart = servesNewestWindow ? Self.newestWindowStart(of: messages) : 0
         serverWindow = windowStart..<messages.count
         var sessionFields: [String: Any] = [
             "session_id": "typing-perf",
             "title": "Typing perf",
             "workspace": "/tmp/workspace",
-            "message_count": messageCount,
+            "message_count": messageCount + appendedMessages.count,
             "messages": Array(messages[windowStart...])
         ]
         if servesNewestWindow {
