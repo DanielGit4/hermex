@@ -533,7 +533,9 @@ final class KanbanFeatureStateTests: XCTestCase {
 
         await state.selectBoard("release")
         XCTAssertEqual(state.selectedBoardSlug, "release")
-        XCTAssertEqual(state.selectedStatus, "running")
+        // A Board switch re-opens on the first Status with a search-matched Card;
+        // "worker" matches none, so Triage.
+        XCTAssertEqual(state.selectedStatus, "triage")
         XCTAssertEqual(state.searchText, "worker")
         XCTAssertTrue(state.groupByProfile)
         XCTAssertEqual(state.selectedTenant, "ops")

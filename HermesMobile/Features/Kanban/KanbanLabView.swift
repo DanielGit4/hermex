@@ -155,6 +155,7 @@ struct KanbanStatusFocusView: View {
     /// at the default text size; nav-bar glyphs grow with Dynamic Type but stop well
     /// before AX5, so `boardPickerMaxWidth` clamps this to 1.4x the base.
     @ScaledMetric(relativeTo: .body) private var trailingGroupWidth: CGFloat = 168
+    @AppStorage(AppHaptics.isEnabledKey) private var isHapticsEnabled = true
     @AccessibilityFocusState private var focusedCardID: String?
     @AccessibilityFocusState private var archiveUndoIsFocused: Bool
     @AccessibilityFocusState private var selectionControlsAreFocused: Bool
@@ -856,11 +857,12 @@ struct KanbanStatusFocusView: View {
     }
 
     private var statusSelector: some View {
-        KanbanStatusSelector(model: model)
+        KanbanStatusSelector(model: model, isHapticsEnabled: isHapticsEnabled)
     }
 
     private struct KanbanStatusSelector: UIViewRepresentable {
         @Bindable var model: KanbanFeatureState
+        let isHapticsEnabled: Bool
         @ScaledMetric(relativeTo: .subheadline) private var height: CGFloat = 56
 
         func makeCoordinator() -> Coordinator {
@@ -905,14 +907,18 @@ struct KanbanStatusFocusView: View {
         final class Coordinator: NSObject {
             var parent: KanbanStatusSelector
             private let stackView = UIStackView()
+            private weak var scrollView: UIScrollView?
             private var controls: [String: KanbanStatusControl] = [:]
             private var orderedStatuses: [String] = []
+            /// The Status whose chip was last scrolled into view.
+            private var revealedStatus: String?
 
             init(parent: KanbanStatusSelector) {
                 self.parent = parent
             }
 
             func install(in scrollView: UIScrollView) {
+                self.scrollView = scrollView
                 stackView.axis = .horizontal
                 stackView.alignment = .center
                 stackView.spacing = 8
@@ -957,10 +963,33 @@ struct KanbanStatusFocusView: View {
                         height: controlHeight
                     )
                 }
+                revealSelectedStatus()
+            }
+
+            /// Scrolls the selected chip fully into view whenever the selection changes: the
+            /// opening Status, a chip tap, the empty-state button, or a moved Card. The first
+            /// pass can run before the strip has a size, so it retries once after layout.
+            private func revealSelectedStatus(retryAfterLayout: Bool = true) {
+                let status = parent.model.selectedStatus
+                guard status != revealedStatus, let scrollView, let control = controls[status] else { return }
+                scrollView.layoutIfNeeded()
+                guard scrollView.bounds.width > 0, control.frame.width > 0 else {
+                    if retryAfterLayout {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.revealSelectedStatus(retryAfterLayout: false)
+                        }
+                    }
+                    return
+                }
+                let animated = revealedStatus != nil && !UIAccessibility.isReduceMotionEnabled
+                revealedStatus = status
+                let frame = control.convert(control.bounds, to: scrollView).insetBy(dx: -16, dy: 0)
+                scrollView.scrollRectToVisible(frame, animated: animated)
             }
 
             private func rebuild(_ statuses: [String]) {
                 orderedStatuses = statuses
+                revealedStatus = nil
                 for view in stackView.arrangedSubviews {
                     stackView.removeArrangedSubview(view)
                     view.removeFromSuperview()
@@ -982,7 +1011,7 @@ struct KanbanStatusFocusView: View {
 
             @objc
             private func selectStatus(_ sender: KanbanStatusControl) {
-                parent.model.selectedStatus = sender.status
+                choose(sender.status)
             }
 
             @objc
@@ -993,7 +1022,15 @@ struct KanbanStatusFocusView: View {
                     .compactMap({ $0 as? KanbanStatusControl })
                     .first(where: { $0.frame.contains(location) })
                 else { return }
-                parent.model.selectedStatus = control.status
+                choose(control.status)
+            }
+
+            /// Both tap paths can fire for one tap; only the one that changes the
+            /// selection plays the haptic.
+            private func choose(_ status: String) {
+                if parent.model.chooseStatus(status) {
+                    ChatHaptics.configurationSelected(isEnabled: parent.isHapticsEnabled)
+                }
             }
         }
 
@@ -1331,6 +1368,12 @@ struct KanbanStatusFocusView: View {
             if model.hasActiveFilters {
                 Button("Clear Filters") { Task { await model.clearFilters() } }
                     .frame(minHeight: 44)
+            }
+            if let target = model.firstNonEmptyStatus(excluding: model.selectedStatus) {
+                Button(String(localized: "Show \(KanbanStatusPresentation(target).title) (\(model.statusCount(target)))")) {
+                    model.chooseStatus(target)
+                }
+                .frame(minHeight: 44)
             }
         }
     }
@@ -2491,7 +2534,8 @@ enum KanbanLabScenario: String, CaseIterable, Identifiable {
                 reconnectDelays: [.milliseconds(10), .milliseconds(10)],
                 pollingInterval: self == .offline ? .milliseconds(10) : .seconds(30),
                 failuresBeforePolling: 3
-            )
+            ),
+            statusChoices: KanbanStatusChoices()
         )
     }
 }

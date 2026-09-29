@@ -335,20 +335,28 @@ enum KanbanBoardPreference {
 }
 
 /// Remembers the user's Status pick per server for this process only, so a rebuilt
-/// `KanbanFeatureState` reopens it for the same Board. Never persisted: a relaunch
-/// forgets it.
+/// `KanbanFeatureState` reopens it for the same Board. One entry per server, keyed like
+/// `KanbanBoardPreference`; a pick made on another Board reads as none. Never
+/// persisted: a relaunch forgets it.
 @MainActor
 final class KanbanStatusChoices {
     static let shared = KanbanStatusChoices()
+    private var choices: [String: (board: String, status: String)] = [:]
 
-    func status(for server: URL, board: String) -> String? { nil }
+    func status(for server: URL, board: String) -> String? {
+        guard let choice = choices[server.absoluteString], choice.board == board else { return nil }
+        return choice.status
+    }
 
-    func record(_ status: String, board: String, for server: URL) {}
+    func record(_ status: String, board: String, for server: URL) {
+        choices[server.absoluteString] = (board, status)
+    }
 }
 
 /// Server-bound Kanban browsing state. Each instance owns one server's Board
 /// choice, filters, selection, and snapshots; nothing is shared across servers.
-/// Only the browsed Board slug outlives the instance, via `KanbanBoardPreference`.
+/// Only the browsed Board slug (`KanbanBoardPreference`) and, in memory, the Status
+/// pick (`KanbanStatusChoices`) outlive the instance.
 @MainActor
 @Observable
 final class KanbanFeatureState {
@@ -402,6 +410,8 @@ final class KanbanFeatureState {
 
     private var activeLoadID: UUID?
     private var activeBoardLoadID: UUID?
+    /// The next full snapshot of a newly opened Board picks the opening Status.
+    @ObservationIgnored private var needsOpeningStatus = true
     private var boardsResponse: KanbanBoardsResponse?
     private let client: any KanbanDataClient
     private let streamClient: any KanbanEventStreamingClient
@@ -697,15 +707,37 @@ final class KanbanFeatureState {
         searchMatchedCards.count { $0.status?.rawValue == status }
     }
 
+    /// The first Status of `openingStatusOrder` with a search-matched Card, other than
+    /// `excluded`; `nil` when there is none.
     func firstNonEmptyStatus(excluding excluded: String? = nil) -> String? {
-        nil
+        Self.openingStatusOrder.first { $0 != excluded && statusCount($0) > 0 }
     }
 
+    /// The user's Status pick (a chip tap or the empty-state button). It wins over the
+    /// opening Status and is remembered for this server's Board until the Board changes
+    /// or the app relaunches. Programmatic writes to `selectedStatus` are not picks.
+    /// Returns whether the selection changed.
     @discardableResult
     func chooseStatus(_ status: String) -> Bool {
+        needsOpeningStatus = false
+        if let board = selectedBoardSlug {
+            statusChoices.record(status, board: board, for: server)
+        }
         guard status != selectedStatus else { return false }
         selectedStatus = status
         return true
+    }
+
+    /// Runs after a full snapshot lands: once per Board load, selects the remembered pick
+    /// for this server's Board, else the first non-empty Status, else Triage.
+    private func applyOpeningStatusIfNeeded() {
+        guard needsOpeningStatus, let board = selectedBoardSlug else { return }
+        needsOpeningStatus = false
+        if let pick = statusChoices.status(for: server, board: board), availableStatuses.contains(pick) {
+            selectedStatus = pick
+        } else {
+            selectedStatus = firstNonEmptyStatus() ?? "triage"
+        }
     }
 
     func canMutateCard(_ card: KanbanCard) -> Bool {
@@ -1036,6 +1068,7 @@ final class KanbanFeatureState {
             boardSelectionNotice = nil
             self.snapshot = snapshot
             snapshotRequest = request
+            applyOpeningStatusIfNeeded()
             markBoardActivity()
             detailRefreshRevision &+= 1
             liveCursor = max(0, snapshot.latestEventID ?? 0)
@@ -1139,6 +1172,7 @@ final class KanbanFeatureState {
         clearSettledMutationPresentation()
         resetLiveUpdates(clearCursor: true)
         selectedBoardSlug = slug
+        needsOpeningStatus = true
         boardSelectionNotice = nil
         snapshot = nil
         stats = nil
@@ -2365,6 +2399,7 @@ final class KanbanFeatureState {
         bulkActionPhase = nil
         bulkActionSummary = nil
         selectedBoardSlug = nil
+        needsOpeningStatus = true
         snapshot = nil
         stats = nil
         assigneeHistory = nil
@@ -2444,6 +2479,7 @@ final class KanbanFeatureState {
                 let report = try validateBrowsingSnapshot(response, board: board)
                 snapshot = applyingPendingOptimism(to: response)
                 snapshotRequest = filteredRequest
+                applyOpeningStatusIfNeeded()
                 markBoardActivity()
                 detailRefreshRevision &+= 1
                 self.report = report

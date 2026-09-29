@@ -87,6 +87,12 @@ The interaction model is **Status Focus**:
 
 - a horizontally scrollable Status selector with counts;
 - one Status at a time as a vertical Card list;
+- once per Board load, the Board opens on its first non-empty Status (Running →
+  Blocked → Ready → To Do → Triage → Done; Triage when the Board is empty), and the
+  selected chip is always scrolled into view. A manual Status pick (chip or the
+  empty Status's "Show …" button) sticks for that server's Board across refreshes
+  and live updates until the Board changes or the app relaunches
+  (`KanbanStatusChoices`, in memory only);
 - Board switching from a picker in the header's principal slot: it is capped to the
   width actually left between the back button and the trailing group, and truncates
   the Board name inside that cap, so the bar can never drop the slot. The trailing
