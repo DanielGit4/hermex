@@ -166,10 +166,11 @@ final class ComposerToolbarScrollerTests: XCTestCase {
     func testProfileMenuMarksTheSelectedProfile() throws {
         let defaultProfile = profile(named: "default")
         let reviewProfile = profile(named: "review")
-        let menu = profileSelector(
-            profiles: [defaultProfile, reviewProfile],
-            selectedName: reviewProfile.name
-        ).makeMenu()
+        let menu = ComposerProfileMenu.make(
+            profileOptions: [defaultProfile, reviewProfile],
+            selectedProfileName: reviewProfile.name,
+            onSelectProfile: { _ in }
+        )
 
         let section = try XCTUnwrap(menu.children.first as? UIMenu)
         let actions = try XCTUnwrap(section.children as? [UIAction])
@@ -181,27 +182,98 @@ final class ComposerToolbarScrollerTests: XCTestCase {
     }
 
     func testProfileMenuDisablesItsEmptyState() throws {
-        let menu = profileSelector(profiles: [], selectedName: nil).makeMenu()
+        let menu = ComposerProfileMenu.make(profileOptions: [], selectedProfileName: nil, onSelectProfile: { _ in })
         let action = try XCTUnwrap(menu.children.first as? UIAction)
 
         XCTAssertEqual(action.title, String(localized: "No profiles available"))
         XCTAssertTrue(action.attributes.contains(.disabled))
     }
 
-    private func profileSelector(
-        profiles: [ProfileSummary],
-        selectedName: String?
-    ) -> ComposerProfileSelectorMenu {
-        ComposerProfileSelectorMenu(
-            profileOptions: profiles,
-            selectedProfileName: selectedName,
-            selectedProfileTitle: "Profile",
-            isStatic: false,
+    // MARK: Model and effort chip
+
+    func testChipUsesTheShortClaudeNameAndVoiceOverTheFullOne() {
+        let selection = opusSelection(effort: "max", supportsEffort: true)
+
+        XCTAssertEqual(selection.title, "Opus 5.5 · Max")
+        XCTAssertEqual(selection.accessibilityLabel, "Model: Claude Opus 5.5, Max")
+
+        let noEffort = opusSelection(effort: "max", supportsEffort: false)
+        XCTAssertEqual(noEffort.title, "Opus 5.5")
+        XCTAssertEqual(noEffort.accessibilityLabel, "Model: Claude Opus 5.5")
+    }
+
+    func testChipMenuListsEffortInlineBeforeTheModelSubmenu() throws {
+        let menu = chipMenu(selection: opusSelection(effort: "max", supportsEffort: true)).makeMenu()
+
+        XCTAssertEqual(menu.children.count, 2)
+        let effort = try XCTUnwrap(menu.children[0] as? UIMenu)
+        XCTAssertEqual(effort.title, String(localized: "Effort"))
+        XCTAssertTrue(effort.options.contains(.displayInline), "Effort is one tap away, not a submenu")
+        let effortActions = try XCTUnwrap(effort.children as? [UIAction])
+        XCTAssertEqual(effortActions.map(\.title), ["Low", "Medium", "High", "Max"])
+        XCTAssertEqual(effortActions.map(\.state), [.off, .off, .off, .on])
+        XCTAssertTrue(effortActions.allSatisfy { !$0.attributes.contains(.disabled) })
+
+        let model = try XCTUnwrap(menu.children[1] as? UIMenu)
+        XCTAssertEqual(model.title, String(localized: "Model"))
+        XCTAssertEqual(model.subtitle, "Claude Opus 5.5")
+        XCTAssertFalse(model.options.contains(.displayInline), "Model stays a submenu")
+    }
+
+    func testChipMenuHasNoEffortSectionWhenTheModelHasNone() throws {
+        let menu = chipMenu(selection: opusSelection(effort: "max", supportsEffort: false)).makeMenu()
+
+        XCTAssertEqual(menu.children.count, 1)
+        let model = try XCTUnwrap(menu.children.first as? UIMenu)
+        XCTAssertEqual(model.title, String(localized: "Model"))
+    }
+
+    func testChipMenuDisablesEffortWhenTheCallerLocksIt() throws {
+        var menuView = chipMenu(selection: opusSelection(effort: "high", supportsEffort: true))
+        menuView.allowsEffortChanges = false
+        let effort = try XCTUnwrap(menuView.makeMenu().children.first as? UIMenu)
+        let actions = try XCTUnwrap(effort.children as? [UIAction])
+
+        XCTAssertTrue(actions.allSatisfy { $0.attributes.contains(.disabled) })
+        XCTAssertEqual(actions.first { $0.state == .on }?.title, "High")
+    }
+
+    func testChipMenuKeepsTheSingleEffortStaticAndChecked() throws {
+        let selection = ComposerModelEffortSelection(
+            model: ModelCatalogOption(id: "o4-mini", displayName: "o4-mini", providerID: "openai"),
+            effort: nil,
+            supportedEfforts: ["high"],
+            supportsEffort: true
+        )
+        let effort = try XCTUnwrap(chipMenu(selection: selection).makeMenu().children.first as? UIMenu)
+        let actions = try XCTUnwrap(effort.children as? [UIAction])
+
+        XCTAssertEqual(actions.map(\.title), ["High"])
+        XCTAssertEqual(actions.map(\.state), [.on])
+    }
+
+    private func opusSelection(effort: String, supportsEffort: Bool) -> ComposerModelEffortSelection {
+        ComposerModelEffortSelection(
+            model: ModelCatalogOption(id: "claude-opus-5-5", displayName: "Claude Opus 5 5", providerID: "anthropic"),
+            effort: effort,
+            supportedEfforts: supportsEffort ? ["low", "medium", "high", "max"] : [],
+            supportsEffort: supportsEffort
+        )
+    }
+
+    private func chipMenu(selection: ComposerModelEffortSelection) -> ComposerModelEffortMenu {
+        ComposerModelEffortMenu(
+            selection: selection,
+            modelGroups: [],
+            favoriteModelKeys: [],
+            recentModelKeys: [],
             isDisabled: false,
             color: .primary,
             controlFont: .body,
             chevronFont: .caption,
-            onSelectProfile: { _ in }
+            onSelectModel: { _ in },
+            onSelectEffort: { _ in },
+            onShowAllModels: {}
         )
     }
 

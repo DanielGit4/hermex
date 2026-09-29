@@ -21,58 +21,18 @@ struct ComposerWorkspaceSelectorButton: View {
         }
         .buttonStyle(.chatTactile(.compactControl))
         .disabled(isDisabled)
-        .accessibilityLabel("Choose workspace path")
+        .accessibilityLabel("Workspace: \(title)")
     }
 }
 
-struct ComposerProfileSelectorMenu: View {
-    let profileOptions: [ProfileSummary]
-    let selectedProfileName: String?
-    let selectedProfileTitle: String
-    /// Single-profile servers reject switches (#24), so the control is a plain
-    /// label: no chevron, no menu, no button trait.
-    let isStatic: Bool
-    let isDisabled: Bool
-    let color: Color
-    let controlFont: Font
-    let chevronFont: Font
-    let onSelectProfile: (ProfileSummary) -> Void
-
-    var body: some View {
-        if isStatic {
-            ComposerInlineControlLabel(
-                title: selectedProfileTitle,
-                systemImage: "person.crop.circle",
-                showsChevron: false,
-                color: color,
-                controlFont: controlFont,
-                chevronFont: chevronFont
-            )
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Text("Profile: \(selectedProfileTitle)"))
-        } else {
-            profileMenu
-        }
-    }
-
-    private var profileMenu: some View {
-        ChatUIKitMenuButton {
-            ComposerInlineControlLabel(
-                title: selectedProfileTitle,
-                systemImage: "person.crop.circle",
-                color: color,
-                controlFont: controlFont,
-                chevronFont: chevronFont
-            )
-        } menu: {
-            makeMenu()
-        }
-        .tint(color)
-        .disabled(isDisabled)
-        .accessibilityLabel("Choose profile")
-    }
-
-    func makeMenu() -> UIMenu {
+/// The profile choices the Sessions composer's `+` panel opens from its
+/// Profile row.
+enum ComposerProfileMenu {
+    static func make(
+        profileOptions: [ProfileSummary],
+        selectedProfileName: String?,
+        onSelectProfile: @escaping (ProfileSummary) -> Void
+    ) -> UIMenu {
         guard !profileOptions.isEmpty else {
             return UIMenu(children: [
                 UIAction(
@@ -136,7 +96,8 @@ struct ComposerModelEffortMenu: View {
                     .font(chevronFont)
             }
             .foregroundStyle(color)
-            .fixedSize(horizontal: true, vertical: false)
+            // No fixedSize: in a row that does not scroll, the title truncates
+            // so the controls beside the chip stay on screen.
             .padding(.horizontal, ComposerInlineControlLabel.horizontalPadding)
             .frame(minHeight: ComposerInlineControlLabel.minimumHeight)
             .contentShape(Rectangle())
@@ -148,14 +109,17 @@ struct ComposerModelEffortMenu: View {
         }
         .tint(color)
         .disabled(isDisabled)
-        .accessibilityLabel(accessibilityLabel)
+        .accessibilityLabel(selection.accessibilityLabel)
     }
 
-    private func makeMenu() -> UIMenu {
-        var children: [UIMenuElement] = [modelMenu]
+    /// Effort values inline first, so changing effort is two taps, then the
+    /// Model submenu.
+    func makeMenu() -> UIMenu {
+        var children: [UIMenuElement] = []
         if selection.showsEffortControl {
-            children.append(effortMenu)
+            children.append(effortSection)
         }
+        children.append(modelMenu)
         return UIMenu(children: children)
     }
 
@@ -194,10 +158,10 @@ struct ComposerModelEffortMenu: View {
         )
     }
 
-    private var effortMenu: UIMenu {
+    private var effortSection: UIMenu {
         UIMenu(
             title: String(localized: "Effort"),
-            subtitle: selection.effortTitle,
+            options: [.displayInline],
             children: selection.effortOptions.map { option in
                 UIAction(
                     title: option.title,
@@ -248,10 +212,6 @@ struct ComposerModelEffortMenu: View {
             favoriteKeys: favoriteModelKeys
         )
     }
-
-    private var accessibilityLabel: Text {
-        Text(verbatim: selection.title)
-    }
 }
 
 struct ComposerModelEffortSelection: Equatable, Sendable {
@@ -290,9 +250,16 @@ struct ComposerModelEffortSelection: Equatable, Sendable {
         return ReasoningEffortOption.title(for: effort)
     }
 
+    /// The chip: "Opus 5.5 · Max".
     var title: String {
-        guard let effortTitle else { return model.displayName }
-        return "\(model.displayName) · \(effortTitle)"
+        guard let effortTitle else { return model.shortDisplayName }
+        return "\(model.shortDisplayName) · \(effortTitle)"
+    }
+
+    /// VoiceOver reads the full name: "Model: Claude Opus 5.5, Max".
+    var accessibilityLabel: String {
+        guard let effortTitle else { return String(localized: "Model: \(model.displayName)") }
+        return String(localized: "Model: \(model.displayName), \(effortTitle)")
     }
 
     private func normalizedEffort(_ effort: String?) -> String? {
