@@ -122,6 +122,213 @@ final class KanbanFeatureStateTests: XCTestCase {
         return defaults
     }
 
+    // MARK: - Opening Status
+
+    func testBoardOpensOnTheFirstNonEmptyStatusInFocusOrder() async {
+        XCTAssertEqual(
+            KanbanFeatureState.openingStatusOrder,
+            ["running", "blocked", "ready", "todo", "triage", "done"]
+        )
+        let cases: [(snapshot: KanbanBoardSnapshot, expected: String)] = [
+            (statusCountSnapshot(["running": 1, "blocked": 1, "done": 1]), "running"),
+            (statusCountSnapshot(["blocked": 1, "ready": 1]), "blocked"),
+            (statusCountSnapshot(["ready": 1, "todo": 1]), "ready"),
+            (statusCountSnapshot(["todo": 1, "triage": 1]), "todo"),
+            (statusCountSnapshot(["triage": 1, "done": 1]), "triage"),
+            (statusCountSnapshot(["done": 1]), "done"),
+            (KanbanFixtures.hermexShapedSnapshot, "blocked"),
+            (KanbanFixtures.snapshot, "triage"),
+            (KanbanFixtures.futureSnapshot, "triage")
+        ]
+        for (index, testCase) in cases.enumerated() {
+            let state = KanbanFeatureState(
+                server: URL(string: "https://example.test")!,
+                client: KanbanClientStub(boardResult: .success(testCase.snapshot)),
+                statusChoices: KanbanStatusChoices()
+            )
+            await state.load()
+            XCTAssertEqual(state.selectedStatus, testCase.expected, "case \(index)")
+        }
+    }
+
+    func testOpeningStatusIsAppliedOnceAndRefreshNeverMovesIt() async {
+        let client = SequencedBoardClient(["main": [
+            .success(statusCountSnapshot(["ready": 1, "done": 2])),
+            .success(statusCountSnapshot(["running": 1, "done": 2]))
+        ]])
+        let state = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: client,
+            statusChoices: KanbanStatusChoices()
+        )
+        await state.load()
+        XCTAssertEqual(state.selectedStatus, "ready")
+
+        await state.refresh()
+
+        XCTAssertEqual(state.statusCount("running"), 1, "The refreshed Board is on screen.")
+        XCTAssertEqual(state.selectedStatus, "ready")
+    }
+
+    func testManualStatusPickSticksAcrossRefresh() async {
+        let client = SequencedBoardClient(["main": [
+            .success(statusCountSnapshot(["ready": 1, "done": 2])),
+            .success(statusCountSnapshot(["running": 1, "done": 2]))
+        ]])
+        let state = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: client,
+            statusChoices: KanbanStatusChoices()
+        )
+        await state.load()
+        XCTAssertEqual(state.selectedStatus, "ready")
+
+        state.chooseStatus("done")
+        await state.refresh()
+
+        XCTAssertEqual(state.statusCount("running"), 1, "The refreshed Board is on screen.")
+        XCTAssertEqual(state.selectedStatus, "done")
+    }
+
+    func testBoardSwitchReselectsTheOpeningStatusOverAManualPick() async {
+        let client = SequencedBoardClient([
+            "main": [.success(statusCountSnapshot(["ready": 1, "done": 1]))],
+            "release": [.success(statusCountSnapshot(["blocked": 2, "done": 1]))]
+        ])
+        let state = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: client,
+            statusChoices: KanbanStatusChoices()
+        )
+        await state.load()
+        XCTAssertEqual(state.selectedStatus, "ready")
+        state.chooseStatus("done")
+
+        await state.selectBoard("release")
+
+        XCTAssertEqual(state.selectedBoardSlug, "release")
+        XCTAssertEqual(state.selectedStatus, "blocked")
+
+        // The switch ended the pick: going back to Main opens on its first non-empty Status.
+        await state.selectBoard("main")
+        XCTAssertEqual(state.selectedStatus, "ready")
+    }
+
+    func testSwitchingToAnAllEmptyBoardOpensOnTriage() async {
+        let client = SequencedBoardClient([
+            "main": [.success(statusCountSnapshot(["blocked": 2]))],
+            "release": [.success(statusCountSnapshot([:]))]
+        ])
+        let state = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: client,
+            statusChoices: KanbanStatusChoices()
+        )
+        await state.load()
+        XCTAssertEqual(state.selectedStatus, "blocked")
+
+        await state.selectBoard("release")
+
+        XCTAssertEqual(state.selectedStatus, "triage")
+    }
+
+    func testStatusPickOutlivesTheInstanceOnlyForItsServerAndBoard() async {
+        let defaults = makeIsolatedDefaults()
+        let server = URL(string: "https://first.example.test")!
+        let otherServer = URL(string: "https://second.example.test")!
+        let choices = KanbanStatusChoices()
+        func makeState(_ server: URL, _ choices: KanbanStatusChoices) -> KanbanFeatureState {
+            let shape = statusCountSnapshot(["ready": 1, "done": 1])
+            return KanbanFeatureState(
+                server: server,
+                client: SequencedBoardClient(["main": [.success(shape)], "release": [.success(shape)]]),
+                defaults: defaults,
+                statusChoices: choices
+            )
+        }
+
+        let first = makeState(server, choices)
+        await first.load()
+        XCTAssertEqual(first.selectedStatus, "ready")
+        first.chooseStatus("done")
+
+        let reopened = makeState(server, choices)
+        await reopened.load()
+        XCTAssertEqual(reopened.selectedStatus, "done", "Leaving Kanban and coming back keeps the pick.")
+
+        let other = makeState(otherServer, choices)
+        await other.load()
+        XCTAssertEqual(other.selectedStatus, "ready", "A pick never crosses servers.")
+
+        KanbanBoardPreference.save("release", for: server, in: defaults)
+        let otherBoard = makeState(server, choices)
+        await otherBoard.load()
+        XCTAssertEqual(otherBoard.selectedBoardSlug, "release")
+        XCTAssertEqual(otherBoard.selectedStatus, "ready", "A pick counts only for its Board.")
+
+        KanbanBoardPreference.save("main", for: server, in: defaults)
+        let relaunched = makeState(server, KanbanStatusChoices())
+        await relaunched.load()
+        XCTAssertEqual(relaunched.selectedStatus, "ready", "A relaunch forgets the pick.")
+    }
+
+    func testChooseStatusReportsWhetherTheSelectionChanged() {
+        let state = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: KanbanClientStub(),
+            statusChoices: KanbanStatusChoices()
+        )
+
+        XCTAssertFalse(state.chooseStatus("triage"))
+        XCTAssertTrue(state.chooseStatus("done"))
+        XCTAssertEqual(state.selectedStatus, "done")
+        XCTAssertFalse(state.chooseStatus("done"))
+    }
+
+    func testFirstNonEmptyStatusSkipsTheSelectedStatusAndCountsSearchMatches() async {
+        let state = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: KanbanClientStub(boardResult: .success(KanbanFixtures.hermexShapedSnapshot)),
+            statusChoices: KanbanStatusChoices()
+        )
+        await state.load()
+
+        XCTAssertEqual(state.firstNonEmptyStatus(), "blocked")
+        XCTAssertEqual(state.firstNonEmptyStatus(excluding: "triage"), "blocked")
+        XCTAssertEqual(state.firstNonEmptyStatus(excluding: "blocked"), "done")
+        state.searchText = "done"
+        XCTAssertEqual(state.firstNonEmptyStatus(), "done")
+        XCTAssertEqual(state.statusCount("done"), 34)
+
+        let empty = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: KanbanClientStub(),
+            statusChoices: KanbanStatusChoices()
+        )
+        await empty.load()
+        XCTAssertNil(empty.firstNonEmptyStatus(excluding: empty.selectedStatus))
+    }
+
+    func testFailedFirstLoadLeavesTheOpeningStatusForTheRetry() async {
+        let client = SequencedBoardClient(["main": [
+            .failure(APIError.network(underlying: URLError(.notConnectedToInternet))),
+            .success(statusCountSnapshot(["blocked": 1, "done": 1]))
+        ]])
+        let state = KanbanFeatureState(
+            server: URL(string: "https://example.test")!,
+            client: client,
+            statusChoices: KanbanStatusChoices()
+        )
+        await state.load()
+        XCTAssertEqual(state.state, .networkUnavailable)
+        XCTAssertNil(state.snapshot)
+
+        await state.retry()
+
+        XCTAssertEqual(state.state, .compatible)
+        XCTAssertEqual(state.selectedStatus, "blocked")
+    }
+
     func testCommentCapabilityUsesEnvelopePermissionAndHonorsExplicitBoardReadOnly() async {
         let writable = KanbanFeatureState(
             server: URL(string: "https://example.test")!,
@@ -330,7 +537,9 @@ final class KanbanFeatureStateTests: XCTestCase {
 
         await state.selectBoard("release")
         XCTAssertEqual(state.selectedBoardSlug, "release")
-        XCTAssertEqual(state.selectedStatus, "running")
+        // A Board switch re-opens on the first Status with a search-matched Card;
+        // "worker" matches none, so Triage.
+        XCTAssertEqual(state.selectedStatus, "triage")
         XCTAssertEqual(state.searchText, "worker")
         XCTAssertTrue(state.groupByProfile)
         XCTAssertEqual(state.selectedTenant, "ops")
@@ -2780,6 +2989,41 @@ private actor BrowsingClient: KanbanDataClient {
     func boardRequests() -> [KanbanBoardRequest] { requests }
 }
 
+/// Answers each Board read with the next queued result for that Board, repeating the last.
+private actor SequencedBoardClient: KanbanDataClient {
+    private var results: [String: [Result<KanbanBoardSnapshot, Error>]]
+
+    init(_ results: [String: [Result<KanbanBoardSnapshot, Error>]]) {
+        self.results = results
+    }
+
+    func kanbanConfiguration() -> KanbanConfiguration { KanbanFixtures.configuration }
+    func kanbanBoards() -> KanbanBoardsResponse { KanbanFixtures.multiBoards }
+    func kanbanBoard(_ request: KanbanBoardRequest) throws -> KanbanBoardSnapshot {
+        guard var queue = results[request.board], let next = queue.first else {
+            return KanbanFixtures.snapshot
+        }
+        if queue.count > 1 { queue.removeFirst() }
+        results[request.board] = queue
+        return try next.get()
+    }
+    func kanbanStats(board: String) -> KanbanStats { KanbanFixtures.stats }
+    func kanbanAssignees(board: String) -> KanbanAssigneeHistory { KanbanFixtures.history }
+}
+
+/// A Board with `counts[status]` Cards in each live Status column.
+private func statusCountSnapshot(_ counts: [String: Int]) -> KanbanBoardSnapshot {
+    let columns = ["triage", "todo", "ready", "running", "blocked", "done"].map { status in
+        let cards = (0..<(counts[status] ?? 0))
+            .map { #"{"id":"\#(status.uppercased())-\#($0)","title":"\#(status) \#($0)","status":"\#(status)"}"# }
+            .joined(separator: ",")
+        return #"{"name":"\#(status)","tasks":[\#(cards)]}"#
+    }
+    return mutationDecode(
+        #"{"changed":true,"latest_event_id":1,"read_only":false,"columns":[\#(columns.joined(separator: ","))]}"#
+    )
+}
+
 private actor DeferredBoardClient: KanbanDataClient {
     private var boardCallCount = 0
     private var continuation: CheckedContinuation<KanbanBoardSnapshot, Never>?
@@ -2853,6 +3097,8 @@ private enum KanbanFixtures {
     static let supportedSnapshot = decode(KanbanBoardSnapshot.self, #"{"changed":true,"read_only":false,"columns":[{"name":"triage","tasks":[{"id":"OLD","status":"triage"}]}]}"#)
     static let richSnapshot = decode(KanbanBoardSnapshot.self, #"{"changed":true,"latest_event_id":11,"read_only":false,"tenants":["mobile"],"assignees":["builder"],"columns":[{"name":"triage","tasks":[]},{"name":"ready","tasks":[{"id":"CARD-1","title":"Status Focus","body":"markdown preview","status":"ready","assignee":"builder","tenant":"mobile"}]},{"name":"future","tasks":[{"id":"FUTURE-1","title":"Future","status":"future"}]}]}"#)
     static let futureSnapshot = decode(KanbanBoardSnapshot.self, #"{"changed":true,"read_only":false,"columns":[{"name":"future","tasks":[{"id":"FUTURE-1","status":"future"}]}]}"#)
+    /// The "Hermex iOS" Board from the 2026-09-29 review: 0/0/0/0/16/34.
+    static let hermexShapedSnapshot = statusCountSnapshot(["blocked": 16, "done": 34])
     static let unchangedSnapshot = decode(KanbanBoardSnapshot.self, #"{"changed":false,"latest_event_id":11,"read_only":false}"#)
     static let missingChangedSnapshot = decode(KanbanBoardSnapshot.self, #"{"latest_event_id":12,"read_only":false,"columns":[{"name":"triage","tasks":[]}]}"#)
     static let newSnapshot = decode(KanbanBoardSnapshot.self, #"{"changed":true,"latest_event_id":13,"read_only":false,"columns":[{"name":"ready","tasks":[{"id":"NEW","title":"Newest filter","status":"ready"}]}]}"#)
