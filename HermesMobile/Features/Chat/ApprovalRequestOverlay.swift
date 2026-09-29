@@ -157,17 +157,64 @@ struct ApprovalRequestOverlay: View {
     }
 }
 
+/// Shown above the composer while the chat skips approvals. Tapping it asks to
+/// turn the bypass off.
 struct ApprovalBypassStatusPill: View {
+    let isDisabled: Bool
+    let action: () -> Void
+
     var body: some View {
-        Label("Approval bypass active", systemImage: "bolt.slash.fill")
-            .font(.caption.weight(.semibold))
-            .padding(.horizontal, 12)
-            .padding(.vertical, 8)
-            .background(.regularMaterial, in: Capsule())
-            .overlay(
-                Capsule()
-                    .stroke(.primary.opacity(0.10), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
+        Button(action: action) {
+            Label("Approval bypass active", systemImage: "bolt.slash.fill")
+                .font(.caption.weight(.semibold))
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(.regularMaterial, in: Capsule())
+                .overlay(
+                    Capsule()
+                        .stroke(.primary.opacity(0.10), lineWidth: 1)
+                )
+                .shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
+        }
+        .buttonStyle(.plain)
+        .disabled(isDisabled)
+        .accessibilityLabel(String(localized: "Approval bypass on"))
+        .accessibilityHint(String(localized: "Double-tap to ask for approvals again"))
+    }
+}
+
+/// The one confirmation for every approval bypass change: the bypass pill, the
+/// approval card's "Skip all this session" and `/yolo`. In its own modifier so
+/// `ChatView.body`'s alert chain stays inside the compiler's type-checking budget.
+struct ApprovalBypassAlertModifier: ViewModifier {
+    let pendingChange: ApprovalBypassChange?
+    let onCancel: () -> Void
+    let onConfirm: (ApprovalBypassChange) -> Void
+
+    func body(content: Content) -> some View {
+        content
+            .alert("Ask for approvals again in this chat?", isPresented: isPresenting(.disable)) {
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button("Turn Off Bypass") { onConfirm(.disable) }
+            } message: {
+                Text("The agent will wait for you again before running commands that need approval.")
+            }
+            .alert("Skip approvals in this chat?", isPresented: isPresenting(.enable)) {
+                Button("Cancel", role: .cancel, action: onCancel)
+                Button("Skip Approvals", role: .destructive) { onConfirm(.enable) }
+            } message: {
+                Text("Commands that need approval will run without asking until you turn this off. A request that is waiting now is allowed once.")
+            }
+    }
+
+    private func isPresenting(_ change: ApprovalBypassChange) -> Binding<Bool> {
+        Binding(
+            get: { pendingChange == change },
+            set: { isPresented in
+                if !isPresented {
+                    onCancel()
+                }
+            }
+        )
     }
 }

@@ -168,6 +168,12 @@ enum SlashCommandCatalog {
             argHint: String(localized: "prompt"),
             noEcho: true,
             handler: .serverSide(.background)
+        ),
+        SlashCommand(
+            name: "yolo",
+            description: String(localized: "Turn approval bypass on or off"),
+            noEcho: true,
+            handler: .clientSide(.yolo)
         )
     ]
 

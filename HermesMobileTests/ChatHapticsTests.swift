@@ -10,6 +10,8 @@ final class ChatHapticsTests: APIClientTestCase {
         ChatHaptics.assistantResponseCompleted(isEnabled: false) { feedback.append($0) }
         ChatHaptics.streamCancelled(isEnabled: false) { feedback.append($0) }
         ChatHaptics.approvalSubmitted(.deny, isEnabled: false) { feedback.append($0) }
+        ChatHaptics.approvalBypassEnabled(isEnabled: false) { feedback.append($0) }
+        ChatHaptics.approvalBypassDisabled(isEnabled: false) { feedback.append($0) }
         ChatHaptics.clarificationSubmitted(isEnabled: false) { feedback.append($0) }
         ChatHaptics.configurationSelected(isEnabled: false) { feedback.append($0) }
         ChatHaptics.destructiveConfirmationAccepted(isEnabled: false) { feedback.append($0) }
@@ -34,6 +36,7 @@ final class ChatHapticsTests: APIClientTestCase {
         ChatHaptics.approvalSubmitted(.always, isEnabled: true) { feedback.append($0) }
         ChatHaptics.approvalSubmitted(.deny, isEnabled: true) { feedback.append($0) }
         ChatHaptics.approvalBypassEnabled(isEnabled: true) { feedback.append($0) }
+        ChatHaptics.approvalBypassDisabled(isEnabled: true) { feedback.append($0) }
         ChatHaptics.clarificationSubmitted(isEnabled: true) { feedback.append($0) }
         ChatHaptics.configurationSelected(isEnabled: true) { feedback.append($0) }
         ChatHaptics.destructiveConfirmationAccepted(isEnabled: true) { feedback.append($0) }
@@ -53,6 +56,7 @@ final class ChatHapticsTests: APIClientTestCase {
             .lightImpact,
             .warning,
             .warning,
+            .success,
             .selection,
             .selection,
             .warning,

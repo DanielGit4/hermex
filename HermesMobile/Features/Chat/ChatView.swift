@@ -726,7 +726,7 @@ struct ChatView: View {
         if let approvalPrompt = viewModel.approvalPrompt {
             ApprovalRequestOverlay(
                 prompt: approvalPrompt,
-                isResponding: viewModel.isRespondingToApproval,
+                isResponding: viewModel.isRespondingToApproval || viewModel.isChangingApprovalBypass,
                 errorMessage: viewModel.approvalErrorMessage,
                 onChoice: { choice in
                     Task {
@@ -737,12 +737,7 @@ struct ChatView: View {
                     }
                 },
                 onSkipAll: {
-                    Task {
-                        let didSkip = await viewModel.skipApprovalsForCurrentSession()
-                        if didSkip {
-                            ChatHaptics.approvalBypassEnabled(isEnabled: isHapticsEnabled)
-                        }
-                    }
+                    viewModel.requestApprovalBypassChange(enabled: true)
                 }
             )
             .zIndex(10)
@@ -1037,6 +1032,13 @@ struct ChatView: View {
                     pending: $pendingClearConfirmation,
                     isHapticsEnabled: isHapticsEnabled,
                     onConfirm: confirmClearConversation
+                )
+            )
+            .modifier(
+                ApprovalBypassAlertModifier(
+                    pendingChange: viewModel.pendingApprovalBypassChange,
+                    onCancel: viewModel.cancelApprovalBypassChange,
+                    onConfirm: confirmApprovalBypassChange
                 )
             )
             .alert(
@@ -1398,25 +1400,30 @@ struct ChatView: View {
         if composerAccessoryVisibleItemCount > 0 {
             ComposerHeightReader(height: composerHeight) { composerHeight in
                 VStack(spacing: composerAccessoryVerticalSpacing) {
+                    // Notices and run status pass touches through to the
+                    // transcript; only the bypass pill takes taps.
                     if !composerLocalNotices.isEmpty {
                         PinnedLocalNoticeStack(notices: composerLocalNotices)
+                            .allowsHitTesting(false)
                             .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
                     }
 
                     if let activeRunStatusPresentation {
                         ChatActiveRunStatusView(presentation: activeRunStatusPresentation)
+                            .allowsHitTesting(false)
                             .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
                     }
 
                     if showsApprovalBypassStatus {
-                        ApprovalBypassStatusPill()
-                            .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+                        ApprovalBypassStatusPill(isDisabled: viewModel.isChangingApprovalBypass) {
+                            viewModel.requestApprovalBypassChange(enabled: false)
+                        }
+                        .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
                     }
                 }
                 .padding(.horizontal)
                 .padding(.bottom, composerHeight + 8 + clarificationFootprintHeight)
             }
-            .allowsHitTesting(false)
             .zIndex(8)
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: composerAccessoryVisibleItemCount)
             .animation(ChatMotion.quickState(reduceMotion: reduceMotion), value: activeRunStatusPresentation)
@@ -1887,6 +1894,21 @@ struct ChatView: View {
 
     private func confirmClearConversation(_ pending: PendingClearConfirmation) {
         Task { await clearConversation(pending) }
+    }
+
+    private func confirmApprovalBypassChange(_ change: ApprovalBypassChange) {
+        Task {
+            if await viewModel.confirmApprovalBypassChange(change) {
+                switch change {
+                case .enable:
+                    ChatHaptics.approvalBypassEnabled(isEnabled: isHapticsEnabled)
+                case .disable:
+                    ChatHaptics.approvalBypassDisabled(isEnabled: isHapticsEnabled)
+                }
+            } else if let lastError = viewModel.lastError {
+                onAPIError(lastError)
+            }
+        }
     }
 
     private func clearConversation(_ pending: PendingClearConfirmation) async {

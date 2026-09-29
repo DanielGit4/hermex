@@ -589,6 +589,8 @@ final class ChatViewModel {
     var isRespondingToApproval: Bool { pendingActionCoordinator.isRespondingToApproval }
     var approvalErrorMessage: String? { pendingActionCoordinator.approvalErrorMessage }
     var isSessionApprovalBypassEnabled: Bool { pendingActionCoordinator.isSessionApprovalBypassEnabled }
+    var pendingApprovalBypassChange: ApprovalBypassChange? { pendingActionCoordinator.pendingApprovalBypassChange }
+    var isChangingApprovalBypass: Bool { pendingActionCoordinator.isChangingApprovalBypass }
     var clarificationPrompt: ClarificationPromptState? { pendingActionCoordinator.clarificationPrompt }
     var isRespondingToClarification: Bool { pendingActionCoordinator.isRespondingToClarification }
     var clarificationErrorMessage: String? { pendingActionCoordinator.clarificationErrorMessage }
@@ -3076,6 +3078,8 @@ final class ChatViewModel {
                 return await createSessionFromSlashCommand()
             case .help:
                 return .executed(message: Self.slashCommandHelpText)
+            case .yolo:
+                return requestApprovalBypassChangeFromSlashCommand()
             }
         case .serverSide(let action):
             return await executeServerSideSlashCommand(action, args: args)
@@ -4895,6 +4899,34 @@ final class ChatViewModel {
     @discardableResult
     func skipApprovalsForCurrentSession() async -> Bool {
         await pendingActionCoordinator.skipApprovalsForCurrentSession()
+    }
+
+    func requestApprovalBypassChange(enabled: Bool) {
+        pendingActionCoordinator.requestApprovalBypassChange(enabled: enabled)
+    }
+
+    func cancelApprovalBypassChange() {
+        pendingActionCoordinator.cancelApprovalBypassChange()
+    }
+
+    @discardableResult
+    func confirmApprovalBypassChange(_ change: ApprovalBypassChange) async -> Bool {
+        await pendingActionCoordinator.confirmApprovalBypassChange(change)
+    }
+
+    /// `/yolo` asks to flip this chat's approval bypass. `ChatView` confirms
+    /// before anything is sent, so the command itself never touches the network.
+    private func requestApprovalBypassChangeFromSlashCommand() -> SlashCommandExecutionResult {
+        if isViewingCachedData {
+            return .unsupported(friendlyMessage: String(localized: "Reconnect to the server to change approvals."))
+        }
+
+        guard sessionID != nil else {
+            return .unsupported(friendlyMessage: String(localized: "Send a message first, then change approvals."))
+        }
+
+        requestApprovalBypassChange(enabled: !isSessionApprovalBypassEnabled)
+        return .executed(message: nil)
     }
 
     func applyApprovalUpdate(_ update: ApprovalPendingResponse, sessionID: String) {

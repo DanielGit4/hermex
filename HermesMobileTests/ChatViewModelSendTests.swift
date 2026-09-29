@@ -2148,6 +2148,235 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(viewModel.activeStreamID, "stream-123")
     }
 
+    /// The bypass pill asks first, then sends one explicit `enabled: false`.
+    /// Once the server confirms, a request that arrived while bypass was on
+    /// shows its card again.
+    @MainActor
+    func testTurningApprovalBypassOffSendsExplicitFalseAndBringsBackWaitingApprovals() async throws {
+        let requests = LockedStrings()
+        var offBody: [String: Any]?
+        let viewModel = try makeViewModel { request in
+            requests.append("\(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/session/yolo"):
+                return apiTestJSONResponse(#"{"yolo_enabled": true}"#, for: request)
+            case ("POST", "/api/session/yolo"):
+                offBody = try apiTestJSONBody(from: request)
+                return apiTestJSONResponse(#"{"ok": true, "yolo_enabled": false}"#, for: request)
+            case ("GET", "/api/approval/pending"):
+                return apiTestJSONResponse(
+                    #"{"pending": {"approval_id": "approval-1", "command": "make install"}, "pending_count": 1}"#,
+                    for: request
+                )
+            default:
+                XCTFail("Unexpected request: \(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.refreshApprovalBypassState()
+        XCTAssertTrue(viewModel.isSessionApprovalBypassEnabled)
+
+        viewModel.requestApprovalBypassChange(enabled: false)
+
+        XCTAssertEqual(viewModel.pendingApprovalBypassChange, .disable)
+        XCTAssertEqual(requests.values, ["GET /api/session/yolo"])
+
+        let didTurnOff = await viewModel.confirmApprovalBypassChange(.disable)
+
+        XCTAssertTrue(didTurnOff)
+        XCTAssertEqual(
+            requests.values,
+            ["GET /api/session/yolo", "POST /api/session/yolo", "GET /api/approval/pending"]
+        )
+        let body = try XCTUnwrap(offBody)
+        XCTAssertEqual(body["session_id"] as? String, "session-abc")
+        let enabled = try XCTUnwrap(body["enabled"] as? NSNumber, "`enabled` must be sent: the server defaults it to true")
+        XCTAssertEqual(CFGetTypeID(enabled), CFBooleanGetTypeID(), "`enabled` must be a JSON bool")
+        XCTAssertFalse(enabled.boolValue)
+        XCTAssertFalse(viewModel.isSessionApprovalBypassEnabled)
+        XCTAssertNil(viewModel.pendingApprovalBypassChange)
+        XCTAssertFalse(viewModel.isChangingApprovalBypass)
+        XCTAssertNil(viewModel.sendErrorMessage)
+        XCTAssertEqual(viewModel.approvalPrompt?.pending.approvalId, "approval-1")
+    }
+
+    /// Only `"yolo_enabled": false` hides the pill. A `true` or a missing field
+    /// fails closed: bypass stays on and the composer says so.
+    @MainActor
+    func testApprovalBypassStaysOnUnlessTheServerAnswersFalse() async throws {
+        for answer in [#"{"ok": true, "yolo_enabled": true}"#, #"{"ok": true}"#] {
+            let requests = LockedStrings()
+            let viewModel = try makeViewModel { request in
+                requests.append("\(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+                switch (request.httpMethod, request.url?.path) {
+                case ("GET", "/api/session/yolo"):
+                    return apiTestJSONResponse(#"{"yolo_enabled": true}"#, for: request)
+                case ("POST", "/api/session/yolo"):
+                    return apiTestJSONResponse(answer, for: request)
+                default:
+                    XCTFail("Unexpected request: \(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+                    throw URLError(.badURL)
+                }
+            }
+            await viewModel.refreshApprovalBypassState()
+            viewModel.requestApprovalBypassChange(enabled: false)
+
+            let didTurnOff = await viewModel.confirmApprovalBypassChange(.disable)
+
+            XCTAssertFalse(didTurnOff, answer)
+            XCTAssertTrue(viewModel.isSessionApprovalBypassEnabled, answer)
+            XCTAssertEqual(
+                viewModel.sendErrorMessage,
+                "The server did not turn off approval bypass. Approvals are still skipped.",
+                answer
+            )
+            XCTAssertEqual(requests.values, ["GET /api/session/yolo", "POST /api/session/yolo"], answer)
+            XCTAssertNil(viewModel.pendingApprovalBypassChange, answer)
+        }
+    }
+
+    @MainActor
+    func testFailedApprovalBypassOffKeepsThePillAndShowsTheError() async throws {
+        let requests = LockedStrings()
+        let viewModel = try makeViewModel { request in
+            requests.append("\(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/session/yolo"):
+                return apiTestJSONResponse(#"{"yolo_enabled": true}"#, for: request)
+            case ("POST", "/api/session/yolo"):
+                let response = try XCTUnwrap(HTTPURLResponse(
+                    url: try XCTUnwrap(request.url),
+                    statusCode: 500,
+                    httpVersion: nil,
+                    headerFields: ["Content-Type": "application/json"]
+                ))
+                return (response, Data(#"{"error": "Internal error"}"#.utf8))
+            default:
+                XCTFail("Unexpected request: \(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.refreshApprovalBypassState()
+        viewModel.requestApprovalBypassChange(enabled: false)
+
+        let didTurnOff = await viewModel.confirmApprovalBypassChange(.disable)
+
+        XCTAssertFalse(didTurnOff)
+        XCTAssertTrue(viewModel.isSessionApprovalBypassEnabled)
+        XCTAssertNotNil(viewModel.sendErrorMessage)
+        XCTAssertNotNil(viewModel.lastError)
+        XCTAssertFalse(viewModel.isChangingApprovalBypass)
+        XCTAssertEqual(requests.values, ["GET /api/session/yolo", "POST /api/session/yolo"])
+    }
+
+    /// "Skip all this session" asks first. Cancelling sends nothing and keeps
+    /// the card; confirming sends `enabled: true` and clears the card.
+    @MainActor
+    func testSkipAllThisSessionAsksBeforeTurningApprovalBypassOn() async throws {
+        let requests = LockedStrings()
+        var onBody: [String: Any]?
+        let viewModel = try makeViewModel { request in
+            requests.append("\(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/session/yolo"):
+                return apiTestJSONResponse(#"{"yolo_enabled": false}"#, for: request)
+            case ("GET", "/api/approval/pending"):
+                return apiTestJSONResponse(
+                    #"{"pending": {"approval_id": "approval-1", "command": "make install"}, "pending_count": 1}"#,
+                    for: request
+                )
+            case ("POST", "/api/session/yolo"):
+                onBody = try apiTestJSONBody(from: request)
+                return apiTestJSONResponse(#"{"ok": true, "yolo_enabled": true}"#, for: request)
+            default:
+                XCTFail("Unexpected request: \(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.refreshApprovalBypassState()
+        XCTAssertEqual(viewModel.approvalPrompt?.pending.approvalId, "approval-1")
+        let openingRequests = ["GET /api/session/yolo", "GET /api/approval/pending"]
+        XCTAssertEqual(requests.values, openingRequests)
+
+        viewModel.requestApprovalBypassChange(enabled: true)
+
+        XCTAssertEqual(viewModel.pendingApprovalBypassChange, .enable)
+        XCTAssertEqual(viewModel.approvalPrompt?.pending.approvalId, "approval-1")
+        XCTAssertFalse(viewModel.isSessionApprovalBypassEnabled)
+        XCTAssertEqual(requests.values, openingRequests)
+
+        viewModel.cancelApprovalBypassChange()
+
+        XCTAssertNil(viewModel.pendingApprovalBypassChange)
+        XCTAssertEqual(viewModel.approvalPrompt?.pending.approvalId, "approval-1")
+        XCTAssertFalse(viewModel.isSessionApprovalBypassEnabled)
+        XCTAssertEqual(requests.values, openingRequests)
+
+        viewModel.requestApprovalBypassChange(enabled: true)
+        let didTurnOn = await viewModel.confirmApprovalBypassChange(.enable)
+
+        XCTAssertTrue(didTurnOn)
+        XCTAssertEqual(requests.values, openingRequests + ["POST /api/session/yolo"])
+        let body = try XCTUnwrap(onBody)
+        XCTAssertEqual(body["session_id"] as? String, "session-abc")
+        let enabled = try XCTUnwrap(body["enabled"] as? NSNumber)
+        XCTAssertEqual(CFGetTypeID(enabled), CFBooleanGetTypeID(), "`enabled` must be a JSON bool")
+        XCTAssertTrue(enabled.boolValue)
+        XCTAssertTrue(viewModel.isSessionApprovalBypassEnabled)
+        XCTAssertNil(viewModel.approvalPrompt)
+        XCTAssertNil(viewModel.pendingApprovalBypassChange)
+    }
+
+    /// A bypass read that was already in flight when the user turned bypass
+    /// off answers with the older state. It must not turn the bypass back on.
+    @MainActor
+    func testBypassReadInFlightDuringTurnOffCannotTurnBypassBackOn() async throws {
+        let requests = LockedStrings()
+        let readGate = ResponseGate()
+        let bypassReads = LockedCounter()
+        let heldReadArrived = expectation(description: "The second bypass read reached the server")
+        let viewModel = try makeViewModel { request in
+            requests.append("\(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+            switch (request.httpMethod, request.url?.path) {
+            case ("GET", "/api/session/yolo"):
+                if bypassReads.increment() == 2 {
+                    heldReadArrived.fulfill()
+                }
+                readGate.wait()
+                return apiTestJSONResponse(#"{"yolo_enabled": true}"#, for: request)
+            case ("POST", "/api/session/yolo"):
+                return apiTestJSONResponse(#"{"ok": true, "yolo_enabled": false}"#, for: request)
+            case ("GET", "/api/approval/pending"):
+                return apiTestJSONResponse(#"{"pending": null, "pending_count": 0}"#, for: request)
+            default:
+                XCTFail("Unexpected request: \(request.httpMethod ?? "?") \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        await viewModel.refreshApprovalBypassState()
+        XCTAssertTrue(viewModel.isSessionApprovalBypassEnabled)
+
+        readGate.hold()
+        let heldRead = Task { await viewModel.refreshApprovalBypassState() }
+        await fulfillment(of: [heldReadArrived], timeout: 5)
+
+        viewModel.requestApprovalBypassChange(enabled: false)
+        let didTurnOff = await viewModel.confirmApprovalBypassChange(.disable)
+        XCTAssertTrue(didTurnOff)
+        XCTAssertFalse(viewModel.isSessionApprovalBypassEnabled)
+
+        readGate.release()
+        await heldRead.value
+
+        XCTAssertFalse(viewModel.isSessionApprovalBypassEnabled)
+        XCTAssertEqual(requests.values, [
+            "GET /api/session/yolo",
+            "GET /api/session/yolo",
+            "POST /api/session/yolo",
+            "GET /api/approval/pending"
+        ])
+    }
+
     /// `/yolo` offers the opposite of the chat's current bypass state and sends
     /// nothing until the user confirms.
     @MainActor
@@ -2165,14 +2394,17 @@ final class ChatViewModelSendTests: XCTestCase {
         let enableResult = await SlashCommandExecutor.execute(text: "/yolo", viewModel: viewModel)
 
         XCTAssertEqual(enableResult, .executed(message: nil))
+        XCTAssertEqual(viewModel.pendingApprovalBypassChange, .enable)
         XCTAssertEqual(requests.values, [])
 
+        viewModel.cancelApprovalBypassChange()
         await viewModel.refreshApprovalBypassState()
         XCTAssertTrue(viewModel.isSessionApprovalBypassEnabled)
 
         let disableResult = await SlashCommandExecutor.execute(text: "/yolo", viewModel: viewModel)
 
         XCTAssertEqual(disableResult, .executed(message: nil))
+        XCTAssertEqual(viewModel.pendingApprovalBypassChange, .disable)
         XCTAssertEqual(requests.values, ["GET /api/session/yolo"])
         XCTAssertTrue(viewModel.isSessionApprovalBypassEnabled)
     }
@@ -2200,6 +2432,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let cachedResult = await SlashCommandExecutor.execute(text: "/yolo", viewModel: cachedViewModel)
 
         XCTAssertEqual(cachedResult, .unsupported(friendlyMessage: "Reconnect to the server to change approvals."))
+        XCTAssertNil(cachedViewModel.pendingApprovalBypassChange)
 
         let newChatViewModel = try makeViewModel(sessionSummary: SessionSummary(sessionId: nil)) { request in
             XCTFail("/yolo should not call the server without a session: \(request.url?.path ?? "nil")")
@@ -2209,6 +2442,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let newChatResult = await SlashCommandExecutor.execute(text: "/yolo", viewModel: newChatViewModel)
 
         XCTAssertEqual(newChatResult, .unsupported(friendlyMessage: "Send a message first, then change approvals."))
+        XCTAssertNil(newChatViewModel.pendingApprovalBypassChange)
     }
 
     @MainActor

@@ -41,6 +41,7 @@ enum ClientSideAction: String, Equatable, Sendable {
     case stop
     case new
     case help
+    case yolo
 }
 
 enum ServerSideAction: String, Equatable, Sendable {
