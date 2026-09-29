@@ -840,8 +840,16 @@ struct ChatView: View {
                 viewModel.stopListening()
                 viewModel.suspendStreamForNavigation()
                 viewModel.cleanupPollingTasks()
+                viewModel.isWatchingLatestContent = { false }
             }
             .onAppear {
+                // Read at a run's end, not in a body, so crossing the
+                // near-bottom threshold re-runs nothing.
+                viewModel.isWatchingLatestContent = { [scrollFollow] in
+                    UIApplication.shared.applicationState == .active
+                        && scrollFollow.isNearBottom
+                        && scrollFollow.latch.isFollowing
+                }
                 appearanceTask?.cancel()
                 appearanceTask = Task {
                     await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
@@ -1447,7 +1455,7 @@ struct ChatView: View {
             clarificationPromptID: viewModel.clarificationPrompt?.id,
             hidesRunStatusAccessibility: activeRunStatusPresentation != nil,
             showsThinkingAndToolCards: showsThinkingAndToolCards,
-            workingRowStartedAt: workingRowStartedAt,
+            workingRowPhase: workingRowPhase,
             scrollFollow: scrollFollow,
             isDisclosureSettling: isDisclosureSettling,
             latestTranscriptMessageRole: latestTranscriptMessageRole,
@@ -1622,11 +1630,14 @@ struct ChatView: View {
         scrollFollow.latch.isFollowing && !isDisclosureSettling
     }
 
-    private var workingRowStartedAt: Date? {
-        ChatWorkingRowPolicy.startedAt(
-            activeRunStartedAt: viewModel.activeRunStartedAt,
-            isCancellingStream: viewModel.isCancellingStream,
-            hasPendingClarificationPrompt: viewModel.clarificationPrompt != nil
+    private var workingRowPhase: ChatWorkingRowPhase? {
+        ChatWorkingRowPolicy.phase(
+            runningSince: ChatWorkingRowPolicy.startedAt(
+                activeRunStartedAt: viewModel.activeRunStartedAt,
+                isCancellingStream: viewModel.isCancellingStream,
+                hasPendingClarificationPrompt: viewModel.clarificationPrompt != nil
+            ),
+            settledRun: viewModel.settledWorkingRun
         )
     }
 

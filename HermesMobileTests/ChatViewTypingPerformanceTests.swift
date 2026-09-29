@@ -1063,6 +1063,47 @@ import XCTest
         }
     }
 
+    /// At the bottom of the real chat, a run that completes settles the
+    /// working row once: the row renders settled, then leaves with the hold
+    /// and re-runs no more.
+    func testAWatchedRunSettlesOnceThenTheRowLeaves() async throws {
+        guard UIApplication.shared.applicationState == .active else {
+            throw XCTSkip("The test host is not active, so no chat watches; TranscriptTurnFoldingTests cover the settle.")
+        }
+        let fixture = try ChatTypingFixture(messageCount: 40, answersChatStart: true)
+        defer { fixture.tearDown() }
+        let stream = ScriptedSSEStreamingClient()
+        let viewModel = fixture.makeStreamingViewModel(stream: stream)
+        fixture.viewModel = viewModel
+        defer { fixture.viewModel = nil }
+
+        try await withHostedWindow(fixture) { window in
+            try await settle(window, fixture: fixture) {
+                fixture.sessionRequestCount > 0 && (ViewBodyProbe.counts?[.messageBubble] ?? 0) > 0
+            }
+            let didStart = await viewModel.sendMessage("Summarize what changed in the parser.")
+            XCTAssertTrue(didStart, "The turn must start a stream")
+            stream.emit(.token("Streaming "))
+            try await settle(window, fixture: fixture) { true }
+
+            let rowPassesBeforeDone = ViewBodyProbe.counts?[.workingRow] ?? 0
+            stream.emit(.done(DoneStreamEvent()))
+            XCTAssertNotNil(viewModel.settledWorkingRun, "A run completing at the bottom settles")
+            let cleared = expectation(description: "The settle ends with its hold")
+            withObservationTracking { _ = viewModel.settledWorkingRun } onChange: { cleared.fulfill() }
+            await drainKeystroke(in: window)
+            XCTAssertGreaterThan(ViewBodyProbe.counts?[.workingRow] ?? 0, rowPassesBeforeDone, "The settled row must render")
+
+            await fulfillment(of: [cleared], timeout: 5)
+            try await settle(window, fixture: fixture) { true }
+            let rowPassesAfterHold = ViewBodyProbe.counts?[.workingRow] ?? 0
+            try await Task.sleep(for: .seconds(2))
+            await renderFrames(2)
+            XCTAssertEqual(ViewBodyProbe.counts?[.workingRow] ?? 0, rowPassesAfterHold, "The row must have left")
+            XCTAssertEqual(ViewBodyProbe.counts?[.workingRowSettle], 1)
+        }
+    }
+
     /// Streams eight words into a 40-message chat with haptics on, the
     /// streaming pulse set to `isEnabled` and no throttle window, then
     /// restores both settings.
@@ -1329,9 +1370,13 @@ import XCTest
     /// enough that nothing else flushes: only the follow scroll a flush
     /// schedules fires on its own. A `streamingHapticPulseInterval` of 0 bumps
     /// the pulse trigger on every live word instead of the real 0.32 s cadence.
+    /// `workingRowSettleHold` replaces the settled working row's real hold.
     func makeStreamingViewModel(
         stream: ScriptedSSEStreamingClient,
-        streamingHapticPulseInterval: TimeInterval = ChatHaptics.StreamingPulseThrottle.defaultInterval
+        streamingHapticPulseInterval: TimeInterval = ChatHaptics.StreamingPulseThrottle.defaultInterval,
+        workingRowSettleHold: @escaping @Sendable () async throws -> Void = {
+            try await Task.sleep(for: ChatWorkingRowSettlePolicy.holdDuration)
+        }
     ) -> ChatViewModel {
         let viewModel = ChatViewModel(
             session: session,
@@ -1341,6 +1386,7 @@ import XCTest
             approvalStreamClient: ScriptedSSEStreamingClient(),
             clarifyStreamClient: ScriptedSSEStreamingClient(),
             btwStreamClient: ScriptedSSEStreamingClient(),
+            workingRowSettleHold: workingRowSettleHold,
             streamingScrollCoalescingDelayNanoseconds: 1_000_000,
             streamingWordRevealCadenceNanoseconds: 60_000_000_000,
             streamingMaxRevealLagNanoseconds: 3_600_000_000_000,

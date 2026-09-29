@@ -478,6 +478,42 @@ enum ChatWorkingRowPolicy {
         }
         return activeRunStartedAt
     }
+
+    /// What the tail row shows: a running counter wins; else a watched run's
+    /// settled span; else nil hides the row.
+    static func phase(runningSince: Date?, settledRun: ChatRunEnding?) -> ChatWorkingRowPhase? {
+        if let runningSince { return .running(startedAt: runningSince) }
+        guard let settledRun else { return nil }
+        return .settled(startedAt: settledRun.startedAt, endedAt: settledRun.endedAt)
+    }
+}
+
+enum ChatWorkingRowPhase: Equatable {
+    case running(startedAt: Date)
+    case settled(startedAt: Date, endedAt: Date)
+
+    var startedAt: Date {
+        switch self {
+        case .running(let startedAt), .settled(let startedAt, _): startedAt
+        }
+    }
+
+    var isSettled: Bool {
+        if case .settled = self { return true }
+        return false
+    }
+}
+
+enum ChatWorkingRowSettlePolicy {
+    /// How long a settled row stays before it goes, the way the row goes today.
+    static let holdDuration: Duration = .milliseconds(1200)
+
+    /// The run a watching chat settles its working row on: only a completed
+    /// run the live stream delivered, never a stop, a failure or a catch-up.
+    static func settledRun(ending: ChatRunEnding?, isWatching: Bool) -> ChatRunEnding? {
+        guard let ending, ending.ending == .completed, ending.isLiveCompletion, isWatching else { return nil }
+        return ending
+    }
 }
 
 enum ChatWorkingElapsedFormatter {

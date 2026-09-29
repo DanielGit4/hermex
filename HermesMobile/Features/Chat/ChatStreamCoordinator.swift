@@ -56,10 +56,13 @@ struct ChatStreamSnapshotRestoreResult: Equatable {
 }
 
 /// Span of a finished run and how it ended; the view model keys it to a turn.
+/// `isLiveCompletion` is true only for a normal completion the live stream's
+/// `done` delivered, the one ending a watching screen may celebrate.
 struct ChatRunEnding: Equatable {
     let startedAt: Date
     let endedAt: Date
     let ending: TranscriptTurnRunOutcome.Ending
+    let isLiveCompletion: Bool
 }
 
 @MainActor
@@ -155,6 +158,9 @@ final class ChatStreamCoordinator {
     /// cleanup, queue drain, and title-refresh side effects cannot repeat.
     /// Reset wherever the content fence disarms.
     @ObservationIgnored private var isTransportFinished = false
+    /// True while replaying a run the server had already finished: nobody
+    /// watched it end, so its `done` is not a live completion.
+    @ObservationIgnored private var isCatchingUpFinishedRun = false
     @ObservationIgnored private(set) var lastEventID: String?
     @ObservationIgnored private(set) var lastProgressDate: Date?
     @ObservationIgnored private(set) var lastTransportActivityDate: Date?
@@ -248,6 +254,7 @@ final class ChatStreamCoordinator {
         hasCompletedCurrentResponse = false
         isTerminalContentFenceActive = false
         isTransportFinished = false
+        isCatchingUpFinishedRun = false
         setLiveTokensPerSecondIfChanged(nil)
         runGeneration &+= 1
         invalidateReconnectTask()
@@ -485,6 +492,7 @@ final class ChatStreamCoordinator {
                     let replayAfterSeq = Self.runJournalReplayAfterSeq(from: lastEventID) ?? 0
                     isConnectionSuspended = false
                     start(streamID: streamID, replayAfterSeq: replayAfterSeq)
+                    isCatchingUpFinishedRun = true
                 } else {
                     let completedLoad = await loadMessagesForReconnect(reconnectTaskID: reconnectTaskID)
                     guard completedLoad,
@@ -804,7 +812,10 @@ final class ChatStreamCoordinator {
             setLiveTokensPerSecondIfChanged(payload.displayableTokensPerSecond)
         case .done(let payload):
             let hasCompletedTranscript = delegate?.streamCoordinatorApplyDone(payload) == true
-            completeCurrentResponse(needsTranscriptRefresh: !hasCompletedTranscript)
+            completeCurrentResponse(
+                needsTranscriptRefresh: !hasCompletedTranscript,
+                isLiveCompletion: !isCatchingUpFinishedRun
+            )
         case .approvalPending(let update):
             liveActivityManager.update(.waitingForApproval)
             delegate?.streamCoordinatorApplyApprovalUpdate(update)
@@ -958,7 +969,7 @@ final class ChatStreamCoordinator {
         )
     }
 
-    private func completeCurrentResponse(needsTranscriptRefresh: Bool) {
+    private func completeCurrentResponse(needsTranscriptRefresh: Bool, isLiveCompletion: Bool) {
         if !hasCompletedCurrentResponse {
             ratingPromptState.recordCompletedResponse()
         }
@@ -967,7 +978,7 @@ final class ChatStreamCoordinator {
         liveActivityManager.end(status: .complete, activity: String(localized: "Response complete"), errorSummary: nil)
         delegate?.streamCoordinatorRemoveSnapshot(streamID: activeStreamID)
         delegate?.streamCoordinatorStopAuxiliaryMonitoring(clearPrompt: true)
-        recordRunEndingIfRunning(.completed)
+        recordRunEndingIfRunning(.completed, isLiveCompletion: isLiveCompletion)
         activeStreamID = nil
         hasInMemorySnapshotForActiveStream = false
         lastEventID = nil
@@ -980,7 +991,7 @@ final class ChatStreamCoordinator {
     }
 
     private func completeResponseFromRefreshedTranscriptAndFinishStream(streamID completedStreamID: String?) {
-        completeCurrentResponse(needsTranscriptRefresh: false)
+        completeCurrentResponse(needsTranscriptRefresh: false, isLiveCompletion: false)
         delegate?.streamCoordinatorRemoveSnapshot(streamID: completedStreamID)
         finishStream()
     }
@@ -1061,9 +1072,14 @@ final class ChatStreamCoordinator {
     /// Records the run's span once. `completeCurrentResponse` already cleared
     /// the run start for a normal completion, so a later teardown event (a
     /// `streamEnd` or `cancelled` after `done`) cannot overwrite that ending.
-    private func recordRunEndingIfRunning(_ ending: TranscriptTurnRunOutcome.Ending) {
+    private func recordRunEndingIfRunning(_ ending: TranscriptTurnRunOutcome.Ending, isLiveCompletion: Bool = false) {
         guard let activeRunStartedAt else { return }
-        latestRunEnding = ChatRunEnding(startedAt: activeRunStartedAt, endedAt: Date(), ending: ending)
+        latestRunEnding = ChatRunEnding(
+            startedAt: activeRunStartedAt,
+            endedAt: Date(),
+            ending: ending,
+            isLiveCompletion: isLiveCompletion
+        )
     }
 
     private func markConnectionStarted(

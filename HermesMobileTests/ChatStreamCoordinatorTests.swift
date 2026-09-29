@@ -1751,6 +1751,74 @@ final class ChatStreamCoordinatorTests: APIClientTestCase {
         XCTAssertEqual(coordinator.latestRunEnding?.ending, .failed)
     }
 
+    /// Only a `done` the live stream delivered is a live completion; a stop
+    /// or a failure never is.
+    @MainActor
+    func testRunEndingMarksOnlyALiveDoneAsALiveCompletion() async throws {
+        let streamClient = CoordinatorSpySSEStreamingClient()
+        let coordinator = makeCoordinator(streamClient: streamClient, delegate: CoordinatorDelegateSpy()) { request in
+            apiTestJSONResponse(#"{"ok": true}"#, for: request)
+        }
+
+        coordinator.start(streamID: "stream-live")
+        streamClient.emit(.done(DoneStreamEvent()))
+        XCTAssertEqual(coordinator.latestRunEnding?.isLiveCompletion, true)
+        streamClient.emit(.streamEnd)
+        XCTAssertEqual(coordinator.latestRunEnding?.isLiveCompletion, true, "The teardown keeps the live ending")
+
+        coordinator.start(streamID: "stream-cancel")
+        _ = try await coordinator.cancelActiveStream()
+        XCTAssertEqual(coordinator.latestRunEnding?.ending, .cancelled)
+        XCTAssertEqual(coordinator.latestRunEnding?.isLiveCompletion, false)
+
+        coordinator.start(streamID: "stream-error")
+        streamClient.emit(.error("server failed"))
+        XCTAssertEqual(coordinator.latestRunEnding?.ending, .failed)
+        XCTAssertEqual(coordinator.latestRunEnding?.isLiveCompletion, false)
+    }
+
+    /// A run the server had already finished, replayed on return, was not
+    /// watched: its `done` is no live completion. The next run's is again.
+    @MainActor
+    func testACaughtUpFinishedRunIsNotALiveCompletionButTheNextRunIs() async throws {
+        let streamClient = CoordinatorSpySSEStreamingClient()
+        let coordinator = makeCoordinator(streamClient: streamClient, delegate: CoordinatorDelegateSpy()) { request in
+            apiTestJSONResponse(#"{"active": false, "stream_id": "stream-123", "replay_available": true}"#, for: request)
+        }
+
+        coordinator.start(streamID: "stream-123")
+        streamClient.emit(.token("Partial answer."), lastEventID: "session-abc:9")
+        coordinator.suspendActiveStreamConnection()
+        await coordinator.reconnectIfNeeded()
+        XCTAssertEqual(streamClient.startedURLs.count, 2, "The finished run must be replayed")
+        streamClient.emit(.done(DoneStreamEvent()))
+        XCTAssertEqual(coordinator.latestRunEnding?.ending, .completed)
+        XCTAssertEqual(coordinator.latestRunEnding?.isLiveCompletion, false)
+
+        coordinator.start(streamID: "stream-next")
+        streamClient.emit(.done(DoneStreamEvent()))
+        XCTAssertEqual(coordinator.latestRunEnding?.isLiveCompletion, true)
+    }
+
+    /// A run finalized from the refreshed transcript ended out of sight.
+    @MainActor
+    func testARunFinalizedFromTheRefreshedTranscriptIsNotALiveCompletion() async throws {
+        let streamClient = CoordinatorSpySSEStreamingClient()
+        let delegate = CoordinatorDelegateSpy()
+        delegate.latestServerLoadHadAssistantResponseAfterLatestUser = true
+        let coordinator = makeCoordinator(streamClient: streamClient, delegate: delegate) { request in
+            apiTestJSONResponse(#"{"active": false, "stream_id": "stream-123"}"#, for: request)
+        }
+
+        coordinator.start(streamID: "stream-123")
+        coordinator.suspendActiveStreamConnection()
+        await coordinator.reconnectIfNeeded()
+
+        XCTAssertEqual(delegate.completedNeedsTranscriptRefreshValues, [false])
+        XCTAssertEqual(coordinator.latestRunEnding?.ending, .completed)
+        XCTAssertEqual(coordinator.latestRunEnding?.isLiveCompletion, false)
+    }
+
     @MainActor
     func testLiveResponseSpeedAcceptsOnlyCurrentSessionExactReadingsAndClearsOnLifecycleChanges() {
         let streamClient = CoordinatorSpySSEStreamingClient()
