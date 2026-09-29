@@ -12,6 +12,7 @@ final class ChatHapticsTests: APIClientTestCase {
         ChatHaptics.approvalSubmitted(.deny, isEnabled: false) { feedback.append($0) }
         ChatHaptics.clarificationSubmitted(isEnabled: false) { feedback.append($0) }
         ChatHaptics.configurationSelected(isEnabled: false) { feedback.append($0) }
+        ChatHaptics.effortSelected("high", isEnabled: false) { feedback.append($0) }
         ChatHaptics.destructiveConfirmationAccepted(isEnabled: false) { feedback.append($0) }
         ChatHaptics.disclosureToggled(isEnabled: false) { feedback.append($0) }
         ChatHaptics.scrolledToLatest(isEnabled: false) { feedback.append($0) }
@@ -73,6 +74,46 @@ final class ChatHapticsTests: APIClientTestCase {
         ChatHaptics.botFeedback(.sent, isEnabled: false) { feedback.append($0) }
 
         XCTAssertEqual(feedback, [.lightImpact, .lightImpact, .warning, .selection, .warning, .mediumImpact, .success])
+    }
+
+    func testEffortIntensityRisesWithLevel() {
+        let table: [(String, Double)] = [
+            ("none", 0.2), ("minimal", 0.25), ("low", 0.3), ("medium", 0.5),
+            ("high", 0.7), ("xhigh", 0.85), ("max", 1.0), ("ultra", 1.0)
+        ]
+        for (effort, intensity) in table {
+            XCTAssertEqual(ChatHaptics.effortIntensity(for: effort), intensity, effort)
+        }
+        XCTAssertEqual(ChatHaptics.effortIntensity(for: " High "), 0.7)
+        XCTAssertEqual(ChatHaptics.effortIntensity(for: "MAX"), 1.0)
+        XCTAssertEqual(ChatHaptics.effortIntensity(for: "turbo"), 0.5, "an unknown level sits in the middle")
+
+        let ladder = ["none", "minimal", "low", "medium", "high", "xhigh", "max"].map(ChatHaptics.effortIntensity(for:))
+        for (lower, higher) in zip(ladder, ladder.dropFirst()) {
+            XCTAssertLessThan(lower, higher, "\(ladder)")
+        }
+    }
+
+    @MainActor
+    func testEffortSelectedPlaysScaledImpact() {
+        var feedback: [ChatHapticFeedback] = []
+
+        ChatHaptics.effortSelected("low", isEnabled: true) { feedback.append($0) }
+        XCTAssertEqual(feedback, [.impact(intensity: 0.3)])
+
+        ChatHaptics.effortSelected("max", isEnabled: true) { feedback.append($0) }
+        XCTAssertEqual(feedback.last, .impact(intensity: 1.0))
+    }
+
+    @MainActor
+    func testEffortSelectedRespectsHapticsToggle() {
+        var calls = 0
+
+        for effort in ["low", "medium", "max", "turbo"] {
+            ChatHaptics.effortSelected(effort, isEnabled: false) { _ in calls += 1 }
+        }
+
+        XCTAssertEqual(calls, 0)
     }
 
     func testStreamingPulseThrottleAllowsOneTickPerInterval() {
