@@ -519,11 +519,12 @@ struct MessageBubbleView: View {
         return content
     }
 
-    /// The user bubble's text, with the appended attachment-path marker stripped
-    /// when the user has opted to hide it. Display-only: `message.content` and the
-    /// sent payload are untouched.
+    /// The user bubble's text, without the leading workspace tag, and with the
+    /// appended attachment-path marker stripped when the user has opted to hide
+    /// it. Display-only: `message.content`, Copy, Edit and the sent payload
+    /// keep the original text.
     private var userBubbleText: String {
-        let content = message.content ?? ""
+        let content = ChatMessage.strippingWorkspaceTag(message.content ?? "")
         guard !textOnly, hidesAttachmentPaths else { return content }
         return MessageAttachment.contentWithoutAttachedFilesMarker(in: content)
     }

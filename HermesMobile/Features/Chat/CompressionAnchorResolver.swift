@@ -133,12 +133,14 @@ enum CompressionAnchorResolver {
     /// Loaded indices of messages eligible to anchor the card. Approximates the
     /// server's `visible_messages_for_anchor` list (which both the anchor key
     /// and `compression_anchor_visible_idx` are computed against): non-tool,
-    /// non-marker messages that carry text, attachments, or assistant activity.
+    /// non-compaction-marker messages that carry text, attachments, or
+    /// assistant activity. Agent notices count, as they do on the server.
     private static func anchorCandidateIndices(in messages: [ChatMessage]) -> [Int] {
         messages.indices.filter { index in
             let message = messages[index]
             guard let role = message.role, !role.isEmpty, role != "tool" else { return false }
-            guard ChatMarkerMessageClassifier.classify(message) == nil else { return false }
+            let isCompactionMarker = ChatMarkerMessageClassifier.classify(message).map { !$0.isAgentNotice } ?? false
+            guard !isCompactionMarker else { return false }
 
             let hasText = message.content?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
             let hasAttachments = message.attachments?.isEmpty == false

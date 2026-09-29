@@ -162,6 +162,48 @@ struct ChatMessage: Decodable, Equatable, Identifiable {
         strippedSteerText(from: content) != nil
     }
 
+    // MARK: - Workspace tag
+
+    private static let workspaceTagOpen = "[Workspace::v1:"
+
+    /// `text` without the leading `[Workspace::v1: <path>]` tag hermes-webui
+    /// writes ahead of a message sent with a workspace, and the whitespace
+    /// after it (`_stripWorkspaceDisplayPrefix` in `ui.js`). Display only.
+    /// Returns `text` unchanged when there is no tag or nothing follows it.
+    static func strippingWorkspaceTag(_ text: String) -> String {
+        guard let end = workspaceTagEnd(in: text[...]), end < text.endIndex else { return text }
+        return String(text[end...])
+    }
+
+    /// Where the text after a leading workspace tag starts, past the whitespace
+    /// that follows the tag; nil when `text` does not open with one. Mirrors
+    /// `^\s*\[Workspace::v1:\s*(?:\\.|[^\]\\])+\]\s*`: the path is non-empty,
+    /// and a backslash escapes the next character (the webui writes `\` as
+    /// `\\` and `]` as `\]`).
+    static func workspaceTagEnd(in text: Substring) -> Substring.Index? {
+        let start = text.firstIndex { !$0.isWhitespace } ?? text.endIndex
+        guard text[start...].hasPrefix(workspaceTagOpen) else { return nil }
+
+        var index = text.index(start, offsetBy: workspaceTagOpen.count)
+        var isPathEmpty = true
+        while index < text.endIndex {
+            switch text[index] {
+            case "]":
+                guard !isPathEmpty else { return nil }
+                let afterTag = text.index(after: index)
+                return text[afterTag...].firstIndex { !$0.isWhitespace } ?? text.endIndex
+            case "\\":
+                let escaped = text.index(after: index)
+                guard escaped < text.endIndex, !text[escaped].isNewline else { return nil }
+                index = text.index(after: escaped)
+            default:
+                index = text.index(after: index)
+            }
+            isPathEmpty = false
+        }
+        return nil
+    }
+
     private static func attachments(
         _ decodedAttachments: [MessageAttachment]?,
         enrichedByMarkerIn content: String?
