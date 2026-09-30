@@ -355,6 +355,11 @@ clarification vocabulary, shared through `PendingRequestSurfaces.swift` and
 same response field and submit button as the Sessions clarification card. Like Sessions, "Always allow"
 writes a permanent host rule without a second confirmation.
 
+The Sessions card offers only the choices the host will honour, like `BotApprovalRequest`:
+`ApprovalChoicePolicy` reads `smart_denied`, `allow_session`, `allow_permanent` and the webui's
+`choices` for gateway runs, where `[]` means "not listed" rather than "nothing offered". When only
+Allow once is left, the card says why.
+
 Returned artifacts use the existing transcript media parser with local Markdown
 file-link recognition enabled only for Bots. Assistant images, `MEDIA:` references,
 `file:` links and local document links open in native Quick Look; image thumbnails
