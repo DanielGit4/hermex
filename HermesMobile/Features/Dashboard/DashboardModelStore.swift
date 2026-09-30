@@ -19,6 +19,8 @@ import Foundation
         let mcpCatalog: MCPCatalogViewModel
         let plugins: PluginsViewModel
         let pluginCatalog: PluginCatalogViewModel
+        /// Loads only when Tools opens, so it stays out of `refreshLists`.
+        let tools: ToolsProfilesViewModel
         private var listRefresh: Task<Void, Never>?
         private var listGeneration = 0
 
@@ -29,6 +31,7 @@ import Foundation
             mcpCatalog = MCPCatalogViewModel(client: client, servers: mcpServers)
             plugins = PluginsViewModel(client: client)
             pluginCatalog = PluginCatalogViewModel(client: client, plugins: plugins)
+            tools = ToolsProfilesViewModel(client: client)
         }
 
         /// Loads installed skills, plugins and MCP servers side by side, keeping any rows

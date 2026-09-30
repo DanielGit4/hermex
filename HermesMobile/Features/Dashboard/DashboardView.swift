@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// The Hermes host's dashboard, reached over the saved Bot connection for this server. The
-/// Skills Hub, MCP and Plugins are live; the other sections are listed so the destination's
-/// shape is clear and stay inert until they are built.
+/// The Hermes host's dashboard, reached over the saved Bot connection for this server. Tools,
+/// the Skills Hub, MCP and Plugins are live; the other sections are listed so the
+/// destination's shape is clear and stay inert until they are built.
 struct DashboardView: View {
     let server: URL
 
@@ -30,9 +30,15 @@ struct DashboardView: View {
     private var content: some View {
         if let models {
             let skillsHub = models.skillsHub, mcpServers = models.mcpServers, mcpCatalog = models.mcpCatalog
-            let plugins = models.plugins, pluginCatalog = models.pluginCatalog
+            let plugins = models.plugins, pluginCatalog = models.pluginCatalog, tools = models.tools
             List {
                 Section {
+                    NavigationLink {
+                        ToolsDestination(model: tools)
+                    } label: {
+                        DashboardSectionLabel(title: "Tools", systemImage: "wrench.and.screwdriver",
+                                              subtitle: "Choose which tools each profile can use.")
+                    }
                     NavigationLink {
                         SkillsHubView(model: skillsHub)
                     } label: {
