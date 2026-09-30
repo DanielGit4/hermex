@@ -1,12 +1,17 @@
 import SwiftUI
 import UIKit
 
+/// The Sessions approval card. Offers only the choices the host will honour
+/// (`ApprovalChoicePolicy`) and keeps the pattern keys under "Details".
 struct ApprovalRequestOverlay: View {
     let prompt: ApprovalPromptState
     let isResponding: Bool
     let errorMessage: String?
     let onChoice: (ApprovalChoice) -> Void
     let onSkipAll: () -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var isShowingDetails = false
 
     var body: some View {
         ZStack {
@@ -29,6 +34,9 @@ struct ApprovalRequestOverlay: View {
             .padding(.horizontal, 18)
         }
         .accessibilityElement(children: .contain)
+        .onChange(of: prompt.id) {
+            isShowingDetails = false
+        }
     }
 
     private var header: some View {
@@ -40,9 +48,11 @@ struct ApprovalRequestOverlay: View {
                 Text("Approval required")
                     .font(.headline)
 
-                Text("Pending approvals: \(prompt.pendingCount)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if prompt.pendingCount > 1 {
+                    Text("1 of \(prompt.pendingCount) pending")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
     }
@@ -68,27 +78,32 @@ struct ApprovalRequestOverlay: View {
             }
 
             if !prompt.patternKeys.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Pattern keys")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-
+                DisclosureGroup(isExpanded: detailsExpansion) {
                     VStack(alignment: .leading, spacing: 6) {
-                        ForEach(prompt.patternKeys, id: \.self) { key in
-                            Text(key)
-                                .font(.caption2.monospaced())
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 5)
-                                .background(Color(uiColor: .tertiarySystemBackground), in: Capsule())
+                        // Not vibrant `.secondary`: inside disclosure content over the
+                        // card's material it draws nothing.
+                        Text("Pattern keys")
+                            .font(.caption)
+                            .foregroundStyle(Color(uiColor: .secondaryLabel))
+
+                        VStack(alignment: .leading, spacing: 6) {
+                            ForEach(prompt.patternKeys, id: \.self) { key in
+                                Text(key)
+                                    .font(.caption2.monospaced())
+                                    .padding(.horizontal, 8)
+                                    .padding(.vertical, 5)
+                                    .background(Color(uiColor: .tertiarySystemBackground), in: Capsule())
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 6)
+                } label: {
+                    Text("Details")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
-            }
-
-            if prompt.pendingCount > 1 {
-                Text("1 of \(prompt.pendingCount) pending")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .tint(.secondary)
             }
 
             if let errorMessage = nonEmpty(errorMessage) {
@@ -101,14 +116,20 @@ struct ApprovalRequestOverlay: View {
 
     private var actions: some View {
         VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                approvalButton("Allow once", systemImage: "checkmark.circle.fill", choice: .once, prominent: true)
-                approvalButton("Allow session", systemImage: "lock.open", choice: .session, prominent: false)
+            if let note = ApprovalChoicePolicy.note(for: prompt.pending) {
+                Text(note.text)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            HStack(spacing: 8) {
-                approvalButton("Always allow", systemImage: "star.fill", choice: .always, prominent: false)
-                approvalButton("Deny", systemImage: "xmark.circle.fill", choice: .deny, prominent: false, role: .destructive)
+            ForEach(Array(choiceRows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: 8) {
+                    ForEach(row, id: \.rawValue) { choice in
+                        approvalButton(for: choice)
+                    }
+                }
             }
 
             Button {
@@ -119,6 +140,40 @@ struct ApprovalRequestOverlay: View {
             }
             .buttonStyle(.chatDecision(.secondary))
             .disabled(isResponding)
+        }
+    }
+
+    /// Two per row in the policy's order; the full set keeps today's layout.
+    private var choiceRows: [[ApprovalChoice]] {
+        let choices = ApprovalChoicePolicy.choices(for: prompt.pending)
+        return stride(from: 0, to: choices.count, by: 2).map {
+            Array(choices[$0..<min($0 + 2, choices.count)])
+        }
+    }
+
+    /// Expanding "Details" follows Reduce Motion.
+    private var detailsExpansion: Binding<Bool> {
+        Binding(
+            get: { isShowingDetails },
+            set: { isExpanded in
+                withAnimation(ChatMotion.disclosure(reduceMotion: reduceMotion)) {
+                    isShowingDetails = isExpanded
+                }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private func approvalButton(for choice: ApprovalChoice) -> some View {
+        switch choice {
+        case .once:
+            approvalButton("Allow once", systemImage: "checkmark.circle.fill", choice: .once, prominent: true)
+        case .session:
+            approvalButton("Allow session", systemImage: "lock.open", choice: .session, prominent: false)
+        case .always:
+            approvalButton("Always allow", systemImage: "star.fill", choice: .always, prominent: false)
+        case .deny:
+            approvalButton("Deny", systemImage: "xmark.circle.fill", choice: .deny, prominent: false, role: .destructive)
         }
     }
 

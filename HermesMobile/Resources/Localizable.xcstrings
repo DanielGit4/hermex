@@ -38765,6 +38765,218 @@
         }
       }
     },
+    "Hermes asks about this every time. You can allow it once." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "يسأل Hermes عن هذا في كل مرة. يمكنك السماح به مرة واحدة."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes fragt hier jedes Mal nach. Du kannst es einmal erlauben."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes pregunta por esto cada vez. Puedes permitirlo una vez."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes pose la question à chaque fois. Vous pouvez l’autoriser une fois."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes שואל על זה בכל פעם. אפשר לאשר את זה פעם אחת."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes lo chiede ogni volta. Puoi consentirlo una volta."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermesはこれを毎回確認します。1回だけ許可できます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes는 이 항목을 매번 물어봐요. 한 번만 허용할 수 있어요."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes vraagt hier elke keer naar. Je kunt het één keer toestaan."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes pyta o to za każdym razem. Możesz na to zezwolić jeden raz."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "O Hermes pergunta sobre isso toda vez. Você pode permitir uma vez."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes спрашивает об этом каждый раз. Можно разрешить один раз."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes bunu her seferinde sorar. Bir kez izin verebilirsiniz."
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes اس کے بارے میں ہر بار پوچھتا ہے۔ آپ اسے ایک بار اجازت دے سکتے ہیں۔"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes 每次都會詢問此操作。你可以允許一次。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes 每次都会询问此操作。你可以允许一次。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes 每次都會詢問此操作。你可以允許一次。"
+          }
+        }
+      }
+    },
+    "Hermes’s safety check flagged this. You can allow it once." : {
+      "localizations" : {
+        "ar" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "وضع فحص الأمان في Hermes علامة على هذا. يمكنك السماح به مرة واحدة."
+          }
+        },
+        "de" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Die Sicherheitsprüfung von Hermes hat das markiert. Du kannst es einmal erlauben."
+          }
+        },
+        "es" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "La comprobación de seguridad de Hermes marcó esto. Puedes permitirlo una vez."
+          }
+        },
+        "fr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "La vérification de sécurité de Hermes a signalé ceci. Vous pouvez l’autoriser une fois."
+          }
+        },
+        "he" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "בדיקת האבטחה של Hermes סימנה את זה. אפשר לאשר את זה פעם אחת."
+          }
+        },
+        "it" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Il controllo di sicurezza di Hermes l’ha segnalato. Puoi consentirlo una volta."
+          }
+        },
+        "ja" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermesの安全チェックがこれを検出しました。1回だけ許可できます。"
+          }
+        },
+        "ko" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes의 안전 검사에서 이 항목을 표시했어요. 한 번만 허용할 수 있어요."
+          }
+        },
+        "nl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "De veiligheidscontrole van Hermes heeft dit gemarkeerd. Je kunt het één keer toestaan."
+          }
+        },
+        "pl" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Kontrola bezpieczeństwa Hermes oznaczyła to. Możesz na to zezwolić jeden raz."
+          }
+        },
+        "pt-BR" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "A verificação de segurança do Hermes sinalizou isso. Você pode permitir uma vez."
+          }
+        },
+        "ru" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Проверка безопасности Hermes отметила это. Можно разрешить один раз."
+          }
+        },
+        "tr" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes güvenlik denetimi bunu işaretledi. Bir kez izin verebilirsiniz."
+          }
+        },
+        "ur" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes کی حفاظتی جانچ نے اسے نشان زد کیا ہے۔ آپ اسے ایک بار اجازت دے سکتے ہیں۔"
+          }
+        },
+        "zh-HK" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes 的安全檢查標記了此操作。你可以允許一次。"
+          }
+        },
+        "zh-Hans" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes 的安全检查标记了此操作。你可以允许一次。"
+          }
+        },
+        "zh-Hant" : {
+          "stringUnit" : {
+            "state" : "needs_review",
+            "value" : "Hermes 的安全檢查標記了此操作。你可以允許一次。"
+          }
+        }
+      }
+    },
     "Hermes File" : {
       "localizations" : {
         "ar" : {
@@ -57215,112 +57427,6 @@
           "stringUnit" : {
             "state" : "needs_review",
             "value" : "高峰時段"
-          }
-        }
-      }
-    },
-    "Pending approvals: %lld" : {
-      "localizations" : {
-        "ar" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "موافقات معلّقة: %lld"
-          }
-        },
-        "de" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Ausstehende Genehmigungen: %lld"
-          }
-        },
-        "es" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Aprobaciones pendientes: %lld"
-          }
-        },
-        "fr" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Approbations en attente : %lld"
-          }
-        },
-        "he" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "אישורים ממתינים: %lld"
-          }
-        },
-        "it" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Approvazioni in attesa: %lld"
-          }
-        },
-        "ja" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "保留中の承認: %lld"
-          }
-        },
-        "ko" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "대기 중인 승인: %lld"
-          }
-        },
-        "nl" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Openstaande goedkeuringen: %lld"
-          }
-        },
-        "pl" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Oczekujące zatwierdzenia: %lld"
-          }
-        },
-        "pt-BR" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Aprovações pendentes: %lld"
-          }
-        },
-        "ru" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Ожидающие подтверждения: %lld"
-          }
-        },
-        "tr" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "Bekleyen onaylar: %lld"
-          }
-        },
-        "ur" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "زیرِ التواء منظوریاں: %lld"
-          }
-        },
-        "zh-HK" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "待批准：%lld"
-          }
-        },
-        "zh-Hans" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "待批准：%lld"
-          }
-        },
-        "zh-Hant" : {
-          "stringUnit" : {
-            "state" : "needs_review",
-            "value" : "待批准：%lld"
           }
         }
       }
