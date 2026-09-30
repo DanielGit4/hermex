@@ -753,7 +753,7 @@ struct ChatView: View {
             ZStack(alignment: .bottom) {
                 VStack(spacing: 0) {
                     if viewModel.isViewingCachedData {
-                        ChatOfflineCacheBanner()
+                        ChatOfflineCacheBanner(reason: viewModel.cachedDataReason) { await loadMessages(appliesInitialFocus: false) }
                     }
 
                     listenPlaybackBar

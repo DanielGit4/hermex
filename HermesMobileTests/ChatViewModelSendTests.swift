@@ -4057,6 +4057,100 @@ final class ChatViewModelSendTests: XCTestCase {
     }
 
     @MainActor
+    func testCacheFallbackKeepsTheLoadFailureAsTheBannerReason() async throws {
+        let context = try makeContext()
+        try cacheOfflineTranscript(in: context)
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/session")
+            throw URLError(.cannotConnectToHost)
+        }
+
+        await viewModel.loadMessages(modelContext: context)
+
+        XCTAssertTrue(viewModel.isViewingCachedData)
+        XCTAssertNil(viewModel.errorMessage)
+        let lastError = try XCTUnwrap(viewModel.lastError)
+        XCTAssertEqual(viewModel.cachedDataReason, lastError.localizedDescription)
+        XCTAssertEqual(
+            viewModel.cachedDataReason,
+            "Couldn't connect to example.test. Check that hermes-webui is running and reachable from this iPhone."
+        )
+    }
+
+    @MainActor
+    func testRetryAfterCacheFallbackLoadsOnceAndClearsTheReason() async throws {
+        let context = try makeContext()
+        try cacheOfflineTranscript(in: context)
+        let sessionLoads = LockedCounter()
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/session")
+            guard sessionLoads.increment() > 1 else { throw URLError(.cannotConnectToHost) }
+            return apiTestJSONResponse("""
+            {
+              "session": {
+                "session_id": "session-abc",
+                "title": "Planning",
+                "messages": [
+                  {"role": "user", "content": "Fresh question", "timestamp": 1770000100, "message_id": "fresh-user"},
+                  {"role": "assistant", "content": "Fresh answer", "timestamp": 1770000101, "message_id": "fresh-assistant"}
+                ]
+              }
+            }
+            """, for: request)
+        }
+        await viewModel.loadMessages(modelContext: context)
+        XCTAssertTrue(viewModel.isViewingCachedData)
+        XCTAssertNotNil(viewModel.cachedDataReason)
+
+        await viewModel.loadMessages(modelContext: context)
+
+        XCTAssertEqual(sessionLoads.count, 2, "The retry sends exactly one more session load")
+        XCTAssertFalse(viewModel.isViewingCachedData)
+        XCTAssertNil(viewModel.cachedDataReason)
+        XCTAssertNil(viewModel.errorMessage)
+        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Fresh question", "Fresh answer"])
+    }
+
+    @MainActor
+    func testRetryThatFailsAgainKeepsTheCacheAndUpdatesTheReason() async throws {
+        let context = try makeContext()
+        try cacheOfflineTranscript(in: context)
+        let sessionLoads = LockedCounter()
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/session")
+            throw sessionLoads.increment() == 1 ? URLError(.cannotConnectToHost) : URLError(.timedOut)
+        }
+        await viewModel.loadMessages(modelContext: context)
+        let firstReason = try XCTUnwrap(viewModel.cachedDataReason)
+
+        await viewModel.loadMessages(modelContext: context)
+
+        XCTAssertEqual(sessionLoads.count, 2)
+        XCTAssertTrue(viewModel.isViewingCachedData)
+        XCTAssertEqual(viewModel.messages.compactMap(\.content), ["Cached question", "Cached answer"])
+        XCTAssertNotEqual(viewModel.cachedDataReason, firstReason)
+        XCTAssertEqual(
+            viewModel.cachedDataReason,
+            "example.test didn't respond in time. Check that the server is running and reachable from this iPhone."
+        )
+    }
+
+    /// Two cached messages for `session-abc` on `https://example.test`, the
+    /// transcript an offline load falls back to.
+    @MainActor
+    private func cacheOfflineTranscript(in context: ModelContext) throws {
+        try CacheStore.cacheMessages(
+            [
+                ChatMessage(role: "user", content: "Cached question", timestamp: 1_770_000_001, messageId: "cached-user"),
+                ChatMessage(role: "assistant", content: "Cached answer", timestamp: 1_770_000_002, messageId: "cached-assistant")
+            ],
+            serverURL: try XCTUnwrap(URL(string: "https://example.test")),
+            sessionID: "session-abc",
+            in: context
+        )
+    }
+
+    @MainActor
     func testLoadMessagesSurfacesTunnelUnavailableFailureWhenCacheIsEmpty() async throws {
         let context = try makeContext()
         let viewModel = try makeViewModel { request in

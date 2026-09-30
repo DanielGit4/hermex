@@ -248,7 +248,13 @@ final class ChatViewModel {
     private(set) var isRegeneratingMessage = false
     private(set) var isCompressingSession = false
     private(set) var isCancellingStream = false
-    private(set) var isViewingCachedData = false
+    private(set) var isViewingCachedData = false {
+        didSet {
+            if !isViewingCachedData, cachedDataReason != nil { cachedDataReason = nil }
+        }
+    }
+    /// Why the transcript fell back to the cache, for the offline banner; nil when live.
+    private(set) var cachedDataReason: String?
     var activeStreamID: String? { streamCoordinator.activeStreamID }
     var activeRunStartedAt: Date? { streamCoordinator.activeRunStartedAt }
     var latestRunEnding: ChatRunEnding? { streamCoordinator.latestRunEnding }
@@ -1839,6 +1845,8 @@ final class ChatViewModel {
                         // reloads (which reconnects) only without older messages.
                         hasOlderMessages = false
                         isViewingCachedData = true
+                        let reason = error.localizedDescription
+                        if cachedDataReason != reason { cachedDataReason = reason }
                         contextWindowSnapshot = nil
                         errorMessage = nil
                         // Keep the cache-first paint's tool cards.
