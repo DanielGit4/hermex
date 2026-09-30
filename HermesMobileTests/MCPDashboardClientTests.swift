@@ -90,6 +90,27 @@ import XCTest
         XCTAssertEqual(background, .background(action: MCPHTTPFixture.actionName))
     }
 
+    func testAnInstallRefusalCarriesTheHostsReasonOnlyWhenItGaveOne() async throws {
+        let reason = "Server 'brave-search' rejected: suspicious command/args configuration"
+        var reply = DashboardHTTPFixture.Reply.json(400, .object(["detail": .string(reason)]))
+        MCPHTTPFixture.activate { request in request.url?.path == "/api/mcp/catalog/install" ? reply : nil }
+        let client = DashboardHTTPFixture.client()
+
+        do {
+            _ = try await client.installMCPCatalogEntry("brave-search", env: [:], enable: true, profile: "default")
+            XCTFail("A refused install throws")
+        } catch {
+            XCTAssertEqual(error as? DashboardFailure, .refused(.string(reason)))
+        }
+        reply = .json(400, .object([:]))
+        do {
+            _ = try await client.installMCPCatalogEntry("brave-search", env: [:], enable: true, profile: "default")
+            XCTFail("A refused install throws")
+        } catch {
+            XCTAssertEqual(error as? BotFailure, .rejected(400))
+        }
+    }
+
     func testAPluginConflictAndAnUnknownServerCarryTheirStatus() async throws {
         let client = DashboardHTTPFixture.client()
 

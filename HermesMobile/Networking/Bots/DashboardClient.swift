@@ -277,13 +277,13 @@ extension DashboardClient {
     }
 
     /// `env` goes to the host's `.env` before the install runs; callers send only declared,
-    /// non-empty values and never keep them.
+    /// non-empty values and never keep them. A 400 that says why is `DashboardFailure.refused`.
     func installMCPCatalogEntry(_ name: String, env: [String: String], enable: Bool,
                                 profile: String) async throws -> MCPInstallStart {
         let url = Self.url(BotEndpoint.mcpCatalogInstall.url(base: address), query: [Self.profileItem(profile)])
         let json = try await post(url, body: .object([
             "name": .string(name), "env": .object(env.mapValues(BotJSON.string)), "enable": .bool(enable)
-        ]))
+        ]), readsRefusal: true)
         guard let start = MCPInstallStart(json) else { throw DashboardFailure.unreadableResponse }
         return start
     }
