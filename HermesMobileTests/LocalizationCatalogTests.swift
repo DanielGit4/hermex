@@ -270,4 +270,42 @@ final class LocalizationCatalogTests: XCTestCase {
             }
         }
     }
+
+    /// The host-aware connection copy keeps its one host placeholder and its brand
+    /// words (Tailscale, iPhone, hermes-webui) in every shipped language.
+    func testConnectionErrorCopyKeepsHostAndBrandWordsInEveryShippedLanguage() throws {
+        let data = try Data(contentsOf: catalogURL())
+        let root = try XCTUnwrap(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let strings = try XCTUnwrap(root["strings"] as? [String: Any])
+        let connectionKeys = [
+            "Couldn't find %@. Make sure Tailscale is connected on this iPhone.",
+            "Couldn't connect to %@. Make sure Tailscale is connected on this iPhone and hermes-webui is running.",
+            "%@ didn't respond in time. Make sure Tailscale is connected on this iPhone and the server is awake.",
+            "Couldn't reach %@. Make sure Tailscale is connected on this iPhone.",
+            "Couldn't find %@. Check the server URL and this iPhone's network.",
+            "Couldn't connect to %@. Check that hermes-webui is running and reachable from this iPhone.",
+            "%@ didn't respond in time. Check that the server is running and reachable from this iPhone.",
+            "Couldn't reach %@. Check the server URL and this iPhone's network.",
+            "Could not find that server. Check the server URL.",
+            "Could not connect to the server. Check that hermes-webui is running and reachable.",
+            "hermes-webui didn't answer. Check that it's running on the server, then try again."
+        ]
+
+        for key in connectionKeys {
+            let entry = try XCTUnwrap(strings[key] as? [String: Any], key)
+            let localizations = try XCTUnwrap(entry["localizations"] as? [String: Any], key)
+            let placeholders = key.components(separatedBy: "%@").count - 1
+            let brandWords = ["Tailscale", "iPhone", "hermes-webui"].filter { key.contains($0) }
+            for language in Self.shippedLanguages {
+                let localization = try XCTUnwrap(localizations[language] as? [String: Any], "[\(language)] \(key)")
+                let unit = try XCTUnwrap(localization["stringUnit"] as? [String: Any], "[\(language)] \(key)")
+                let value = try XCTUnwrap(unit["value"] as? String, "[\(language)] \(key)")
+                XCTAssertEqual(unit["state"] as? String, "needs_review", "[\(language)] \(key)")
+                XCTAssertEqual(value.components(separatedBy: "%@").count - 1, placeholders, "[\(language)] \(value)")
+                for word in brandWords {
+                    XCTAssertTrue(value.contains(word), "[\(language)] drops \(word): \(value)")
+                }
+            }
+        }
+    }
 }

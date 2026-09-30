@@ -42,7 +42,8 @@ enum APIError: LocalizedError {
             case 500:
                 return String(localized: "The Hermes server hit an internal error. Check the server logs, then try again.")
             case 502, 503, 504:
-                return String(localized: "Could not connect to the server. Check that hermes-webui is running and the tunnel is connected.")
+                // The proxy in front answered; hermes-webui behind it did not.
+                return String(localized: "hermes-webui didn't answer. Check that it's running on the server, then try again.")
             default:
                 if let message = Self.displayableServerMessage(from: body) {
                     return String(localized: "Server returned HTTP \(statusCode): \(message)")
@@ -129,6 +130,78 @@ enum APIError: LocalizedError {
     }
 }
 
+extension APIError {
+    /// The copy for a transport failure. `host` is the failing URL's host only (never
+    /// its user, password, port, path or query); a Tailscale host gets Tailscale advice,
+    /// any other host neutral advice, and no host the generic copy.
+    static func networkMessage(for code: URLError.Code, host: String?) -> String {
+        let host = normalizedHost(host)
+        let isTailscale = host.map(isTailscaleHost) ?? false
+
+        switch code {
+        case .cannotFindHost, .dnsLookupFailed:
+            guard let host else {
+                return String(localized: "Could not find that server. Check the server URL.")
+            }
+            return isTailscale
+                ? String(localized: "Couldn't find \(host). Make sure Tailscale is connected on this iPhone.")
+                : String(localized: "Couldn't find \(host). Check the server URL and this iPhone's network.")
+        case .cannotConnectToHost, .networkConnectionLost:
+            guard let host else {
+                return String(localized: "Could not connect to the server. Check that hermes-webui is running and reachable.")
+            }
+            return isTailscale
+                ? String(localized: "Couldn't connect to \(host). Make sure Tailscale is connected on this iPhone and hermes-webui is running.")
+                : String(localized: "Couldn't connect to \(host). Check that hermes-webui is running and reachable from this iPhone.")
+        case .timedOut:
+            guard let host else {
+                return String(localized: "The server did not respond in time. Check that the server is running and the connection is available.")
+            }
+            return isTailscale
+                ? String(localized: "\(host) didn't respond in time. Make sure Tailscale is connected on this iPhone and the server is awake.")
+                : String(localized: "\(host) didn't respond in time. Check that the server is running and reachable from this iPhone.")
+        case .notConnectedToInternet, .dataNotAllowed:
+            return String(localized: "This device is offline. Connect to the internet, then try again.")
+        case .secureConnectionFailed,
+             .serverCertificateHasBadDate,
+             .serverCertificateUntrusted,
+             .serverCertificateHasUnknownRoot,
+             .serverCertificateNotYetValid:
+            return String(localized: "The HTTPS connection failed. Check the server URL and certificate.")
+        case .appTransportSecurityRequiresSecureConnection:
+            return String(localized: "iOS blocked this insecure HTTP connection. Use HTTPS, a local network address, or a Tailscale name or IP.")
+        case .cancelled:
+            return String(localized: "The request was cancelled.")
+        default:
+            guard let host else {
+                return String(localized: "Could not reach the server. Check the URL and network connection.")
+            }
+            return isTailscale
+                ? String(localized: "Couldn't reach \(host). Make sure Tailscale is connected on this iPhone.")
+                : String(localized: "Couldn't reach \(host). Check the server URL and this iPhone's network.")
+        }
+    }
+
+    /// True for a MagicDNS name under `.ts.net` or an IPv4 address in Tailscale's
+    /// 100.64.0.0/10 range. Expects a lowercased host without a trailing dot.
+    static func isTailscaleHost(_ host: String) -> Bool {
+        if host.hasSuffix(".ts.net") { return true }
+        let parts = host.split(separator: ".", omittingEmptySubsequences: false)
+        let octets = parts.compactMap { part -> UInt8? in
+            guard (1...3).contains(part.count), part.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+            return UInt8(part)
+        }
+        guard parts.count == 4, octets.count == 4 else { return false }
+        return octets[0] == 100 && (64...127).contains(octets[1])
+    }
+
+    private static func normalizedHost(_ host: String?) -> String? {
+        guard var host = host?.lowercased() else { return nil }
+        if host.hasSuffix(".") { host.removeLast() }
+        return host.isEmpty ? nil : host
+    }
+}
+
 private extension APIError {
     struct ErrorPayload: Decodable {
         let error: String?
@@ -156,29 +229,7 @@ private extension APIError {
         guard let urlError = underlying as? URLError else {
             return String(localized: "Could not reach the server. Check the URL and network connection.")
         }
-
-        switch urlError.code {
-        case .timedOut:
-            return String(localized: "The server did not respond in time. Check that the server is running and the connection is available.")
-        case .cannotFindHost, .dnsLookupFailed:
-            return String(localized: "Could not find that server. Check the URL and Cloudflare DNS hostname.")
-        case .cannotConnectToHost, .networkConnectionLost:
-            return String(localized: "Could not connect to the server. Check that hermes-webui is running and the tunnel is connected.")
-        case .notConnectedToInternet, .dataNotAllowed:
-            return String(localized: "This device is offline. Connect to the internet, then try again.")
-        case .secureConnectionFailed,
-             .serverCertificateHasBadDate,
-             .serverCertificateUntrusted,
-             .serverCertificateHasUnknownRoot,
-             .serverCertificateNotYetValid:
-            return String(localized: "The HTTPS connection failed. Check the server URL and certificate.")
-        case .appTransportSecurityRequiresSecureConnection:
-            return String(localized: "iOS blocked this insecure HTTP connection. Use HTTPS, a local network address, or a Tailscale name or IP.")
-        case .cancelled:
-            return String(localized: "The request was cancelled.")
-        default:
-            return String(localized: "Could not reach the server. Check the URL, network connection, and tunnel status.")
-        }
+        return networkMessage(for: urlError.code, host: urlError.failingURL?.host)
     }
 
     static func isVanishedSession(statusCode: Int, body: String?) -> Bool {

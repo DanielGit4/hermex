@@ -1224,23 +1224,79 @@ private struct ChatTranscriptSkeletonLine: Identifiable {
     let maxWidth: CGFloat
 }
 
+/// Shown while the chat shows its cached transcript: why the server load failed,
+/// and Try Again, which runs `onRetry` once per tap until it finishes.
 struct ChatOfflineCacheBanner: View {
+    let reason: String?
+    let onRetry: () async -> Void
+
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var isRetrying = false
+
     var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "wifi.slash")
-                .imageScale(.small)
+        // At accessibility sizes the button moves below the text instead of squeezing it.
+        let layout = dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 12))
 
-            Text("Offline — viewing cached version")
-                .font(.subheadline)
-                .fontWeight(.semibold)
+        layout {
+            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                Image(systemName: "wifi.slash")
+                    .imageScale(.small)
+                    .foregroundStyle(.orange)
+                    .accessibilityHidden(true)
 
-            Spacer()
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Offline — viewing cached version")
+                        .font(.subheadline)
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.orange)
+
+                    if let reason {
+                        Text(reason)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                // Wrap both lines rather than truncate when the chat squeezes the banner.
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityElement(children: .combine)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+
+            retryButton
         }
-        .foregroundStyle(.orange)
         .padding(.horizontal)
         .padding(.vertical, 10)
         .background(Color.orange.opacity(0.12))
-        .accessibilityElement(children: .combine)
+    }
+
+    private var retryButton: some View {
+        Button {
+            guard !isRetrying else { return }
+            isRetrying = true
+            // Unstructured: a successful retry removes this banner, and the reload
+            // it started must still finish.
+            Task {
+                await onRetry()
+                isRetrying = false
+            }
+        } label: {
+            Text("Try Again")
+                .opacity(isRetrying ? 0 : 1)
+                .overlay {
+                    if isRetrying {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .tint(.orange)
+        .disabled(isRetrying)
+        .accessibilityLabel(Text("Try Again"))
+        .accessibilityIdentifier("chat.offlineBanner.retry")
     }
 }
 

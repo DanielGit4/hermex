@@ -173,7 +173,7 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
             let message = APIError.http(statusCode: statusCode, body: body).localizedDescription
             XCTAssertEqual(
                 message,
-                "Could not connect to the server. Check that hermes-webui is running and the tunnel is connected."
+                "hermes-webui didn't answer. Check that it's running on the server, then try again."
             )
             XCTAssertFalse(message.contains("<html>"))
             XCTAssertFalse(message.localizedCaseInsensitiveContains("bad gateway"))
@@ -319,5 +319,185 @@ final class APIClientAuthAndErrorTests: APIClientTestCase {
             error.localizedDescription,
             "iOS blocked this insecure HTTP connection. Use HTTPS, a local network address, or a Tailscale name or IP."
         )
+    }
+
+    // MARK: - Host-aware connection copy
+
+    private static let hostAwareCodes: [URLError.Code] = [
+        .cannotFindHost, .dnsLookupFailed, .cannotConnectToHost, .networkConnectionLost, .timedOut,
+        .badServerResponse // a default-branch code
+    ]
+    private static let tailscaleHosts = [
+        "mac.tail123.ts.net", "MAC.TAIL123.TS.NET.", "100.64.0.1", "100.127.255.254", "100.100.100.100"
+    ]
+    private static let otherHosts = [
+        "hermes.example.com", "localhost", "192.168.1.5", "100.63.255.255", "100.128.0.1", "ts.net",
+        "evil-ts.net.example.com"
+    ]
+
+    func testTailscaleHostsGetTailscaleAdviceNamingTheHost() throws {
+        for host in Self.tailscaleHosts {
+            let named = host.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "."))
+            for code in Self.hostAwareCodes {
+                let message = try Self.networkError(code, failingURL: "https://\(host)/api/session").localizedDescription
+                XCTAssertTrue(message.contains(named), "[\(host) \(code.rawValue)] \(message)")
+                XCTAssertTrue(message.contains("Tailscale"), "[\(host) \(code.rawValue)] \(message)")
+                XCTAssertFalse(message.contains("Cloudflare"), "[\(host) \(code.rawValue)] \(message)")
+                XCTAssertFalse(message.localizedCaseInsensitiveContains("tunnel"), "[\(host) \(code.rawValue)] \(message)")
+            }
+        }
+    }
+
+    func testOtherHostsGetNeutralAdviceNamingTheHost() throws {
+        for host in Self.otherHosts {
+            for code in Self.hostAwareCodes {
+                let message = try Self.networkError(code, failingURL: "https://\(host)/api/session").localizedDescription
+                XCTAssertTrue(message.contains(host), "[\(host) \(code.rawValue)] \(message)")
+                XCTAssertFalse(message.contains("Tailscale"), "[\(host) \(code.rawValue)] \(message)")
+                XCTAssertFalse(message.contains("Cloudflare"), "[\(host) \(code.rawValue)] \(message)")
+                XCTAssertFalse(message.localizedCaseInsensitiveContains("tunnel"), "[\(host) \(code.rawValue)] \(message)")
+            }
+        }
+    }
+
+    func testMissingHostGetsGenericAdvice() throws {
+        for code in Self.hostAwareCodes {
+            let message = try Self.networkError(code, failingURL: nil).localizedDescription
+            XCTAssertFalse(message.contains("Tailscale"), "[\(code.rawValue)] \(message)")
+            XCTAssertFalse(message.contains("Cloudflare"), "[\(code.rawValue)] \(message)")
+            XCTAssertFalse(message.localizedCaseInsensitiveContains("tunnel"), "[\(code.rawValue)] \(message)")
+        }
+    }
+
+    func testConnectionCopyIsExactForEachBranch() throws {
+        let tailscale = "https://mac.tail123.ts.net"
+        let other = "https://hermes.example.com"
+        let rows: [(URLError.Code, String?, String)] = [
+            (.cannotFindHost, tailscale, "Couldn't find mac.tail123.ts.net. Make sure Tailscale is connected on this iPhone."),
+            (.cannotConnectToHost, tailscale, "Couldn't connect to mac.tail123.ts.net. Make sure Tailscale is connected on this iPhone and hermes-webui is running."),
+            (.timedOut, "http://100.64.0.1:8787", "100.64.0.1 didn't respond in time. Make sure Tailscale is connected on this iPhone and the server is awake."),
+            (.badServerResponse, tailscale, "Couldn't reach mac.tail123.ts.net. Make sure Tailscale is connected on this iPhone."),
+            (.dnsLookupFailed, other, "Couldn't find hermes.example.com. Check the server URL and this iPhone's network."),
+            (.networkConnectionLost, other, "Couldn't connect to hermes.example.com. Check that hermes-webui is running and reachable from this iPhone."),
+            (.timedOut, "http://192.168.1.5:8787", "192.168.1.5 didn't respond in time. Check that the server is running and reachable from this iPhone."),
+            (.badServerResponse, other, "Couldn't reach hermes.example.com. Check the server URL and this iPhone's network."),
+            (.cannotFindHost, nil, "Could not find that server. Check the server URL."),
+            (.cannotConnectToHost, nil, "Could not connect to the server. Check that hermes-webui is running and reachable."),
+            (.timedOut, nil, "The server did not respond in time. Check that the server is running and the connection is available."),
+            (.badServerResponse, nil, "Could not reach the server. Check the URL and network connection.")
+        ]
+
+        for (code, failingURL, expected) in rows {
+            XCTAssertEqual(
+                try Self.networkError(code, failingURL: failingURL).localizedDescription,
+                expected,
+                "[\(code.rawValue) \(failingURL ?? "no host")]"
+            )
+        }
+    }
+
+    func testTailscaleHostDetection() {
+        let tailscale = [
+            "mac.tail123.ts.net", "a.ts.net", "100.64.0.0", "100.64.0.1", "100.127.255.254", "100.127.255.255",
+            "100.100.100.100"
+        ]
+        let other = [
+            "ts.net", "evil-ts.net.example.com", "mac.ts.net.example.com", "100.63.255.255", "100.128.0.0",
+            "100.128.0.1", "100.64.1", "100.64.0.256", "100.64.0.1.5", "100.64..1", "100.64.0.-1", "100.64.0.+1",
+            "localhost", "192.168.1.5", "10.0.0.1", "fd7a:115c:a1e0::1", ""
+        ]
+
+        for host in tailscale {
+            XCTAssertTrue(APIError.isTailscaleHost(host), host)
+        }
+        for host in other {
+            XCTAssertFalse(APIError.isTailscaleHost(host), host)
+        }
+    }
+
+    func testConnectionCopyNeverContainsCredentialsFromTheFailingURL() throws {
+        let failingURL = "https://alice:s3cret@mac.tail123.ts.net:8443/api/session?token=abc123#frag"
+        let unchangedCodes: [URLError.Code] = [
+            .notConnectedToInternet, .secureConnectionFailed, .appTransportSecurityRequiresSecureConnection, .cancelled
+        ]
+
+        for code in Self.hostAwareCodes + unchangedCodes {
+            let message = try Self.networkError(code, failingURL: failingURL).localizedDescription
+            if Self.hostAwareCodes.contains(code) {
+                XCTAssertTrue(message.contains("mac.tail123.ts.net"), "[\(code.rawValue)] \(message)")
+            }
+            for secret in ["alice", "s3cret", "token", "abc123", "8443", "/api/session", "frag"] {
+                XCTAssertFalse(message.contains(secret), "[\(code.rawValue)] leaks \(secret): \(message)")
+            }
+        }
+    }
+
+    func testGatewayErrorsBlameHermesWebUIWithoutTunnelWording() {
+        for statusCode in [502, 503, 504] {
+            let message = APIError.http(statusCode: statusCode, body: nil).localizedDescription
+            XCTAssertEqual(message, "hermes-webui didn't answer. Check that it's running on the server, then try again.")
+            XCTAssertFalse(message.localizedCaseInsensitiveContains("tunnel"))
+            XCTAssertFalse(message.contains("Cloudflare"))
+        }
+    }
+
+    func testUnchangedTransportCopyIgnoresTheHost() throws {
+        let rows: [(URLError.Code, String)] = [
+            (.notConnectedToInternet, "This device is offline. Connect to the internet, then try again."),
+            (.dataNotAllowed, "This device is offline. Connect to the internet, then try again."),
+            (.secureConnectionFailed, "The HTTPS connection failed. Check the server URL and certificate."),
+            (.serverCertificateUntrusted, "The HTTPS connection failed. Check the server URL and certificate."),
+            (.appTransportSecurityRequiresSecureConnection, "iOS blocked this insecure HTTP connection. Use HTTPS, a local network address, or a Tailscale name or IP."),
+            (.cancelled, "The request was cancelled.")
+        ]
+
+        for (code, expected) in rows {
+            for failingURL in ["https://mac.tail123.ts.net", "https://hermes.example.com", nil] {
+                XCTAssertEqual(
+                    try Self.networkError(code, failingURL: failingURL).localizedDescription,
+                    expected,
+                    "[\(code.rawValue) \(failingURL ?? "no host")]"
+                )
+            }
+        }
+        XCTAssertEqual(
+            APIError.network(underlying: CocoaError(.fileReadUnknown)).localizedDescription,
+            "Could not reach the server. Check the URL and network connection."
+        )
+    }
+
+    /// `URLSession` usually sets the failing URL itself; the client adds the
+    /// request's when it is missing, so the copy can always name the host.
+    func testClientNamesTheRequestHostWhenTheTransportErrorHasNoFailingURL() async throws {
+        MockURLProtocol.requestHandler = { _ in throw URLError(.cannotFindHost) }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [MockURLProtocol.self]
+        let client = APIClient(
+            baseURL: try XCTUnwrap(URL(string: "https://mac.tail123.ts.net")),
+            session: URLSession(configuration: configuration)
+        )
+
+        do {
+            _ = try await client.sessions()
+            XCTFail("Expected a network error")
+        } catch let error as APIError {
+            guard case .network(let underlying) = error else {
+                return XCTFail("Expected APIError.network, got \(error)")
+            }
+            XCTAssertEqual((underlying as? URLError)?.code, .cannotFindHost)
+            XCTAssertEqual(
+                error.localizedDescription,
+                "Couldn't find mac.tail123.ts.net. Make sure Tailscale is connected on this iPhone."
+            )
+            XCTAssertEqual(error.privacySafeLogCategory, "network.url.-1003")
+        }
+    }
+
+    private static func networkError(_ code: URLError.Code, failingURL: String?) throws -> APIError {
+        var userInfo: [String: Any] = [:]
+        if let failingURL {
+            userInfo[NSURLErrorFailingURLErrorKey] = try XCTUnwrap(URL(string: failingURL))
+        }
+        return APIError.network(underlying: URLError(code, userInfo: userInfo))
     }
 }
