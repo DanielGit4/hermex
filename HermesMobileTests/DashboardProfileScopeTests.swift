@@ -192,6 +192,19 @@ import XCTest
 
     // MARK: - Strings
 
+    /// The `cli` list is what the WebUI, the CLI and Kanban workers read; the messaging gateway
+    /// and cron read their own platform's list.
+    func testTheToolsFooterSaysExactlyWhichChatsUseTheList() throws {
+        XCTAssertEqual(ProfileToolsViewModel.toolsFooter,
+                       "Used from the next message by chats from this app and the WebUI, the CLI and Kanban workers. "
+                       + "Telegram, Discord and cron jobs keep their own lists.")
+        let strings = try Self.catalogStrings()
+        let localizations = try XCTUnwrap((strings[ProfileToolsViewModel.toolsFooter] as? [String: Any])?["localizations"]
+                                          as? [String: Any])
+        XCTAssertEqual(localizations.count, 17)
+        XCTAssertNil(strings["Applies to new messages in this profile’s chats."], "The broader old sentence is gone")
+    }
+
     func testTheNewCatalogKeysAreTranslatedWithTheirPlaceholdersAndTheOldOnesAreGone() throws {
         let strings = try Self.catalogStrings()
         let added = [

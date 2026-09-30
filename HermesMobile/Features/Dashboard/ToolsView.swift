@@ -131,10 +131,13 @@ struct ProfileToolsView: View {
                 } header: {
                     if let title = section.title {
                         Text(verbatim: title)
+                    } else {
+                        Text("Tools")
                     }
                 } footer: {
-                    if section.id == sections.last?.id {
-                        Text("Applies to new messages in this profile’s chats.")
+                    // Not under another platform's rows: Discord reads its own list.
+                    if section.platform == ProfileToolsViewModel.cliPlatform {
+                        Text(ProfileToolsViewModel.toolsFooter)
                     }
                 }
             }
