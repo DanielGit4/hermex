@@ -27,8 +27,8 @@ struct ChatTranscriptView: View {
     let clarificationPromptID: String?
     let hidesRunStatusAccessibility: Bool
     let showsThinkingAndToolCards: Bool
-    /// Start date for the "Working for" tail row; nil hides the row.
-    let workingRowStartedAt: Date?
+    /// The "Working for" tail row's phase; nil hides the row.
+    let workingRowPhase: ChatWorkingRowPhase?
     /// Read in a body only by the scroll-to-bottom button, so crossing the
     /// near-bottom threshold or flipping follow re-runs that and not the
     /// transcript. The bottom pin reads it from scroll callbacks.
@@ -477,8 +477,8 @@ struct ChatTranscriptView: View {
 
     @ViewBuilder
     private var workingRow: some View {
-        if let workingRowStartedAt {
-            ChatWorkingRowView(startedAt: workingRowStartedAt)
+        if let workingRowPhase {
+            ChatWorkingRowView(phase: workingRowPhase)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityHidden(hidesRunStatusAccessibility)
         }

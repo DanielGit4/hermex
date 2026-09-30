@@ -961,41 +961,55 @@ final class ChatVerticalScrollAxisGuardView: UIView {
     }
 }
 
-/// Transcript tail row for the active run: three static dots and a
-/// "Working for" counter that ticks once a second from the run's start date.
+/// Transcript tail row for the active run: an ellipsis glyph and a
+/// "Working for" counter that ticks once a second from the run's start date,
+/// rolling only its changed digits. A watched run settles it: the glyph
+/// becomes a check and the final "Worked for" time rolls in once. One view
+/// structure serves both phases so the settle animates from the running row.
 /// The `TimelineView` scopes each tick to this row, so message rows above it
 /// are not re-evaluated.
 struct ChatWorkingRowView: View {
-    let startedAt: Date
+    let phase: ChatWorkingRowPhase
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
-        TimelineView(.periodic(from: startedAt, by: 1)) { context in
+        TimelineView(.periodic(from: phase.startedAt, by: 1)) { context in
+            let _ = ViewBodyProbe.hit(.workingRow)
+            let elapsed = elapsedSeconds(now: context.date)
+            let label = ChatWorkingElapsedFormatter.label(seconds: elapsed)
+            let spokenLabel = ChatWorkingElapsedFormatter.spokenLabel(seconds: elapsed)
             HStack(spacing: 8) {
-                dots
+                Image(systemName: phase.isSettled ? "checkmark" : "ellipsis")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(phase.isSettled ? AnyShapeStyle(.green) : AnyShapeStyle(.secondary))
+                    .frame(width: 20)
+                    .contentTransition(ChatMotion.symbolReplace(reduceMotion: reduceMotion))
 
-                Text("Working for \(ChatWorkingElapsedFormatter.label(startedAt: startedAt, now: context.date))")
+                // One Text whose string changes, so the settle rolls it too.
+                Text(phase.isSettled ? String(localized: "Worked for \(label)") : String(localized: "Working for \(label)"))
                     .font(.caption.weight(.medium).monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .contentTransition(ChatMotion.numericText(reduceMotion: reduceMotion))
+                    .animation(ChatMotion.workingRowTick(reduceMotion: reduceMotion), value: label)
             }
+            .animation(ChatMotion.workingRowSettle(reduceMotion: reduceMotion), value: phase.isSettled)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
-                String(
-                    localized: "Hermes has been working for \(ChatWorkingElapsedFormatter.spokenLabel(startedAt: startedAt, now: context.date))"
-                )
+                phase.isSettled
+                    ? String(localized: "Worked for \(spokenLabel)")
+                    : String(localized: "Hermes has been working for \(spokenLabel)")
             )
         }
         .padding(.leading, 4)
         .padding(.vertical, 6)
     }
 
-    private var dots: some View {
-        HStack(spacing: 4) {
-            ForEach([1.0, 0.8, 0.6], id: \.self) { opacity in
-                Circle()
-                    .fill(.secondary)
-                    .opacity(opacity)
-                    .frame(width: 4, height: 4)
-            }
+    /// Seconds the counter shows: live while running, the run's span once settled.
+    private func elapsedSeconds(now: Date) -> TimeInterval {
+        switch phase {
+        case .running(let startedAt): now.timeIntervalSince(startedAt)
+        case .settled(let startedAt, let endedAt): endedAt.timeIntervalSince(startedAt)
         }
     }
 }
@@ -1270,6 +1284,10 @@ struct PinnedLocalNoticeStack: View {
 enum ViewBodyProbe {
     enum Site: String, CaseIterable {
         case chatView, chatViewport, transcript, transcriptBlock, transcriptRow, messageBubble, composer
+        /// A body: the working row's timeline content, once per tick.
+        case workingRow
+        /// Not a body: the chat starting one settle of its working row.
+        case workingRowSettle
         /// Not a body: a reply scrolling into or out of the viewport, which
         /// re-runs its bubble once to start or stop collecting glyphs.
         case replyVisibility

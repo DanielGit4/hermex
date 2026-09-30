@@ -37,6 +37,25 @@ enum ChatMotion {
         reduceMotion ? nil : .easeOut(duration: 0.22)
     }
 
+    /// The working row's once-a-second tick: the changed digits roll.
+    static func workingRowTick(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .snappy(duration: 0.25)
+    }
+
+    /// The working row settling on a watched run's end: the spinner glyph
+    /// becomes a check and the final time rolls in. Kept within 350 ms.
+    static func workingRowSettle(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? nil : .snappy(duration: 0.3)
+    }
+
+    static func numericText(reduceMotion: Bool) -> ContentTransition {
+        reduceMotion ? .identity : .numericText()
+    }
+
+    static func symbolReplace(reduceMotion: Bool) -> ContentTransition {
+        reduceMotion ? .identity : .symbolEffect(.replace)
+    }
+
     static func bottomOverlayTransition(reduceMotion: Bool) -> AnyTransition {
         reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity)
     }

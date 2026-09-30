@@ -335,6 +335,40 @@ final class ChatTranscriptDisplaySettingsTests: XCTestCase {
         ))
     }
 
+    func testWorkingRowPhaseRunsBeforeItSettlesAndHidesWithNeither() {
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let endedAt = startedAt.addingTimeInterval(3179)
+        let run = ChatRunEnding(startedAt: startedAt, endedAt: endedAt, ending: .completed, isLiveCompletion: true)
+        let newerStart = endedAt.addingTimeInterval(5)
+
+        XCTAssertEqual(ChatWorkingRowPolicy.phase(runningSince: newerStart, settledRun: run), .running(startedAt: newerStart))
+        XCTAssertEqual(ChatWorkingRowPolicy.phase(runningSince: nil, settledRun: run), .settled(startedAt: startedAt, endedAt: endedAt))
+        XCTAssertNil(ChatWorkingRowPolicy.phase(runningSince: nil, settledRun: nil))
+        XCTAssertEqual(ChatWorkingRowPhase.settled(startedAt: startedAt, endedAt: endedAt).startedAt, startedAt)
+        XCTAssertTrue(ChatWorkingRowPhase.settled(startedAt: startedAt, endedAt: endedAt).isSettled)
+        XCTAssertFalse(ChatWorkingRowPhase.running(startedAt: startedAt).isSettled)
+    }
+
+    func testWorkingRowSettlesOnlyOnAWatchedLiveCompletion() {
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        func ending(_ ending: TranscriptTurnRunOutcome.Ending, isLive: Bool) -> ChatRunEnding {
+            ChatRunEnding(startedAt: startedAt, endedAt: startedAt.addingTimeInterval(64), ending: ending, isLiveCompletion: isLive)
+        }
+        let live = ending(.completed, isLive: true)
+
+        XCTAssertEqual(ChatWorkingRowSettlePolicy.settledRun(ending: live, isWatching: true), live)
+        XCTAssertNil(ChatWorkingRowSettlePolicy.settledRun(ending: ending(.completed, isLive: false), isWatching: true), "Not live")
+        XCTAssertNil(ChatWorkingRowSettlePolicy.settledRun(ending: ending(.cancelled, isLive: false), isWatching: true), "Cancelled")
+        XCTAssertNil(ChatWorkingRowSettlePolicy.settledRun(ending: ending(.failed, isLive: false), isWatching: true), "Failed")
+        XCTAssertNil(ChatWorkingRowSettlePolicy.settledRun(ending: live, isWatching: false), "Not watching")
+        XCTAssertNil(ChatWorkingRowSettlePolicy.settledRun(ending: nil, isWatching: true), "No ending")
+    }
+
+    /// The settled row outlasts the 0.3 s settle curve `ChatMotionTests` pins.
+    func testWorkingRowSettleHoldsPastItsCurve() {
+        XCTAssertGreaterThanOrEqual(ChatWorkingRowSettlePolicy.holdDuration, .milliseconds(300))
+    }
+
     func testWorkingElapsedLabelUsesCompactUnits() {
         let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
 
@@ -751,6 +785,8 @@ final class ChatMotionTests: XCTestCase {
         XCTAssertNil(ChatMotion.scrollToLatest(reduceMotion: true))
         XCTAssertNil(ChatMotion.streamingFollow(reduceMotion: true))
         XCTAssertNil(ChatMotion.clarificationToggle(reduceMotion: true))
+        XCTAssertNil(ChatMotion.workingRowTick(reduceMotion: true))
+        XCTAssertNil(ChatMotion.workingRowSettle(reduceMotion: true))
     }
 
     func testCurvesKeepTheirUnreducedTiming() {
@@ -761,5 +797,15 @@ final class ChatMotionTests: XCTestCase {
         XCTAssertEqual(ChatMotion.scrollToLatest(reduceMotion: false), .easeOut(duration: 0.20))
         XCTAssertEqual(ChatMotion.streamingFollow(reduceMotion: false), .easeOut(duration: 0.15))
         XCTAssertEqual(ChatMotion.clarificationToggle(reduceMotion: false), .easeOut(duration: 0.22))
+        XCTAssertEqual(ChatMotion.workingRowTick(reduceMotion: false), .snappy(duration: 0.25))
+        XCTAssertEqual(ChatMotion.workingRowSettle(reduceMotion: false), .snappy(duration: 0.3))
+    }
+
+    /// Reduce Motion shows the working row's end state with no transition.
+    func testWorkingRowContentTransitionsAreIdentityUnderReduceMotion() {
+        XCTAssertEqual(ChatMotion.numericText(reduceMotion: true), .identity)
+        XCTAssertEqual(ChatMotion.symbolReplace(reduceMotion: true), .identity)
+        XCTAssertNotEqual(ChatMotion.numericText(reduceMotion: false), .identity)
+        XCTAssertNotEqual(ChatMotion.symbolReplace(reduceMotion: false), .identity)
     }
 }

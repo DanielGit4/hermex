@@ -251,9 +251,19 @@ final class ChatViewModel {
     private(set) var isViewingCachedData = false
     var activeStreamID: String? { streamCoordinator.activeStreamID }
     var activeRunStartedAt: Date? { streamCoordinator.activeRunStartedAt }
+    var latestRunEnding: ChatRunEnding? { streamCoordinator.latestRunEnding }
     /// How the latest run ended, keyed to the turn it answered. Drives the
     /// settled-turn fold label and which turns start expanded.
     private(set) var latestRunOutcome: TranscriptTurnRunOutcome?
+    /// A watched run that just completed, held for
+    /// `ChatWorkingRowSettlePolicy.holdDuration` so the working row settles on
+    /// a check instead of vanishing. Only the working row's input reads it.
+    private(set) var settledWorkingRun: ChatRunEnding?
+    /// Whether the chat screen is showing the transcript's latest content,
+    /// read once at a run's end. The screen installs it; false by default so
+    /// nothing settles unless a screen says it is watching.
+    @ObservationIgnored var isWatchingLatestContent: () -> Bool = { false }
+    @ObservationIgnored private var workingRowSettleTask: Task<Void, Never>?
     var activeStreamRecoveryState: ActiveStreamRecoveryState { streamCoordinator.recoveryState }
     var liveTokensPerSecond: Double? { streamCoordinator.liveTokensPerSecond }
     private(set) var errorMessage: String?
@@ -631,6 +641,7 @@ final class ChatViewModel {
     private let pollingIntervals: ChatPollingIntervals
     private let steeringConfirmationDismissDelay: @Sendable () async throws -> Void
     @ObservationIgnored private var steeringConfirmationDismissTask: Task<Void, Never>?
+    private let workingRowSettleHold: @Sendable () async throws -> Void
     // Real-time window over which rapid streaming updates coalesce into a single
     // scroll trigger / first content flush. Injectable so tests can drive
     // coalescing deterministically; production keeps the 16ms default.
@@ -725,6 +736,9 @@ final class ChatViewModel {
         steeringConfirmationDismissDelay: @escaping @Sendable () async throws -> Void = {
             try await Task.sleep(nanoseconds: 3_000_000_000)
         },
+        workingRowSettleHold: @escaping @Sendable () async throws -> Void = {
+            try await Task.sleep(for: ChatWorkingRowSettlePolicy.holdDuration)
+        },
         streamingScrollCoalescingDelayNanoseconds: UInt64 = 16_000_000,
         streamingWordRevealCadenceNanoseconds: UInt64 = 48_000_000,
         streamingMaxRevealLagNanoseconds: UInt64 = 1_000_000_000,
@@ -781,6 +795,7 @@ final class ChatViewModel {
         self.showsLiveActivityResponseExcerpts = showsLiveActivityResponseExcerpts
         self.pollingIntervals = pollingIntervals
         self.steeringConfirmationDismissDelay = steeringConfirmationDismissDelay
+        self.workingRowSettleHold = workingRowSettleHold
         self.streamingScrollCoalescingDelayNanoseconds = streamingScrollCoalescingDelayNanoseconds
         self.streamingWordRevealCadenceNanoseconds = streamingWordRevealCadenceNanoseconds
         self.streamingMaxRevealLagNanoseconds = streamingMaxRevealLagNanoseconds
@@ -801,6 +816,7 @@ final class ChatViewModel {
     deinit {
         backgroundPollTask?.cancel()
         steeringConfirmationDismissTask?.cancel()
+        workingRowSettleTask?.cancel()
         pendingStreamingScrollTriggerTask?.cancel()
         pendingStreamingContentFlushTask?.cancel()
         listenPreparationTask?.cancel()
@@ -6193,6 +6209,38 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
     func streamCoordinatorDidCompleteCurrentResponse(needsTranscriptRefresh: Bool) {
         responseCompletionNeedsTranscriptRefresh = needsTranscriptRefresh
         responseCompletionHapticTrigger += 1
+        beginWorkingRowSettleIfWatched()
+    }
+
+    /// Settles the working row on a watched live completion. Runs in the same
+    /// main-actor turn that ends the run, so observers see the row go from
+    /// running to settled in one update and it animates instead of re-inserting.
+    private func beginWorkingRowSettleIfWatched() {
+        guard let run = ChatWorkingRowSettlePolicy.settledRun(
+            ending: latestRunEnding,
+            isWatching: isWatchingLatestContent()
+        ) else { return }
+        workingRowSettleTask?.cancel()
+        settledWorkingRun = run
+        ViewBodyProbe.hit(.workingRowSettle)
+        let hold = workingRowSettleHold
+        workingRowSettleTask = Task { @MainActor [weak self] in
+            do {
+                try await hold()
+            } catch {
+                return
+            }
+            guard !Task.isCancelled else { return }
+            self?.endWorkingRowSettle()
+        }
+    }
+
+    private func endWorkingRowSettle() {
+        workingRowSettleTask?.cancel()
+        workingRowSettleTask = nil
+        if settledWorkingRun != nil {
+            settledWorkingRun = nil
+        }
     }
 
     func streamCoordinatorDidFinishStream() {
@@ -6225,6 +6273,7 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
     }
 
     func streamCoordinatorDidStartConnection(isReplay: Bool) {
+        endWorkingRowSettle()
         // A fresh connection re-arms the pulse so a reply's first live token
         // always ticks, even when the previous reply pulsed less than an interval
         // ago. A replay continues the same reply, so its window carries over.

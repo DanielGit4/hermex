@@ -1,4 +1,5 @@
 import XCTest
+import Observation
 @testable import HermesMobile
 
 final class TranscriptTurnFoldingTests: XCTestCase {
@@ -313,6 +314,127 @@ final class TranscriptTurnFoldingTests: XCTestCase {
         }
     }
 
+    // MARK: - Working row settle
+
+    /// A run the chat watched complete settles the working row in the very
+    /// update that ends it (running → settled, never through nil), once, and
+    /// the settle ends with its hold.
+    @MainActor
+    func testAWatchedLiveRunSettlesTheWorkingRowOnceInTheUpdateThatEndsIt() async throws {
+        ViewBodyProbe.counts = [:]
+        defer { ViewBodyProbe.counts = nil }
+        let hold = ManualSettleHold()
+        let (fixture, stream, viewModel) = try await runningChat(isWatching: true, hold: hold)
+        defer { fixture.tearDown() }
+        let startedAt = try XCTUnwrap(viewModel.activeRunStartedAt)
+
+        stream.emit(.done(DoneStreamEvent()))
+
+        XCTAssertNil(viewModel.activeRunStartedAt)
+        let run = try XCTUnwrap(viewModel.settledWorkingRun)
+        XCTAssertEqual(run.startedAt, startedAt)
+        XCTAssertGreaterThanOrEqual(run.endedAt, startedAt)
+        XCTAssertEqual(
+            ChatWorkingRowPolicy.phase(runningSince: viewModel.activeRunStartedAt, settledRun: viewModel.settledWorkingRun),
+            .settled(startedAt: startedAt, endedAt: run.endedAt)
+        )
+        XCTAssertEqual(ViewBodyProbe.counts?[.workingRowSettle], 1)
+
+        stream.emit(.done(DoneStreamEvent()))
+        stream.emit(.streamEnd)
+        XCTAssertEqual(ViewBodyProbe.counts?[.workingRowSettle], 1, "A duplicate done or the teardown settles no second time")
+
+        let cleared = expectation(description: "The settle ends with its hold")
+        withObservationTracking { _ = viewModel.settledWorkingRun } onChange: { cleared.fulfill() }
+        await hold.release()
+        await fulfillment(of: [cleared], timeout: 5)
+        XCTAssertNil(viewModel.settledWorkingRun)
+    }
+
+    /// Scrolled up or backgrounded (not watching), stopped, or failed: the
+    /// working row goes as it always has, with no settle.
+    @MainActor
+    func testARunThatEndsUnwatchedStoppedOrFailedNeverSettles() async throws {
+        let endings: [(isWatching: Bool, event: SSEEvent)] = [
+            (false, .done(DoneStreamEvent())), (true, .cancelled), (true, .error("The model is unavailable."))
+        ]
+        for (isWatching, event) in endings {
+            ViewBodyProbe.counts = [:]
+            defer { ViewBodyProbe.counts = nil }
+            let (fixture, stream, viewModel) = try await runningChat(isWatching: isWatching, hold: ManualSettleHold())
+            defer { fixture.tearDown() }
+
+            stream.emit(event)
+
+            XCTAssertNil(viewModel.activeRunStartedAt, "\(event)")
+            XCTAssertNil(viewModel.settledWorkingRun, "\(event)")
+            XCTAssertEqual(ViewBodyProbe.counts?[.workingRowSettle] ?? 0, 0, "\(event)")
+        }
+    }
+
+    /// Reopening a chat whose run already finished shows no settle, even on a
+    /// screen that is watching.
+    @MainActor
+    func testReopeningAFinishedRunNeverSettles() async throws {
+        ViewBodyProbe.counts = [:]
+        defer { ViewBodyProbe.counts = nil }
+        let hold = ManualSettleHold()
+        let (fixture, stream, viewModel) = try await runningChat(isWatching: true, hold: hold)
+        defer { fixture.tearDown() }
+        stream.emit(.done(DoneStreamEvent()))
+        stream.emit(.streamEnd)
+        XCTAssertNil(viewModel.activeStreamID)
+        await hold.release()
+
+        let reopened = fixture.makeStreamingViewModel(stream: ScriptedSSEStreamingClient())
+        reopened.isWatchingLatestContent = { true }
+        await reopened.loadMessages()
+
+        XCTAssertNil(reopened.settledWorkingRun)
+        XCTAssertEqual(ViewBodyProbe.counts?[.workingRowSettle], 1, "Only the watched run settled")
+    }
+
+    /// A new run's connection ends a settle its hold has not ended yet, so the
+    /// row runs again from the new start.
+    @MainActor
+    func testANewRunEndsASettleBeforeItsHoldDoes() async throws {
+        let hold = ManualSettleHold()
+        let (fixture, stream, viewModel) = try await runningChat(isWatching: true, hold: hold)
+        defer { fixture.tearDown() }
+        stream.emit(.done(DoneStreamEvent()))
+        stream.emit(.streamEnd)
+        XCTAssertNotNil(viewModel.settledWorkingRun)
+
+        let didStart = await viewModel.sendMessage("And one more")
+        XCTAssertTrue(didStart)
+
+        XCTAssertNil(viewModel.settledWorkingRun)
+        let startedAt = try XCTUnwrap(viewModel.activeRunStartedAt)
+        XCTAssertEqual(
+            ChatWorkingRowPolicy.phase(runningSince: viewModel.activeRunStartedAt, settledRun: viewModel.settledWorkingRun),
+            .running(startedAt: startedAt)
+        )
+        await hold.release()
+    }
+
+    /// A loaded 12-message chat that has sent a turn and streamed its first
+    /// word. `isWatching` stands in for the chat screen; `hold` ends a settle.
+    @MainActor
+    private func runningChat(
+        isWatching: Bool,
+        hold: ManualSettleHold
+    ) async throws -> (ChatTypingFixture, ScriptedSSEStreamingClient, ChatViewModel) {
+        let fixture = try ChatTypingFixture(messageCount: 12, answersChatStart: true)
+        let stream = ScriptedSSEStreamingClient()
+        let viewModel = fixture.makeStreamingViewModel(stream: stream, workingRowSettleHold: { await hold.wait() })
+        viewModel.isWatchingLatestContent = { isWatching }
+        await viewModel.loadMessages()
+        let didStart = await viewModel.sendMessage("One more question")
+        XCTAssertTrue(didStart)
+        stream.emit(.token("Answer."))
+        return (fixture, stream, viewModel)
+    }
+
     /// Hiding thinking and tool cards changes what a fold can hide, and a page
     /// of older messages shifts every turn: each walks the transcript again.
     @MainActor
@@ -508,5 +630,24 @@ final class TranscriptTurnFoldingTests: XCTestCase {
         }
 
         return message.role == "user" && message.attachments?.isEmpty == false
+    }
+}
+
+/// A working-row settle hold the test ends by hand, so nothing waits on a clock.
+private actor ManualSettleHold {
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var isReleased = false
+
+    func wait() async {
+        guard !isReleased else { return }
+        await withCheckedContinuation { waiters.append($0) }
+    }
+
+    func release() {
+        isReleased = true
+        for waiter in waiters {
+            waiter.resume()
+        }
+        waiters.removeAll()
     }
 }
