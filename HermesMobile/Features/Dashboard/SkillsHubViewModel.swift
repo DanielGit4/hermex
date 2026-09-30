@@ -58,6 +58,8 @@ import Observation
     private(set) var operation: OperationState?
     /// Why the device-owner check before an uninstall could not run, such as no passcode.
     var authenticationProblem: String?
+    /// The host profile every request reads and changes.
+    let profile: String
 
     private let client: DashboardClient
     private let authenticate: @MainActor (String) async -> DeviceOwnerAuthentication.Outcome
@@ -71,12 +73,14 @@ import Observation
     /// The main-actor default is built here rather than in a default argument, which Swift
     /// evaluates outside the actor. Delays are injected so tests never sleep.
     init(client: DashboardClient,
+         profile: String,
          authenticate: (@MainActor (String) async -> DeviceOwnerAuthentication.Outcome)? = nil,
          searchDelay: Duration = .milliseconds(300),
          pollInterval: Duration = .seconds(1),
          maxPolls: Int = 600,
          sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.client = client
+        self.profile = profile
         self.authenticate = authenticate ?? { await DeviceOwnerAuthentication.confirm(reason: $0) }
         self.searchDelay = searchDelay
         self.pollInterval = pollInterval
@@ -100,7 +104,7 @@ import Observation
         let startedAt = Date()
         async let lock = lockEntries()
         do {
-            setInstalled(try await client.installedSkills())
+            setInstalled(try await client.installedSkills(profile: profile))
             installedLoadedAt = startedAt
             installedState = .loaded
         } catch {
@@ -130,7 +134,7 @@ import Observation
         guard !Task.isCancelled, activeQuery == query else { return }
         searchState = .loading
         do {
-            let found = try await client.searchHub(query)
+            let found = try await client.searchHub(query, profile: profile)
             guard !Task.isCancelled, activeQuery == query else { return }
             results = found.results
             timedOutSources = found.timedOut
@@ -151,7 +155,7 @@ import Observation
         guard current != .loading, force || current != .loaded else { return }
         installedSkillContentStates[name] = .loading
         do {
-            let content = try await client.installedSkillContent(name)
+            let content = try await client.installedSkillContent(name, profile: profile)
             guard !Task.isCancelled else {
                 installedSkillContentStates[name] = .idle
                 return
@@ -203,7 +207,7 @@ import Observation
 
     private func loadPreviewPart(_ identifier: String) async {
         do {
-            let preview = try await client.previewHubSkill(identifier)
+            let preview = try await client.previewHubSkill(identifier, profile: profile)
             guard !Task.isCancelled else {
                 updateReview(identifier) { $0.previewState = .idle }
                 return
@@ -222,7 +226,7 @@ import Observation
 
     private func loadScanPart(_ identifier: String) async {
         do {
-            let scan = try await client.scanHubSkill(identifier)
+            let scan = try await client.scanHubSkill(identifier, profile: profile)
             guard !Task.isCancelled else {
                 updateReview(identifier) { $0.scanState = .idle }
                 return
@@ -256,7 +260,7 @@ import Observation
 
     func install(_ identifier: String) async {
         guard canInstall(identifier), let name = reviews[identifier]?.preview?.skill.name else { return }
-        await run(.install(identifier: identifier, name: name), spawn: { try await $0.installHubSkill(identifier) }) {
+        await run(.install(identifier: identifier, name: name), spawn: { try await $0.installHubSkill(identifier, profile: self.profile) }) {
             let skills = try await self.refreshInstalled()
             // A blocked install still exits 0, so the lock (or the listing) must show it.
             return self.hubLock[identifier] != nil || skills.contains { $0.isFromHub && $0.name == name }
@@ -274,7 +278,7 @@ import Observation
             authenticationProblem = message
             return
         }
-        await run(.uninstall(name: name), spawn: { try await $0.uninstallHubSkill(name) }) {
+        await run(.uninstall(name: name), spawn: { try await $0.uninstallHubSkill(name, profile: self.profile) }) {
             let skills = try await self.refreshInstalled()
             return !skills.contains { $0.isFromHub && $0.name == name }
         }
@@ -284,7 +288,7 @@ import Observation
     /// signal, so this is one action, and it re-scans each new version before replacing.
     func update() async {
         guard !isWorking, hasHubSkills else { return }
-        await run(.update, spawn: { try await $0.updateHubSkills() }) {
+        await run(.update, spawn: { try await $0.updateHubSkills(profile: self.profile) }) {
             _ = try? await self.refreshInstalled()
             return true
         }
@@ -362,7 +366,7 @@ import Observation
     private func refreshInstalled() async throws -> [DashboardSkill] {
         let startedAt = Date()
         async let lock = lockEntries()
-        let skills = try await client.installedSkills()
+        let skills = try await client.installedSkills(profile: profile)
         setInstalled(skills)
         installedLoadedAt = startedAt
         installedState = .loaded
@@ -371,7 +375,7 @@ import Observation
     }
 
     private func lockEntries() async -> [String: HubLockEntry]? {
-        try? await client.hubLock()
+        try? await client.hubLock(profile: profile)
     }
 
     private func setInstalled(_ skills: [DashboardSkill]) {

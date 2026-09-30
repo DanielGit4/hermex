@@ -534,6 +534,7 @@
 		DA5E00000000000000000B03 /* ToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5E00000000000000000F03 /* ToolsView.swift */; };
 		DA5E00000000000000000B04 /* ToolsDashboardClientTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5E00000000000000000F04 /* ToolsDashboardClientTests.swift */; };
 		DA5E00000000000000000B05 /* ToolsViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5E00000000000000000F05 /* ToolsViewModelTests.swift */; };
+		DA5F00000000000000000B01 /* DashboardProfileScopeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5F00000000000000000F01 /* DashboardProfileScopeTests.swift */; };
 		A990ABE1D2654992AD262B77 /* BotProtocol.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5619C4EB852849D396C45F95 /* BotProtocol.swift */; };
 		9510188AE84E41D9BAE025F1 /* BotConversationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B077A87C9D846D7A9D27D76 /* BotConversationTests.swift */; };
 		9510188AE84E41D9BAE025FA /* BotPendingRequestTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B077A87C9D846D7A9D27D7A /* BotPendingRequestTests.swift */; };
@@ -1169,6 +1170,7 @@
 		DA5E00000000000000000F03 /* ToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolsView.swift; sourceTree = "<group>"; };
 		DA5E00000000000000000F04 /* ToolsDashboardClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolsDashboardClientTests.swift; sourceTree = "<group>"; };
 		DA5E00000000000000000F05 /* ToolsViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ToolsViewModelTests.swift; sourceTree = "<group>"; };
+		DA5F00000000000000000F01 /* DashboardProfileScopeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardProfileScopeTests.swift; sourceTree = "<group>"; };
 		5619C4EB852849D396C45F95 /* BotProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "Bots/BotProtocol.swift"; sourceTree = "<group>"; };
 		0B077A87C9D846D7A9D27D76 /* BotConversationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BotConversationTests.swift"; sourceTree = "<group>"; };
 		0B077A87C9D846D7A9D27D7A /* BotPendingRequestTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "BotPendingRequestTests.swift"; sourceTree = "<group>"; };
@@ -1376,6 +1378,7 @@
 				DA5D00000000000000000F0C /* PluginCatalogViewModelTests.swift */,
 				DA5E00000000000000000F04 /* ToolsDashboardClientTests.swift */,
 				DA5E00000000000000000F05 /* ToolsViewModelTests.swift */,
+				DA5F00000000000000000F01 /* DashboardProfileScopeTests.swift */,
 				A4730000000000000000A004 /* BotAvatarTests.swift */,
 				A4750000000000000000B006 /* BotActivityTests.swift */,
 				A4770000000000000000D006 /* BotDelegatedWorkTests.swift */,
@@ -2777,6 +2780,7 @@
 				DA5D00000000000000000B0C /* PluginCatalogViewModelTests.swift in Sources */,
 				DA5E00000000000000000B04 /* ToolsDashboardClientTests.swift in Sources */,
 				DA5E00000000000000000B05 /* ToolsViewModelTests.swift in Sources */,
+				DA5F00000000000000000B01 /* DashboardProfileScopeTests.swift in Sources */,
 				A4730000000000000000A003 /* BotAvatarTests.swift in Sources */,
 				A4750000000000000000B005 /* BotActivityTests.swift in Sources */,
 				A4770000000000000000D005 /* BotDelegatedWorkTests.swift in Sources */,

@@ -27,15 +27,18 @@ import Observation
     private(set) var deleteProblems: [String: String] = [:]
     /// Why the device-owner check before a delete could not run, such as no passcode.
     var authenticationProblem: String?
+    /// The host profile every request reads and changes.
+    let profile: String
 
     private let client: DashboardClient
     private let authenticate: @MainActor (String) async -> DeviceOwnerAuthentication.Outcome
 
     /// The main-actor default is built here rather than in a default argument, which Swift
     /// evaluates outside the actor.
-    init(client: DashboardClient,
+    init(client: DashboardClient, profile: String,
          authenticate: (@MainActor (String) async -> DeviceOwnerAuthentication.Outcome)? = nil) {
         self.client = client
+        self.profile = profile
         self.authenticate = authenticate ?? { await DeviceOwnerAuthentication.confirm(reason: $0) }
     }
 
@@ -51,7 +54,7 @@ import Observation
         listState = .loading
         do {
             let startedAt = Date()
-            servers = try await client.mcpServers()
+            servers = try await client.mcpServers(profile: profile)
             lastLoadedAt = startedAt
             listState = .loaded
         } catch {
@@ -64,7 +67,7 @@ import Observation
     @discardableResult
     func refresh() async throws -> [MCPServer] {
         let startedAt = Date()
-        let fresh = try await client.mcpServers()
+        let fresh = try await client.mcpServers(profile: profile)
         servers = fresh
         lastLoadedAt = startedAt
         listState = .loaded
@@ -78,7 +81,7 @@ import Observation
         guard tests[name] != .running else { return }
         tests[name] = .running
         do {
-            tests[name] = .finished(try await client.testMCPServer(name))
+            tests[name] = .finished(try await client.testMCPServer(name, profile: profile))
         } catch {
             tests[name] = DashboardProblem.isCancellation(error) ? nil : .failed(DashboardProblem(error))
         }
@@ -94,7 +97,7 @@ import Observation
         pendingToggles[name] = enabled
         defer { pendingToggles[name] = nil }
         do {
-            let saved = try await client.setMCPServer(name, enabled: enabled)
+            let saved = try await client.setMCPServer(name, enabled: enabled, profile: profile)
             if let index = servers.firstIndex(where: { $0.name == name }) { servers[index].enabled = saved }
         } catch {
             toggleProblems[name] = await problem(error, changing: name)
@@ -118,7 +121,7 @@ import Observation
         deleting = name
         defer { deleting = nil }
         do {
-            try await client.deleteMCPServer(name)
+            try await client.deleteMCPServer(name, profile: profile)
         } catch {
             deleteProblems[name] = await problem(error, changing: name)
             return false

@@ -1,9 +1,11 @@
 import SwiftUI
 
-/// Which toolsets each profile on the Hermes host may use. A host with one profile opens
-/// straight to its toolsets; several are listed with how many of each profile's are on.
+/// The profiles on the Hermes host, each with how many of its toolsets are on. A host with one
+/// profile opens straight to that profile's page.
 struct ToolsDestination: View {
-    let model: ToolsProfilesViewModel
+    let models: DashboardModelStore.Bundle
+
+    private var model: ToolsProfilesViewModel { models.tools }
 
     var body: some View {
         content
@@ -13,7 +15,7 @@ struct ToolsDestination: View {
     @ViewBuilder
     private var content: some View {
         if let sole = model.soleProfile {
-            ProfileToolsView(model: sole)
+            ProfileToolsView(model: sole, profileModels: models.profile(sole.profile))
         } else {
             List {
                 if model.profiles.isEmpty {
@@ -24,14 +26,14 @@ struct ToolsDestination: View {
                     }
                     ForEach(model.profiles) { profile in
                         NavigationLink {
-                            ProfileToolsView(model: profile.tools)
+                            ProfileToolsView(model: profile.tools, profileModels: models.profile(profile.name))
                         } label: {
                             ToolsProfileRow(profile: profile)
                         }
                     }
                 }
             }
-            .navigationTitle("Tools")
+            .navigationTitle("Profiles")
             .refreshable { await model.load(force: true) }
         }
     }
@@ -60,7 +62,7 @@ private struct ToolsProfileRow: View {
         // Label and count side by side, stacked at accessibility text sizes.
         LabeledContent {
             if let enabled = profile.enabledCount, let total = profile.totalCount {
-                Text("\(enabled) of \(total) on")
+                Text("\(enabled) of \(total) tools on")
             }
         } label: {
             Text(verbatim: profile.name)
@@ -70,16 +72,30 @@ private struct ToolsProfileRow: View {
     }
 }
 
-/// One profile's toolsets, each switched on or off on the host. Toolsets the host limits to
-/// another platform get their own section.
+/// One profile's page: its skills and MCP servers one tap away, then its toolsets, each
+/// switched on or off on the host. Toolsets the host limits to another platform get their
+/// own section. Only the toolsets load here; skills and MCP servers load when opened.
 struct ProfileToolsView: View {
     let model: ProfileToolsViewModel
+    let profileModels: DashboardModelStore.ProfileModels
 
     var body: some View {
         List {
+            Section {
+                NavigationLink {
+                    SkillsHubView(model: profileModels.skillsHub)
+                } label: {
+                    Label("Skills", systemImage: "hammer")
+                }
+                NavigationLink {
+                    MCPServersView(model: profileModels.mcpServers, catalog: profileModels.mcpCatalog)
+                } label: {
+                    Label("MCP servers", systemImage: "point.3.connected.trianglepath.dotted")
+                }
+            }
             content
         }
-        .navigationTitle(String(localized: "Tools · \(model.profile)"))
+        .navigationTitle(Text(verbatim: model.profile))
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.load() }
         .refreshable { await model.load(force: true) }

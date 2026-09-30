@@ -90,7 +90,7 @@ import XCTest
 
         await model.load()
 
-        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/"), ["GET \(host)/api/mcp/servers"])
+        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/"), ["GET \(host)/api/mcp/servers?profile=default"])
     }
 
     // MARK: - Test
@@ -156,7 +156,7 @@ import XCTest
         XCTAssertEqual(model.server(named: "github")?.enabled, false)
         XCTAssertNil(model.pendingToggles["github"])
         XCTAssertNil(model.toggleProblems["github"])
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "PUT \(host)/api/mcp/servers/github/enabled"),
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "PUT \(host)/api/mcp/servers/github/enabled?profile=default"),
                        .object(["enabled": .bool(false)]))
 
         await model.setEnabled("github", to: true)
@@ -243,8 +243,8 @@ import XCTest
 
         XCTAssertTrue(deleted)
         XCTAssertEqual(DashboardHTTPFixture.calls, [
-            "DELETE \(host)/api/mcp/servers/github",
-            "GET \(host)/api/mcp/servers"
+            "DELETE \(host)/api/mcp/servers/github?profile=default",
+            "GET \(host)/api/mcp/servers?profile=default"
         ])
         XCTAssertNil(model.server(named: "github"))
         XCTAssertNil(model.deleting)
@@ -337,6 +337,6 @@ import XCTest
     private func makeModel(
         authenticate: @escaping @MainActor (String) async -> DeviceOwnerAuthentication.Outcome = { _ in .confirmed }
     ) -> MCPServersViewModel {
-        MCPServersViewModel(client: DashboardHTTPFixture.client(), authenticate: authenticate)
+        MCPServersViewModel(client: DashboardHTTPFixture.client(), profile: "default", authenticate: authenticate)
     }
 }

@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Installed skills while the search field is empty, Skills Hub results while it is not.
+/// One profile's installed skills while the search field is empty, Skills Hub results while
+/// it is not.
 struct SkillsHubView: View {
     let model: SkillsHubViewModel
 
@@ -10,7 +11,8 @@ struct SkillsHubView: View {
 
     var body: some View {
         content
-            .navigationTitle("Skills Hub")
+            .navigationTitle(String(localized: "Skills · \(model.profile)"))
+            .navigationBarTitleDisplayMode(.inline)
             .searchable(text: $query, placement: .navigationBarDrawer(displayMode: .always), prompt: Text("Search the Skills Hub"))
             .task { await model.loadInstalled() }
             .task(id: query) { await model.search(query) }
