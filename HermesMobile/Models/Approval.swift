@@ -58,6 +58,14 @@ struct PendingApproval: Decodable, Equatable, Identifiable {
     let description: String?
     let patternKey: String?
     let patternKeys: [String]?
+    /// The host's limits on the answer. Nil means the host did not say (older
+    /// servers), which `ApprovalChoicePolicy` reads as allowed.
+    let allowPermanent: Bool?
+    let allowSession: Bool?
+    let smartDenied: Bool?
+    /// Raw `choices` from a gateway run relayed by the webui, kept unparsed so
+    /// "listed but unrecognised" stays distinct from "not listed".
+    let offeredChoices: [String]?
 
     var displayPatternKeys: [String] {
         let keys = patternKeys?.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? []
@@ -87,13 +95,21 @@ struct PendingApproval: Decodable, Equatable, Identifiable {
         command: String? = nil,
         description: String? = nil,
         patternKey: String? = nil,
-        patternKeys: [String]? = nil
+        patternKeys: [String]? = nil,
+        allowPermanent: Bool? = nil,
+        allowSession: Bool? = nil,
+        smartDenied: Bool? = nil,
+        offeredChoices: [String]? = nil
     ) {
         self.approvalId = Self.normalizedApprovalId(approvalId)
         self.command = command
         self.description = description
         self.patternKey = patternKey
         self.patternKeys = patternKeys
+        self.allowPermanent = allowPermanent
+        self.allowSession = allowSession
+        self.smartDenied = smartDenied
+        self.offeredChoices = offeredChoices
     }
 
     enum CodingKeys: String, CodingKey {
@@ -106,6 +122,13 @@ struct PendingApproval: Decodable, Equatable, Identifiable {
         case patternKeySnake = "pattern_key"
         case patternKeys
         case patternKeysSnake = "pattern_keys"
+        case allowPermanent
+        case allowPermanentSnake = "allow_permanent"
+        case allowSession
+        case allowSessionSnake = "allow_session"
+        case smartDenied
+        case smartDeniedSnake = "smart_denied"
+        case choices
     }
 
     init(from decoder: Decoder) throws {
@@ -116,6 +139,13 @@ struct PendingApproval: Decodable, Equatable, Identifiable {
         patternKey = container.decodeLossyStringIfPresent(forKey: .patternKey)
             ?? container.decodeLossyStringIfPresent(forKey: .patternKeySnake)
         patternKeys = Self.decodeStringArray(from: container, keys: [.patternKeys, .patternKeysSnake])
+        allowPermanent = container.decodeLossyBoolIfPresent(forKey: .allowPermanent)
+            ?? container.decodeLossyBoolIfPresent(forKey: .allowPermanentSnake)
+        allowSession = container.decodeLossyBoolIfPresent(forKey: .allowSession)
+            ?? container.decodeLossyBoolIfPresent(forKey: .allowSessionSnake)
+        smartDenied = container.decodeLossyBoolIfPresent(forKey: .smartDenied)
+            ?? container.decodeLossyBoolIfPresent(forKey: .smartDeniedSnake)
+        offeredChoices = Self.decodeStringArray(from: container, keys: [.choices])
     }
 
     private static func decodeStringArray(
@@ -152,6 +182,55 @@ struct PendingApproval: Decodable, Equatable, Identifiable {
     private static func normalizedApprovalId(_ value: String?) -> String? {
         let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed?.isEmpty == false ? trimmed : nil
+    }
+}
+
+/// Which answers the host will honour for a pending approval. A smart-denied
+/// request only ever runs once on the host, whatever the phone sends, so
+/// offering more would promise a rule the host never writes. Mirrors
+/// `BotApprovalRequest`, except for how an empty `choices` list reads.
+enum ApprovalChoicePolicy {
+    /// Always in the order once, session, always, deny. Deny is always offered.
+    static func choices(for pending: PendingApproval) -> [ApprovalChoice] {
+        // The webui relays `choices: []` for a gateway run whose gateway sent no
+        // list, so unlike the Bot rule an empty list means "not listed", not
+        // "nothing offered". A non-empty list of unknown words still limits.
+        let listed: Set<ApprovalChoice>? = pending.offeredChoices.flatMap { raw in
+            raw.isEmpty ? nil : Set(raw.compactMap {
+                ApprovalChoice(rawValue: $0.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+            })
+        }
+        let allowsSession = pending.smartDenied != true && pending.allowSession != false
+        return ApprovalChoice.allCases.filter { choice in
+            if choice == .deny { return true }
+            if let listed, !listed.contains(choice) { return false }
+            switch choice {
+            case .once, .deny: return true
+            case .session: return allowsSession
+            case .always: return allowsSession && pending.allowPermanent != false
+            }
+        }
+    }
+
+    /// Why only "Allow once" is left, when the host withholds the wider choices.
+    static func note(for pending: PendingApproval) -> ApprovalChoiceNote? {
+        let choices = choices(for: pending)
+        guard choices.contains(.once), !choices.contains(.session) else { return nil }
+        return pending.smartDenied == true ? .safetyCheckFlagged : .asksEveryTime
+    }
+}
+
+enum ApprovalChoiceNote: Equatable {
+    case safetyCheckFlagged
+    case asksEveryTime
+
+    var text: String {
+        switch self {
+        case .safetyCheckFlagged:
+            String(localized: "Hermes’s safety check flagged this. You can allow it once.")
+        case .asksEveryTime:
+            String(localized: "Hermes asks about this every time. You can allow it once.")
+        }
     }
 }
 
