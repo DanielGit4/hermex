@@ -226,7 +226,7 @@ actor APIClient {
         do {
             (data, response) = try await session.data(for: request, delegate: redirectHeaderStripper)
         } catch {
-            throw APIError.network(underlying: error)
+            throw Self.networkError(error, for: request)
         }
 
         return try Self.mappedHTTPResponse(
@@ -234,6 +234,18 @@ actor APIClient {
             response: response,
             requireSuccess: requireSuccess
         )
+    }
+
+    /// A transport failure as `APIError.network`. Adds the request's URL to a
+    /// `URLError` that lacks one, keeping its code and userInfo, so the copy can
+    /// name the host.
+    private static func networkError(_ error: Error, for request: URLRequest) -> APIError {
+        guard let urlError = error as? URLError, urlError.failingURL == nil, let url = request.url else {
+            return .network(underlying: error)
+        }
+        var userInfo = urlError.userInfo
+        userInfo[NSURLErrorFailingURLErrorKey] = url
+        return .network(underlying: URLError(urlError.code, userInfo: userInfo))
     }
 
     /// 401 → `.unauthorized`; other non-2xx → `.http` when `requireSuccess`.
@@ -287,7 +299,7 @@ actor APIClient {
         do {
             (data, response) = try await session.data(for: request, delegate: redirectHeaderStripper)
         } catch {
-            throw APIError.network(underlying: error)
+            throw Self.networkError(error, for: request)
         }
 
         guard let httpResponse = response as? HTTPURLResponse else {

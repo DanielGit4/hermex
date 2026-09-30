@@ -4076,7 +4076,7 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertFalse(viewModel.isViewingCachedData)
         XCTAssertEqual(
             viewModel.errorMessage,
-            "Could not connect to the server. Check that hermes-webui is running and the tunnel is connected."
+            "hermes-webui didn't answer. Check that it's running on the server, then try again."
         )
         XCTAssertNotNil(viewModel.lastError)
     }
