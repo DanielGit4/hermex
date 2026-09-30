@@ -158,6 +158,12 @@ enum SessionListMotion {
     static func disclosureContentTransition(reduceMotion: Bool) -> AnyTransition {
         reduceMotion ? .opacity : .opacity.combined(with: .move(edge: .top))
     }
+
+    /// The needs-you row slides like a disclosure, and fades rather than
+    /// snaps under Reduce Motion.
+    static func needsYouAnimation(reduceMotion: Bool) -> Animation? {
+        reduceMotion ? .easeInOut(duration: 0.2) : disclosureAnimation(reduceMotion: false)
+    }
 }
 
 /// Which of the session list's optional navigation rows are shown, so a user can

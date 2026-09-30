@@ -476,6 +476,24 @@ struct SessionListView: View {
                 else { return }
                 self.selectedProjectID = nil
             }
+            .onChange(of: needsYouContext, initial: true) { _, context in
+                viewModel.updateNeedsYouContext(context)
+            }
+            .onChange(of: viewModel.needsYouArrivals) {
+                SessionHaptics.needsYouArrived(isEnabled: isHapticsEnabled)
+            }
+    }
+
+    /// What the needs-you row counts, and whether Home is on screen to feel a
+    /// new wait. The iPad sidebar is always Home; Scheduled is not.
+    private var needsYouContext: SessionNeedsYouContext {
+        SessionNeedsYouContext(
+            isHomeVisible: scenePhase == .active && !viewModel.isViewingCachedData
+                && (horizontalSizeClass == .regular || navigationState.destination == nil),
+            selectedProjectID: selectedProjectID,
+            automatedVisibility: automatedSessionVisibility,
+            profileFilter: profileFilter
+        )
     }
 
     /// A bot deep link opens this server's Bots inbox, which owns resolving it. Only
@@ -663,6 +681,15 @@ struct SessionListView: View {
             }
 
             if !isSearchingSessions {
+                if let needsYou = viewModel.needsYou {
+                    SessionNeedsYouRow(summary: needsYou) { startOpeningSession(needsYou.session) }
+                        .padding(.horizontal, 24)
+                        .padding(.top, 10)
+                        .sessionsScreenListRow()
+                        .transition(SessionListMotion.disclosureContentTransition(reduceMotion: reduceMotion))
+                        .id("needs-you")
+                }
+
                 SessionSidebarUtilityRows(
                     viewModel: viewModel,
                     topPadding: 10,
@@ -783,6 +810,7 @@ struct SessionListView: View {
         .animation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion), value: projectsAreExpanded)
         .animation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion), value: scheduledSessionsAreExpanded)
         .animation(SessionListMotion.disclosureAnimation(reduceMotion: reduceMotion), value: expandedMessagingPlatforms)
+        .animation(SessionListMotion.needsYouAnimation(reduceMotion: reduceMotion), value: viewModel.needsYou != nil)
     }
 
     private func profileFilterRow(selection: String?) -> some View {

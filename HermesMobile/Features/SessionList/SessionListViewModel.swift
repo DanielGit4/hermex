@@ -110,7 +110,11 @@ struct ProfileSwitchFailure: Sendable {
 @Observable
 final class SessionListViewModel {
     private(set) var sessions: [SessionSummary] = [] {
-        didSet { if sessions != oldValue { groupingRevision &+= 1 } }
+        didSet {
+            guard sessions != oldValue else { return }
+            groupingRevision &+= 1
+            updateNeedsYou()
+        }
     }
     private(set) var isLoading = false
     private(set) var isCreatingSession = false
@@ -168,6 +172,15 @@ final class SessionListViewModel {
     /// have an entry, and the map is reassigned only when a value actually
     /// changes so rows do not invalidate on every poll tick.
     private(set) var attentionStatesBySessionID: [String: SessionRowAttentionState] = [:]
+    /// Home's needs-you row (nil hides it), from the same map. Kept for a
+    /// moment after the last wait ends so a poll tick cannot make it flicker.
+    private(set) var needsYou: SessionNeedsYouSummary?
+    /// Bumped once per chat Home should feel starting to wait.
+    private(set) var needsYouArrivals = 0
+    @ObservationIgnored private var needsYouTracker = SessionNeedsYouTracker()
+    @ObservationIgnored private var needsYouContext = SessionNeedsYouContext()
+    /// The pending hide after the last wait ended; tests await it.
+    @ObservationIgnored private(set) var needsYouHideTask: Task<Void, Never>?
     private(set) var seenMessageTimes: [String: Double]
 
     private(set) var remoteContentSearchSessionIDs: [String] = [] {
@@ -220,16 +233,22 @@ final class SessionListViewModel {
     /// what it says about which rows need probing. Made on first use.
     @ObservationIgnored private var sessionEventsClient: SSEStreamingClient?
     @ObservationIgnored private var attentionWatch = SessionAttentionWatch()
+    private let now: () -> Date
+    private let sleep: @MainActor (Duration) async throws -> Void
 
     init(
         server: URL,
         client: APIClient? = nil,
         unreadStore: SessionUnreadStore = SessionUnreadStore(),
-        sessionEventsClient: SSEStreamingClient? = nil
+        sessionEventsClient: SSEStreamingClient? = nil,
+        now: @escaping () -> Date = Date.init,
+        sleep: @escaping @MainActor (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         self.server = server
         self.unreadStore = unreadStore
         self.sessionEventsClient = sessionEventsClient
+        self.now = now
+        self.sleep = sleep
         seenMessageTimes = unreadStore.load(for: server)
         let resolvedClient = client ?? APIClient(baseURL: server)
         self.client = resolvedClient
@@ -594,6 +613,8 @@ final class SessionListViewModel {
             applySessions(visibleSessions, archivedCount: response.archivedCount, animation: animation)
             isViewingCachedData = false
             isCheckingCachedRows = false
+            needsYouTracker.loaded(scope: needsYouScope())
+            updateNeedsYou()
 
             if let modelContext {
                 do {
@@ -992,13 +1013,18 @@ final class SessionListViewModel {
         var refreshed = attentionStatesBySessionID.filter { streamingSessionIDs.contains($0.key) }
         let generation = attentionWatch.generation
         var answeredRuns: [(sessionID: String, streamID: String)] = []
+        // Rows the live events stream vouches for are as current as a probe.
+        var unchangedSessionIDs: Set<String> = []
 
         for session in streamingSessions {
             guard let sessionID = Self.nonEmpty(session.sessionId),
                   let streamID = Self.nonEmpty(session.activeStreamId),
-                  streamIDs.contains(streamID),
-                  force || attentionWatch.needsProbe(sessionID: sessionID, streamID: streamID)
+                  streamIDs.contains(streamID)
             else { continue }
+            guard force || attentionWatch.needsProbe(sessionID: sessionID, streamID: streamID) else {
+                unchangedSessionIDs.insert(sessionID)
+                continue
+            }
 
             async let pendingApproval = client.approvalPending(sessionID: sessionID)
             async let pendingClarification = client.clarifyPending(sessionID: sessionID)
@@ -1047,8 +1073,8 @@ final class SessionListViewModel {
         }
 
         attentionWatch.noteProbed(answeredRuns, at: generation, streamingSessionIDs: streamingSessionIDs)
-        guard refreshed != attentionStatesBySessionID else { return .unchanged }
-        attentionStatesBySessionID = refreshed
+        if refreshed != attentionStatesBySessionID { attentionStatesBySessionID = refreshed }
+        updateNeedsYou(current: unchangedSessionIDs.union(answeredRuns.map(\.sessionID)))
         return .unchanged
     }
 
@@ -1065,6 +1091,7 @@ final class SessionListViewModel {
     private func clearAttentionStates() {
         guard !attentionStatesBySessionID.isEmpty else { return }
         attentionStatesBySessionID = [:]
+        updateNeedsYou()
     }
 
     /// Attention state only means something for a row the server still reports
@@ -1079,6 +1106,56 @@ final class SessionListViewModel {
         let pruned = attentionStatesBySessionID.filter { streamingSessionIDs.contains($0.key) }
         guard pruned != attentionStatesBySessionID else { return }
         attentionStatesBySessionID = pruned
+        updateNeedsYou()
+    }
+
+    /// The list's selections and whether Home is on screen. Coming on screen
+    /// or changing scope makes what the list holds for the rows in scope old
+    /// news, so a wait it shows cannot count as an arrival.
+    func updateNeedsYouContext(_ context: SessionNeedsYouContext) {
+        let previous = needsYouContext
+        needsYouContext = context
+        if context.isHomeVisible, !previous.isHomeVisible || !context.hasSameScope(as: previous) {
+            needsYouTracker.baseline(scope: needsYouScope(), includingNextLoad: !previous.isHomeVisible)
+        }
+        updateNeedsYou()
+    }
+
+    /// The streaming rows the list shows, which are also the ones it probes.
+    private func needsYouScope() -> [SessionSummary] {
+        visibleActiveSessions(
+            searchText: "",
+            selectedProjectID: needsYouContext.selectedProjectID,
+            automatedVisibility: needsYouContext.automatedVisibility,
+            profileFilter: needsYouContext.profileFilter
+        )
+    }
+
+    /// Re-derives the row and the arrival edge; `current` are the rows whose
+    /// state this tick confirmed. Issues no requests.
+    private func updateNeedsYou(current: Set<String> = []) {
+        let observation = needsYouTracker.observe(
+            scope: needsYouScope(),
+            states: attentionStatesBySessionID,
+            current: current,
+            isHomeVisible: needsYouContext.isHomeVisible,
+            now: now()
+        )
+        if observation.arrived { needsYouArrivals &+= 1 }
+        guard let summary = observation.summary else {
+            guard needsYou != nil, needsYouHideTask == nil else { return }
+            let sleep = self.sleep
+            needsYouHideTask = Task { [weak self] in
+                do { try await sleep(.seconds(1)) } catch { return }
+                guard let self, !Task.isCancelled else { return }
+                needsYouHideTask = nil
+                needsYou = nil
+            }
+            return
+        }
+        needsYouHideTask?.cancel()
+        needsYouHideTask = nil
+        if needsYou != summary { needsYou = summary }
     }
 
     func loadSessionForDeepLink(id rawSessionID: String, modelContext: ModelContext? = nil, isPush: Bool = false) async -> SessionSummary? {
