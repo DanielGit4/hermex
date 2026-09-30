@@ -168,10 +168,16 @@ import Observation
         operation?.phase = phase
     }
 
-    /// A host that answered with an error installed nothing; a request that never reached
-    /// it changed nothing. Anything else may have reached the host and may still finish.
+    /// A host that answered with an error installed nothing; a refusal shows the host's own
+    /// reason. A request that never reached it changed nothing. Anything else may have
+    /// reached the host and may still finish.
     private static func requestProblem(_ error: Error, name: String) -> String {
         switch error {
+        case DashboardFailure.refused(let detail):
+            if let reason = DashboardFailure.refusalMessage(detail) {
+                return String(localized: "Your Hermes host refused to install “\(name)”: \(reason)")
+            }
+            fallthrough
         case BotFailure.rejected(400):
             return String(localized: "Your Hermes host refused to install “\(name)”. Check the values you entered, then try again.")
         case BotFailure.rejected:
