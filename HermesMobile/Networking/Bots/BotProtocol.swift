@@ -151,6 +151,15 @@ enum BotEndpoint: String {
     /// `consent_required`, which answers 200.
     case pluginsHub = "api/dashboard/plugins/hub"
     case pluginsCatalog = "api/dashboard/plugins/catalog"
+    /// Tools routes the Dashboard uses, verified against hermes-agent 0.21.5 on 2026-09-30.
+    /// `profiles` (`web_routers/profiles.py`) answers `{profiles: [row]}`, each row named by
+    /// its slug (`default` for the root profile). `toolsets` (`web_routers/tools.py`) takes
+    /// `profile` and answers a bare array of `{name, label, description, platform,
+    /// platform_label, enabled, available, configured, tools}`; an unknown profile is a 404.
+    /// `toolsetURL` toggles one with `PUT {enabled, profile}`, answering `{ok, name, platform,
+    /// enabled, post_setup_started}`; an unknown toolset is a 400 whose `detail` says so.
+    case profiles = "api/profiles"
+    case toolsets = "api/tools/toolsets"
     func url(base: URL) -> URL { base.appendingPathComponent(rawValue) }
     /// `GET /api/actions/{name}/status` (`actions.py`): `{name, running, exit_code, pid,
     /// lines}` for a spawned action. `name` is the one the spawning route answered.
@@ -169,6 +178,10 @@ enum BotEndpoint: String {
     static func pluginURL(base: URL, name: String, action: String? = nil) -> URL {
         let plugin = base.appendingPathComponent("api/dashboard/agent-plugins").appendingPathComponent(name)
         return action.map { plugin.appendingPathComponent($0) } ?? plugin
+    }
+    /// `PUT /api/tools/toolsets/{name}`. `name` is one path segment, percent-encoded.
+    static func toolsetURL(base: URL, name: String) -> URL {
+        BotEndpoint.toolsets.url(base: base).appendingPathComponent(name)
     }
     /// `DELETE /api/profiles/{name}`, the only Profile removal the host exposes; the
     /// gateway has no `profiles.delete` RPC. `name` is a validated Profile slug.
