@@ -165,20 +165,36 @@ import XCTest
         XCTAssertTrue(model.canInstall(entry, values: ["BRAVE_API_KEY": "sk-test"]), "Optional values may stay empty")
     }
 
+    /// Retyping can't fix a refusal like this one, so the host's own reason is shown.
     func testAHostRefusalIsAFailureWithNothingToConfirm() async throws {
-        MCPHTTPFixture.activate { request in
-            request.url?.path == "/api/mcp/catalog/install" ? .json(400, .object(["detail": .string("bad value")])) : nil
+        let reason = "catalog entry 'brave-search' rejected: suspicious command/args configuration"
+        let phase = try await refusedInstallPhase(.json(400, .object(["detail": .string(reason)])))
+
+        XCTAssertEqual(phase, .failed(String(localized: "Your Hermes host refused to install “brave-search”: \(reason)")))
+        guard case .failed(let message) = phase else { return XCTFail("Expected a failure") }
+        XCTAssertTrue(message.contains(reason))
+        XCTAssertFalse(message.contains("Check the values"))
+        XCTAssertNotEqual(message, String(localized:
+            "Lost contact with your Hermes host while it was working. It may still finish; refresh to check."))
+    }
+
+    func testANewerHostsRefusalObjectShowsItsError() async throws {
+        let phase = try await refusedInstallPhase(.json(400, .object(["detail": .object([
+            "error": .string("BRAVE_API_KEY is required but no value was provided"), "code": .string("missing_env")
+        ])])))
+
+        XCTAssertEqual(phase, .failed(String(localized:
+            "Your Hermes host refused to install “brave-search”: BRAVE_API_KEY is required but no value was provided")))
+    }
+
+    func testARefusalWithoutAReasonAsksToCheckTheValues() async throws {
+        for reply: DashboardHTTPFixture.Reply in [.json(400, .null), .json(400, .object([:])),
+                                                  .json(400, .object(["detail": .string("")]))] {
+            let phase = try await refusedInstallPhase(reply)
+
+            XCTAssertEqual(phase, .failed(String(localized:
+                "Your Hermes host refused to install “brave-search”. Check the values you entered, then try again.")), "\(reply)")
         }
-        let (model, _, _) = makeModels()
-        await model.load()
-        DashboardHTTPFixture.clearCalls()
-
-        await model.install(try XCTUnwrap(model.entry(named: "brave-search")), values: ["BRAVE_API_KEY": "sk-test"], enable: true)
-
-        XCTAssertNil(model.confirmation)
-        XCTAssertEqual(model.operation?.phase, .failed(String(localized:
-            "Your Hermes host refused to install “brave-search”. Check the values you entered, then try again.")))
-        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/"), ["POST \(host)/api/mcp/catalog/install?profile=default"])
     }
 
     func testATimeoutAfterSendingSaysItMayStillFinish() async throws {
@@ -241,6 +257,24 @@ import XCTest
     }
 
     // MARK: - Helpers
+
+    /// Installs `brave-search` against a host that answers the install with `reply`, and
+    /// returns the phase after checking that a refusal sent one request and confirms nothing.
+    private func refusedInstallPhase(_ reply: DashboardHTTPFixture.Reply,
+                                     file: StaticString = #filePath, line: UInt = #line) async throws -> MCPCatalogViewModel.InstallPhase? {
+        MCPHTTPFixture.activate { request in request.url?.path == "/api/mcp/catalog/install" ? reply : nil }
+        let (model, _, _) = makeModels()
+        await model.load()
+        DashboardHTTPFixture.clearCalls()
+
+        await model.install(try XCTUnwrap(model.entry(named: "brave-search")), values: ["BRAVE_API_KEY": "sk-test"], enable: true)
+
+        XCTAssertNil(model.confirmation, file: file, line: line)
+        XCTAssertFalse(model.isInstalling, file: file, line: line)
+        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/"), ["POST \(host)/api/mcp/catalog/install?profile=default"],
+                       file: file, line: line)
+        return model.operation?.phase
+    }
 
     private func makeModels(maxPolls: Int = 600) -> (MCPCatalogViewModel, MCPServersViewModel, InstallSleepProbe) {
         let client = DashboardHTTPFixture.client()
