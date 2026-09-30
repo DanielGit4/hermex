@@ -140,6 +140,8 @@ final class ChatPendingActionCoordinator {
         guard let prompt = approvalPrompt,
               prompt.sessionID == delegate?.pendingActionSessionID
         else { return false }
+        // A choice the host did not offer is never sent: it would be quietly downgraded.
+        guard ApprovalChoicePolicy.choices(for: prompt.pending).contains(choice) else { return false }
 
         isRespondingToApproval = true
         approvalErrorMessage = nil

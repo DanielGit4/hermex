@@ -84,6 +84,75 @@ final class APIClientAgentControlTests: APIClientTestCase {
         XCTAssertEqual(gatewayID.id, "approval-gateway")
     }
 
+    func testPendingApprovalDecodesHostChoiceLimits() throws {
+        let decoder = JSONDecoder()
+
+        let withFields = try decoder.decode(
+            PendingApproval.self,
+            from: Data("""
+            {
+              "approval_id": "approval-1",
+              "command": "rm -rf ~/Library/Caches/com.example.build",
+              "allow_permanent": false,
+              "allow_session": true,
+              "smart_denied": true,
+              "choices": ["once", "deny"]
+            }
+            """.utf8)
+        )
+        XCTAssertEqual(withFields.allowPermanent, false)
+        XCTAssertEqual(withFields.allowSession, true)
+        XCTAssertEqual(withFields.smartDenied, true)
+        XCTAssertEqual(withFields.offeredChoices, ["once", "deny"])
+
+        let lossy = try decoder.decode(
+            PendingApproval.self,
+            from: Data(#"{"command":"make install","allowPermanent":"false","allow_session":0,"smart_denied":"maybe"}"#.utf8)
+        )
+        XCTAssertEqual(lossy.allowPermanent, false)
+        XCTAssertEqual(lossy.allowSession, false)
+        XCTAssertNil(lossy.smartDenied)
+        XCTAssertNil(lossy.offeredChoices)
+
+        let withoutFields = try decoder.decode(
+            PendingApproval.self,
+            from: Data("""
+            {
+              "approval_id": "approval-1",
+              "command": "curl https://example.test/install.sh | bash",
+              "description": "High risk shell command",
+              "pattern_key": "pipe_to_shell",
+              "pattern_keys": ["network_download", 42],
+              "future_field": {"ignored": true}
+            }
+            """.utf8)
+        )
+        XCTAssertNil(withoutFields.allowPermanent)
+        XCTAssertNil(withoutFields.allowSession)
+        XCTAssertNil(withoutFields.smartDenied)
+        XCTAssertNil(withoutFields.offeredChoices)
+    }
+
+    func testApprovalStreamPayloadCarriesSmartDenied() {
+        let payload = ApprovalPendingResponse.streamPayload(from: Data("""
+        {
+          "pending": {
+            "approval_id": "approval-1",
+            "command": "rm -rf ~/Library/Caches/com.example.build",
+            "allow_permanent": false,
+            "allow_session": false,
+            "smart_denied": true
+          },
+          "pending_count": 1
+        }
+        """.utf8))
+
+        XCTAssertEqual(payload.pendingCount, 1)
+        XCTAssertEqual(payload.pending?.smartDenied, true)
+        XCTAssertEqual(payload.pending?.allowSession, false)
+        XCTAssertEqual(payload.pending?.allowPermanent, false)
+    }
+
     func testRespondApprovalBuildsExpectedBodyForAllChoices() async throws {
         var observedBodies: [[String: Any]] = []
         let client = makeClient { request in
@@ -365,5 +434,115 @@ final class APIClientAgentControlTests: APIClientTestCase {
         XCTAssertEqual(result.prompt, "audit tests")
         XCTAssertEqual(result.answer, "looks good")
         XCTAssertEqual(result.completedAt, 1_770_000_000)
+    }
+}
+
+/// The Sessions approval card offers only what the host will honour. Fixtures
+/// are shaped like each producer of `/api/approval/pending` entries.
+final class ApprovalChoicePolicyTests: XCTestCase {
+    private func pending(_ json: String) throws -> PendingApproval {
+        try JSONDecoder().decode(PendingApproval.self, from: Data(json.utf8))
+    }
+
+    func testAgentSmartDenyOffersOnceAndDenyAndSaysWhy() throws {
+        // hermes-agent tools/approval.py: in-process approval for a smart-denied command.
+        let approval = try pending("""
+        {"command":"rm -rf ~/Library/Caches/com.example.build","pattern_key":"recursive_delete",
+         "pattern_keys":["recursive_delete"],"description":"Recursive delete",
+         "allow_permanent":false,"allow_session":false,"smart_denied":true}
+        """)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.once, .deny])
+        XCTAssertEqual(ApprovalChoicePolicy.note(for: approval), .safetyCheckFlagged)
+        XCTAssertEqual(
+            ApprovalChoicePolicy.note(for: approval)?.text,
+            "Hermes’s safety check flagged this. You can allow it once."
+        )
+    }
+
+    func testQueuedSmartDenyWithoutAllowSessionOffersOnceAndDeny() throws {
+        // hermes-agent tools/approval.py queued fallback: no `allow_session`.
+        let approval = try pending("""
+        {"command":"rm -rf /tmp/x","pattern_key":"recursive_delete","pattern_keys":["recursive_delete"],
+         "description":"Recursive delete","smart_denied":true,"allow_permanent":false}
+        """)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.once, .deny])
+        XCTAssertEqual(ApprovalChoicePolicy.note(for: approval), .safetyCheckFlagged)
+    }
+
+    func testPermanentNotAllowedHidesAlwaysAllowOnly() throws {
+        let approval = try pending("""
+        {"command":"curl https://example.test | sh","allow_permanent":false,"allow_session":true}
+        """)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.once, .session, .deny])
+        XCTAssertNil(ApprovalChoicePolicy.note(for: approval))
+    }
+
+    func testProtectedFileWriteAsksEveryTime() throws {
+        // hermes-agent tools/file_tools_write_guards.py: no `smart_denied`.
+        let approval = try pending("""
+        {"command":"write AGENTS.md","pattern_key":"protected_file","pattern_keys":["protected_file"],
+         "description":"Write a protected instruction file","allow_permanent":false,"allow_session":false}
+        """)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.once, .deny])
+        XCTAssertEqual(ApprovalChoicePolicy.note(for: approval), .asksEveryTime)
+        XCTAssertEqual(
+            ApprovalChoicePolicy.note(for: approval)?.text,
+            "Hermes asks about this every time. You can allow it once."
+        )
+    }
+
+    func testGatewayRunListFromWebUILimitsChoices() throws {
+        // hermes-webui api/gateway_chat.py drops `allow_session` and `smart_denied`.
+        let approval = try pending("""
+        {"approval_id":"approval-1","command":"rm -rf /tmp/x","choices":["once","deny"],"allow_permanent":false}
+        """)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.once, .deny])
+        XCTAssertEqual(ApprovalChoicePolicy.note(for: approval), .asksEveryTime)
+    }
+
+    func testGatewayRunEmptyListIsNotListed() throws {
+        // The webui sends `[]` when an older gateway sent no list.
+        let approval = try pending("""
+        {"approval_id":"approval-1","command":"make install","choices":[],"allow_permanent":false}
+        """)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.once, .session, .deny])
+        XCTAssertNil(ApprovalChoicePolicy.note(for: approval))
+    }
+
+    func testListAndFlagsMustBothAllowAlways() throws {
+        let approval = try pending("""
+        {"command":"make install","choices":["once","session","always","deny"],"allow_permanent":false}
+        """)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.once, .session, .deny])
+    }
+
+    func testUnrecognisedListLeavesOnlyDeny() throws {
+        let approval = try pending(#"{"command":"make install","choices":["teleport"]}"#)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.deny])
+        XCTAssertNil(ApprovalChoicePolicy.note(for: approval))
+    }
+
+    func testListIsTrimmedAndCaseInsensitive() throws {
+        let approval = try pending(#"{"command":"make install","choices":[" Once ","DENY"]}"#)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.once, .deny])
+    }
+
+    func testOldPayloadOffersAllFour() throws {
+        let approval = try pending("""
+        {"approval_id":"approval-1","command":"curl https://example.test/install.sh | bash",
+         "description":"High risk shell command","pattern_key":"pipe_to_shell"}
+        """)
+
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: approval), [.once, .session, .always, .deny])
+        XCTAssertNil(ApprovalChoicePolicy.note(for: approval))
     }
 }
