@@ -50,8 +50,8 @@ import Foundation
         try await send("POST", url, body: body, long: long, readsRefusal: readsRefusal)
     }
 
-    func put(_ url: URL, body: BotJSON) async throws -> BotJSON {
-        try await send("PUT", url, body: body)
+    func put(_ url: URL, body: BotJSON, readsRefusal: Bool = false) async throws -> BotJSON {
+        try await send("PUT", url, body: body, readsRefusal: readsRefusal)
     }
 
     func patch(_ url: URL, body: BotJSON) async throws -> BotJSON {
@@ -322,6 +322,36 @@ extension DashboardClient {
                                                                readsRefusal: true)) else {
             throw DashboardFailure.unreadableResponse
         }
+        return result
+    }
+}
+
+/// The Tools routes, each scoped to a profile by name, so one host's profiles are read and
+/// changed one at a time.
+extension DashboardClient {
+    /// Every profile's slug once, in the host's order.
+    func profileNames() async throws -> [String] {
+        guard let rows = try await get(BotEndpoint.profiles.url(base: address))["profiles"].list else {
+            throw DashboardFailure.unreadableResponse
+        }
+        var seen = Set<String>()
+        return rows.compactMap { $0["name"].text.trimmedNonEmpty }.filter { seen.insert($0).inserted }
+    }
+
+    func toolsets(profile: String) async throws -> [DashboardToolset] {
+        guard let rows = try await get(BotEndpoint.toolsets.url(base: address),
+                                       query: [URLQueryItem(name: "profile", value: profile)]).list else {
+            throw DashboardFailure.unreadableResponse
+        }
+        return rows.compactMap(DashboardToolset.init)
+    }
+
+    /// Writes the profile's `config.yaml`; its chats use it from their next message.
+    func setToolset(_ name: String, enabled: Bool, profile: String) async throws -> ToolsetToggleResult {
+        let json = try await put(BotEndpoint.toolsetURL(base: address, name: name),
+                                 body: .object(["enabled": .bool(enabled), "profile": .string(profile)]),
+                                 readsRefusal: true)
+        guard let result = ToolsetToggleResult(json) else { throw DashboardFailure.unreadableResponse }
         return result
     }
 }
