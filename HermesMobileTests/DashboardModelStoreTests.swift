@@ -24,30 +24,32 @@ import XCTest
         super.tearDown()
     }
 
-    func testOpeningTheDashboardStartsTheThreeListsTogether() async {
-        let inFlight = expectation(description: "skills, MCP and plugins in flight together")
-        inFlight.expectedFulfillmentCount = 3
-        HeldURLProtocol.install(decide: { Self.signIn($0) ?? .hold }, onHold: { request in
-            if Self.lists[request.url?.path ?? ""] != nil { inFlight.fulfill() }
+    func testOpeningTheDashboardLoadsOnlyThePlugins() async {
+        let inFlight = expectation(description: "plugins in flight")
+        let seen = SeenPaths()
+        HeldURLProtocol.install(decide: { request in
+            seen.append(request.url?.path ?? "")
+            return Self.signIn(request) ?? .hold
+        }, onHold: { request in
+            if request.url?.path == "/api/dashboard/plugins/hub" { inFlight.fulfill() }
         })
         let bundle = makeStore().bundle(server: server, connection: Self.connection)
 
         let refresh = bundle.refreshLists()
-        // All three are held at once: none waited for another to be answered.
         await fulfillment(of: [inFlight], timeout: 5)
         XCTAssertTrue(bundle.refreshLists() == refresh, "a second open joins the running refresh")
 
         Self.lists.forEach { HeldURLProtocol.release($0.key, json: $0.value) }
         await refresh.value
 
-        XCTAssertEqual(bundle.skillsHub.installedSections.flatMap(\.skills).map(\.name), ["notes"])
-        XCTAssertEqual(bundle.mcpServers.servers.map(\.name), ["sentinel-mcp"])
         XCTAssertEqual(bundle.plugins.plugins.map(\.name), ["sentinel-plugin"])
+        XCTAssertEqual(seen.paths.filter { !["/api/status", "/auth/password-login", "/api/auth/me"].contains($0) },
+                       ["/api/dashboard/plugins/hub"],
+                       "Skills and MCP servers belong to a profile and load when its screen opens")
     }
 
     func testTheNextOpenAfterARefreshFinishesRefreshesAgain() async {
         let inFlight = expectation(description: "the first refresh is in flight")
-        inFlight.expectedFulfillmentCount = 3
         HeldURLProtocol.install(decide: { Self.signIn($0) ?? .hold }, onHold: { request in
             if Self.lists[request.url?.path ?? ""] != nil { inFlight.fulfill() }
         })
@@ -58,8 +60,7 @@ import XCTest
         await refresh.value
 
         // Reopen the moment the refresh finishes, before anything else runs on the main actor.
-        let againInFlight = expectation(description: "the next open refreshes the three lists")
-        againInFlight.expectedFulfillmentCount = 3
+        let againInFlight = expectation(description: "the next open refreshes the plugins")
         HeldURLProtocol.install(decide: { Self.signIn($0) ?? .hold }, onHold: { request in
             if Self.lists[request.url?.path ?? ""] != nil { againInFlight.fulfill() }
         })
@@ -76,11 +77,10 @@ import XCTest
         let store = makeStore()
         let first = store.bundle(server: server, connection: Self.connection)
         await first.refreshLists().value
-        let loadedAt = try XCTUnwrap(first.mcpServers.lastLoadedAt)
+        let loadedAt = try XCTUnwrap(first.plugins.lastLoadedAt)
 
         // Leave, then come back while the host is slow.
-        let inFlight = expectation(description: "the three lists refresh")
-        inFlight.expectedFulfillmentCount = 3
+        let inFlight = expectation(description: "the plugins refresh")
         HeldURLProtocol.install(decide: { Self.signIn($0) ?? .hold }, onHold: { request in
             if Self.lists[request.url?.path ?? ""] != nil { inFlight.fulfill() }
         })
@@ -90,26 +90,17 @@ import XCTest
         await fulfillment(of: [inFlight], timeout: 5)
 
         // Rows at once, with the static note rather than a spinner in their place.
-        XCTAssertEqual(again.mcpServers.servers.map(\.name), ["sentinel-mcp"])
         XCTAssertEqual(again.plugins.plugins.map(\.name), ["sentinel-plugin"])
-        XCTAssertEqual(again.skillsHub.installedSections.flatMap(\.skills).map(\.name), ["notes"])
-        XCTAssertEqual(again.mcpServers.listState.refreshNote(rowsLoadedAt: again.mcpServers.lastLoadedAt), .refreshing)
         XCTAssertEqual(again.plugins.listState.refreshNote(rowsLoadedAt: again.plugins.lastLoadedAt), .refreshing)
-        XCTAssertEqual(again.skillsHub.installedState.refreshNote(rowsLoadedAt: again.skillsHub.installedLoadedAt),
-                       .refreshing)
 
-        // A failed refresh keeps the rows and names their time; the others land fresh.
-        HeldURLProtocol.release("/api/mcp/servers", status: 500, json: #"{"detail": "boom"}"#)
-        HeldURLProtocol.release("/api/dashboard/plugins/hub", json: Self.lists["/api/dashboard/plugins/hub"]!)
-        HeldURLProtocol.release("/api/skills", json: Self.lists["/api/skills"]!)
+        // A failed refresh keeps the rows and names their time.
+        HeldURLProtocol.release("/api/dashboard/plugins/hub", status: 500, json: #"{"detail": "boom"}"#)
         await refresh.value
 
-        XCTAssertEqual(again.mcpServers.servers.map(\.name), ["sentinel-mcp"])
-        guard case .failed(let problem) = again.mcpServers.listState else { return XCTFail("Expected a failure") }
-        XCTAssertEqual(again.mcpServers.listState.refreshNote(rowsLoadedAt: again.mcpServers.lastLoadedAt),
+        XCTAssertEqual(again.plugins.plugins.map(\.name), ["sentinel-plugin"])
+        guard case .failed(let problem) = again.plugins.listState else { return XCTFail("Expected a failure") }
+        XCTAssertEqual(again.plugins.listState.refreshNote(rowsLoadedAt: again.plugins.lastLoadedAt),
                        .failed(since: loadedAt, detail: problem.message))
-        XCTAssertEqual(again.plugins.listState, .loaded)
-        XCTAssertNil(again.plugins.listState.refreshNote(rowsLoadedAt: again.plugins.lastLoadedAt))
     }
 
     func testAnotherServerOrConnectionNeverSeesTheKeptRows() async {
@@ -117,18 +108,21 @@ import XCTest
         let store = makeStore()
         let kept = store.bundle(server: server, connection: Self.connection)
         await kept.refreshLists().value
-        XCTAssertFalse(kept.mcpServers.servers.isEmpty)
+        await kept.profile("default").mcpServers.load()
+        XCTAssertFalse(kept.plugins.plugins.isEmpty)
+        XCTAssertFalse(kept.profile("default").mcpServers.servers.isEmpty)
 
         let otherServer = store.bundle(server: URL(string: "https://b.example.test")!, connection: Self.connection)
         XCTAssertFalse(otherServer === kept)
-        XCTAssertTrue(otherServer.mcpServers.servers.isEmpty)
+        XCTAssertTrue(otherServer.profile("default").mcpServers.servers.isEmpty)
         XCTAssertTrue(otherServer.plugins.plugins.isEmpty)
-        XCTAssertTrue(otherServer.skillsHub.installedSections.isEmpty)
+        XCTAssertTrue(otherServer.profile("default").skillsHub.installedSections.isEmpty)
 
         // Coming back does not revive the dropped bundle.
         let backOnA = store.bundle(server: server, connection: Self.connection)
         XCTAssertFalse(backOnA === kept)
-        XCTAssertTrue(backOnA.mcpServers.servers.isEmpty)
+        XCTAssertTrue(backOnA.plugins.plugins.isEmpty)
+        XCTAssertTrue(backOnA.profile("default").mcpServers.servers.isEmpty)
 
         let replaced = BotConnection(id: UUID(), name: "Host", address: Self.connection.address,
                                      username: "user", password: "secret")
@@ -161,7 +155,9 @@ import XCTest
         }
         let bundle = makeStore().bundle(server: server, connection: Self.connection)
         await bundle.refreshLists().value
-        XCTAssertEqual(bundle.mcpServers.servers.first?.url, "https://mcp.example/\(Self.sentinel)")
+        let servers = bundle.profile("default").mcpServers
+        await servers.load()
+        XCTAssertEqual(servers.servers.first?.url, "https://mcp.example/\(Self.sentinel)")
 
         // The catalog cache writes beside it, so the check below has files to read.
         let catalogs = APIClient(baseURL: server, session: URLSession(configuration: HeldURLProtocol.configuration()),
@@ -205,4 +201,13 @@ import XCTest
     nonisolated static func list(_ request: URLRequest) -> HeldURLProtocol.Decision {
         lists[request.url?.path ?? ""].map { .respond(200, $0) } ?? .respond(404, "{}")
     }
+}
+
+/// Every path a `HeldURLProtocol` host was asked for, recorded from the URL loading thread.
+final class SeenPaths: @unchecked Sendable {
+    private let lock = NSLock()
+    private var recorded: [String] = []
+
+    func append(_ path: String) { lock.withLock { recorded.append(path) } }
+    var paths: [String] { lock.withLock { recorded } }
 }

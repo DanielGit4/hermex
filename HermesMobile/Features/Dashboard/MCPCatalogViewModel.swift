@@ -26,6 +26,8 @@ import Observation
     private(set) var operation: InstallState?
     /// Follows a started install to its outcome once the request carrying the values has returned.
     @ObservationIgnored private(set) var confirmation: Task<Void, Never>?
+    /// The host profile every request reads and changes.
+    let profile: String
 
     private let client: DashboardClient
     private let servers: MCPServersViewModel
@@ -35,11 +37,13 @@ import Observation
 
     /// Delays are injected so tests never sleep.
     init(client: DashboardClient,
+         profile: String,
          servers: MCPServersViewModel,
          pollInterval: Duration = .seconds(1),
          maxPolls: Int = 600,
          sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.client = client
+        self.profile = profile
         self.servers = servers
         self.pollInterval = pollInterval
         self.maxPolls = maxPolls
@@ -56,7 +60,7 @@ import Observation
         guard state != .loading, force || state != .loaded else { return }
         state = .loading
         do {
-            apply(try await client.mcpCatalog())
+            apply(try await client.mcpCatalog(profile: profile))
             state = .loaded
         } catch {
             state = DashboardProblem.isCancellation(error)
@@ -113,7 +117,7 @@ import Observation
         do {
             // A git-bootstrapped install always ends enabled on the host, whatever `enable` says.
             start = try await client.installMCPCatalogEntry(entry.name, env: Self.environment(for: entry, values: values),
-                                                            enable: entry.needsInstall || enable)
+                                                            enable: entry.needsInstall || enable, profile: profile)
         } catch {
             return finish(.failed(Self.requestProblem(error, name: entry.name)))
         }
@@ -142,7 +146,7 @@ import Observation
                 return finish(.failed(String(localized: "Hermes finished, but “\(name)” isn’t installed. The host may have refused it.")))
             }
             // Installed and enabled badges; the install stands even if this read fails.
-            if let catalog = try? await client.mcpCatalog() { apply(catalog) }
+            if let catalog = try? await client.mcpCatalog(profile: profile) { apply(catalog) }
             finish(.succeeded(String(localized: "Installed “\(name)” on your Hermes host.")))
         } catch {
             finish(.failed(Self.lostContact))

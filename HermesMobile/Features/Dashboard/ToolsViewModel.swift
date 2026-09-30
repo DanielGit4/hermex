@@ -80,6 +80,11 @@ import Observation
 
     static let cliPlatform = "cli"
     static var guardMessage: String { String(localized: "Keep at least one tool on.") }
+    /// Under the `cli` rows: the host saves them as `platform_toolsets.cli`, which the WebUI, the
+    /// CLI and Kanban workers read; the messaging gateway and cron read their own platform's list.
+    static var toolsFooter: String {
+        String(localized: "Used from the next message by chats from this app and the WebUI, the CLI and Kanban workers. Telegram, Discord and cron jobs keep their own lists.")
+    }
 
     let profile: String
     private(set) var toolsets: [DashboardToolset] = []

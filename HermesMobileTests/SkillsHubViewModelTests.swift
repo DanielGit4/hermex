@@ -34,7 +34,7 @@ import XCTest
         XCTAssertEqual(model.installedSkillContentStates["github"], .loaded)
         XCTAssertEqual(model.installedSkillContents["github"]?.markdown, "# GitHub\n\nUse GitHub.")
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/content"),
-                       ["GET \(host)/api/skills/content?name=github"])
+                       ["GET \(host)/api/skills/content?name=github&profile=default"])
     }
 
     func testAnEmptyHostIsLoadedAndEmpty() async {
@@ -98,7 +98,7 @@ import XCTest
 
         XCTAssertEqual(probe.durations, [.milliseconds(300)])
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/search"),
-                       ["GET \(host)/api/skills/hub/search?q=pdf&source=all&limit=20"])
+                       ["GET \(host)/api/skills/hub/search?q=pdf&source=all&limit=20&profile=default"])
         XCTAssertEqual(model.searchState, .loaded)
         XCTAssertEqual(model.results.map(\.identifier), [identifier])
         XCTAssertEqual(model.timedOutSources, ["github"])
@@ -114,7 +114,7 @@ import XCTest
         await model.search("pdf")
 
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/search"),
-                       ["GET \(host)/api/skills/hub/search?q=pdf&source=all&limit=20"])
+                       ["GET \(host)/api/skills/hub/search?q=pdf&source=all&limit=20&profile=default"])
     }
 
     func testReturningToTheSameQueryKeepsItsResultsUntilRefreshed() async {
@@ -251,11 +251,11 @@ import XCTest
         XCTAssertTrue(model.isInstalled(identifier))
         XCTAssertFalse(model.canInstall(identifier))
         XCTAssertEqual(DashboardHTTPFixture.calls.filter { !$0.contains("/api/skills/hub/sources") }, [
-            "POST \(host)/api/skills/hub/install",
+            "POST \(host)/api/skills/hub/install?profile=default",
             "GET \(host)/api/actions/skills-install-pdf-tools-1a2b3c4d/status",
             "GET \(host)/api/actions/skills-install-pdf-tools-1a2b3c4d/status",
             "GET \(host)/api/actions/skills-install-pdf-tools-1a2b3c4d/status",
-            "GET \(host)/api/skills"
+            "GET \(host)/api/skills?profile=default"
         ])
     }
 
@@ -340,8 +340,10 @@ import XCTest
 
         outcome = .confirmed
         await model.uninstall("git-helper")
-        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/uninstall"), ["POST \(host)/api/skills/hub/uninstall"])
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/skills/hub/uninstall")["name"].text, "git-helper")
+        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/uninstall"),
+                       ["POST \(host)/api/skills/hub/uninstall?profile=default"])
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/skills/hub/uninstall?profile=default")["name"].text,
+                       "git-helper")
         XCTAssertEqual(model.operation?.phase, .succeeded(String(localized: "Removed “git-helper” from your Hermes host.")))
         XCTAssertFalse(model.installedSections.contains { $0.skills.contains { $0.name == "git-helper" } })
         XCTAssertEqual(reasons.count, 3)
@@ -372,7 +374,7 @@ import XCTest
         await model.update()
 
         XCTAssertEqual(model.operation?.phase, .succeeded(String(localized: "Hermes finished updating hub skills.")))
-        XCTAssertTrue(DashboardHTTPFixture.calls.contains("POST \(host)/api/skills/hub/update"))
+        XCTAssertTrue(DashboardHTTPFixture.calls.contains("POST \(host)/api/skills/hub/update?profile=default"))
         XCTAssertTrue(DashboardHTTPFixture.calls.contains("GET \(host)/api/actions/skills-update/status"))
     }
 
@@ -407,7 +409,7 @@ import XCTest
         authenticate: @escaping @MainActor (String) async -> DeviceOwnerAuthentication.Outcome = { _ in .confirmed }
     ) -> (SkillsHubViewModel, SleepProbe) {
         let probe = SleepProbe()
-        let model = SkillsHubViewModel(client: DashboardHTTPFixture.client(), authenticate: authenticate,
+        let model = SkillsHubViewModel(client: DashboardHTTPFixture.client(), profile: "default", authenticate: authenticate,
                                        maxPolls: maxPolls, sleep: { [probe] in try await probe.sleep($0) })
         probe.model = model
         return (model, probe)

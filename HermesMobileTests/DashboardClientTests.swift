@@ -41,18 +41,18 @@ import XCTest
         }
         let client = DashboardHTTPFixture.client()
 
-        let skills = try await client.installedSkills()
+        let skills = try await client.installedSkills(profile: "default")
 
         XCTAssertEqual(skills.map(\.name), ["git-helper", "notes", "scratchpad"])
         XCTAssertEqual(DashboardHTTPFixture.calls, [
             "GET https://host.example:9119/api/status",
             "POST https://host.example:9119/auth/password-login",
             "GET https://host.example:9119/api/auth/me",
-            "GET https://host.example:9119/api/skills",
+            "GET https://host.example:9119/api/skills?profile=default",
             "GET https://host.example:9119/api/status",
             "POST https://host.example:9119/auth/password-login",
             "GET https://host.example:9119/api/auth/me",
-            "GET https://host.example:9119/api/skills"
+            "GET https://host.example:9119/api/skills?profile=default"
         ])
     }
 
@@ -63,12 +63,12 @@ import XCTest
         let client = DashboardHTTPFixture.client()
 
         do {
-            _ = try await client.installedSkills()
+            _ = try await client.installedSkills(profile: "default")
             XCTFail("A host that keeps refusing the credential must surface it")
         } catch {
             XCTAssertEqual(error as? BotFailure, .rejected(401))
         }
-        XCTAssertEqual(DashboardHTTPFixture.calls.filter { $0.hasSuffix("/api/skills") }.count, 2)
+        XCTAssertEqual(DashboardHTTPFixture.calls.filter { $0.hasSuffix("/api/skills?profile=default") }.count, 2)
         XCTAssertEqual(DashboardHTTPFixture.calls.filter { $0.hasSuffix("/auth/password-login") }.count, 2)
     }
 
@@ -80,7 +80,7 @@ import XCTest
         let client = DashboardHTTPFixture.client()
 
         do {
-            _ = try await client.installedSkills()
+            _ = try await client.installedSkills(profile: "default")
             XCTFail("Expected the sign-in to be refused")
         } catch {
             XCTAssertEqual(error as? BotFailure, .unsupported)
@@ -120,36 +120,36 @@ import XCTest
         let client = DashboardHTTPFixture.client()
         let identifier = DashboardHTTPFixture.hubIdentifier
 
-        let installed = try await client.installedSkills()
+        let installed = try await client.installedSkills(profile: "default")
         XCTAssertEqual(installed.first { $0.name == "git-helper" }?.provenance, "hub")
         XCTAssertEqual(installed.first { $0.name == "notes" }?.enabled, false)
 
-        let content = try await client.installedSkillContent("github")
+        let content = try await client.installedSkillContent("github", profile: "default")
         XCTAssertEqual(content.name, "github")
         XCTAssertEqual(content.markdown, "# GitHub\n\nUse GitHub.")
         XCTAssertEqual(content.path, "/home/hermes/skills/github/SKILL.md")
 
-        let lock = try await client.hubLock()
+        let lock = try await client.hubLock(profile: "default")
         XCTAssertEqual(lock["official/dev/git-helper"]?.trustLevel, "builtin")
 
-        let search = try await client.searchHub("pdf")
+        let search = try await client.searchHub("pdf", profile: "default")
         XCTAssertEqual(search.results.map(\.identifier), [identifier])
         XCTAssertEqual(search.results.first?.trustLevel, "community")
         XCTAssertEqual(search.timedOut, ["github"])
 
-        let preview = try await client.previewHubSkill(identifier)
+        let preview = try await client.previewHubSkill(identifier, profile: "default")
         XCTAssertEqual(preview.skill.name, "pdf-tools")
         XCTAssertEqual(preview.files, ["SKILL.md", "scripts/extract.py"])
 
-        let scan = try await client.scanHubSkill(identifier)
+        let scan = try await client.scanHubSkill(identifier, profile: "default")
         XCTAssertEqual(scan.policy, .allow)
         XCTAssertEqual(scan.findings.first?.line, 12)
 
-        let install = try await client.installHubSkill(identifier)
+        let install = try await client.installHubSkill(identifier, profile: "default")
         XCTAssertEqual(install, "skills-install-pdf-tools-1a2b3c4d")
-        let uninstall = try await client.uninstallHubSkill("git-helper")
+        let uninstall = try await client.uninstallHubSkill("git-helper", profile: "default")
         XCTAssertEqual(uninstall, "skills-uninstall-git-helper-5e6f7a8b")
-        let update = try await client.updateHubSkills()
+        let update = try await client.updateHubSkills(profile: "default")
         XCTAssertEqual(update, "skills-update")
 
         let status = try await client.actionStatus(install)
@@ -157,19 +157,19 @@ import XCTest
         XCTAssertEqual(status.exitCode, 0)
 
         XCTAssertTrue(DashboardHTTPFixture.calls.contains(
-            "GET https://host.example:9119/api/skills/content?name=github"))
+            "GET https://host.example:9119/api/skills/content?name=github&profile=default"))
         XCTAssertTrue(DashboardHTTPFixture.calls.contains(
-            "GET https://host.example:9119/api/skills/hub/search?q=pdf&source=all&limit=20"))
+            "GET https://host.example:9119/api/skills/hub/search?q=pdf&source=all&limit=20&profile=default"))
         XCTAssertTrue(DashboardHTTPFixture.calls.contains(
-            "GET https://host.example:9119/api/skills/hub/scan?identifier=skills-sh%2Facme%2Fpdf-tools"))
+            "GET https://host.example:9119/api/skills/hub/scan?identifier=skills-sh%2Facme%2Fpdf-tools&profile=default"))
         XCTAssertTrue(DashboardHTTPFixture.calls.contains(
             "GET https://host.example:9119/api/actions/skills-install-pdf-tools-1a2b3c4d/status"))
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST https://host.example:9119/api/skills/hub/install")["identifier"].text,
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST https://host.example:9119/api/skills/hub/install?profile=default")["identifier"].text,
                        identifier)
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST https://host.example:9119/api/skills/hub/uninstall")["name"].text,
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST https://host.example:9119/api/skills/hub/uninstall?profile=default")["name"].text,
                        "git-helper")
-        XCTAssertNil(DashboardHTTPFixture.body(of: "POST https://host.example:9119/api/skills/hub/update")["profile"].text,
-                     "No profile is sent, so the host's launch profile answers")
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST https://host.example:9119/api/skills/hub/update?profile=default"),
+                       .object([:]), "The profile is in the query, never in the body")
     }
 
     func testANon2xxCarriesItsStatus() async throws {
@@ -179,7 +179,7 @@ import XCTest
         let client = DashboardHTTPFixture.client()
 
         do {
-            _ = try await client.previewHubSkill("missing/skill")
+            _ = try await client.previewHubSkill("missing/skill", profile: "default")
             XCTFail("Expected a 404")
         } catch {
             XCTAssertEqual(error as? BotFailure, .rejected(404))
@@ -226,6 +226,8 @@ final class DashboardHTTPFixture: URLProtocol {
     }
 
     static var calls: [String] { lock.withLock { recorded.map(\.call) } }
+    /// Every request so far, in order, with its decoded body.
+    static var requests: [(call: String, body: BotJSON)] { lock.withLock { recorded } }
     static func body(of call: String) -> BotJSON { lock.withLock { recorded.first { $0.call == call }?.body ?? .null } }
     /// The body of the latest such call, which a `handler` reads for the request it answers.
     static func lastBody(of call: String) -> BotJSON { lock.withLock { recorded.last { $0.call == call }?.body ?? .null } }

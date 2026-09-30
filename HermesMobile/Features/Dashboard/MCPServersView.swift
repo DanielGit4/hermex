@@ -1,10 +1,13 @@
 import SwiftUI
 
-/// The MCP servers configured on the Hermes host, with the catalog one row above them. The
+/// One profile's MCP servers on the Hermes host, with the catalog one row above them. The
 /// catalog row never waits on the servers, and the catalog loads only once it is opened.
 struct MCPServersView: View {
     let model: MCPServersViewModel
     let catalog: MCPCatalogViewModel
+
+    /// Set once this push has read the list, so coming back from a server doesn't read it again.
+    @State private var didOpen = false
 
     var body: some View {
         List {
@@ -30,8 +33,14 @@ struct MCPServersView: View {
                 serverRows
             }
         }
-        .navigationTitle("MCP")
-        .task { await model.load() }
+        .navigationTitle(String(localized: "MCP · \(model.profile)"))
+        .navigationBarTitleDisplayMode(.inline)
+        // Kept rows stay on screen, with the refresh note, while each push reads them again.
+        .task {
+            guard !didOpen else { return }
+            await model.load(force: true)
+            didOpen = !Task.isCancelled
+        }
         .refreshable { await model.load(force: true) }
         .safeAreaInset(edge: .bottom) { MCPInstallBanner(model: catalog) }
     }

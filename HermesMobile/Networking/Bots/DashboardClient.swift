@@ -157,65 +157,69 @@ enum DashboardFailure: Error, Equatable {
     }
 }
 
-/// The Skills Hub routes in `BotEndpoint`. No `profile` is sent, so the host's launch
-/// profile answers, as it does for `BotDashboardClient`.
+/// The Skills Hub routes in `BotEndpoint`, each scoped to one of the host's profiles by name.
+/// The profile goes in the query only, never in a body: the host lets a body's `profile`
+/// win over the query's.
 extension DashboardClient {
-    func installedSkills() async throws -> [DashboardSkill] {
-        let rows = try await get(BotEndpoint.skills.url(base: address))
+    func installedSkills(profile: String) async throws -> [DashboardSkill] {
+        let rows = try await get(BotEndpoint.skills.url(base: address), query: [Self.profileItem(profile)])
         guard let list = rows.list else { throw DashboardFailure.unreadableResponse }
         return list.compactMap(DashboardSkill.init)
     }
 
-    func installedSkillContent(_ name: String) async throws -> DashboardSkillContent {
+    func installedSkillContent(_ name: String, profile: String) async throws -> DashboardSkillContent {
         let json = try await get(BotEndpoint.skillContent.url(base: address),
-                                 query: [URLQueryItem(name: "name", value: name)])
+                                 query: [URLQueryItem(name: "name", value: name), Self.profileItem(profile)])
         guard let content = DashboardSkillContent(json) else { throw DashboardFailure.unreadableResponse }
         return content
     }
 
     /// The hub lock: hub-installed skills keyed by the identifier they were installed from.
-    func hubLock() async throws -> [String: HubLockEntry] {
-        HubLockEntry.entries(try await get(BotEndpoint.skillsHubSources.url(base: address))["installed"]) ?? [:]
+    func hubLock(profile: String) async throws -> [String: HubLockEntry] {
+        HubLockEntry.entries(try await get(BotEndpoint.skillsHubSources.url(base: address),
+                                           query: [Self.profileItem(profile)])["installed"]) ?? [:]
     }
 
-    func searchHub(_ query: String, limit: Int = 20) async throws -> HubSearchResult {
+    func searchHub(_ query: String, limit: Int = 20, profile: String) async throws -> HubSearchResult {
         HubSearchResult(try await get(BotEndpoint.skillsHubSearch.url(base: address), query: [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "source", value: "all"),
-            URLQueryItem(name: "limit", value: String(limit))
+            URLQueryItem(name: "limit", value: String(limit)),
+            Self.profileItem(profile)
         ]))
     }
 
-    func previewHubSkill(_ identifier: String) async throws -> HubSkillPreview {
+    func previewHubSkill(_ identifier: String, profile: String) async throws -> HubSkillPreview {
         let json = try await get(BotEndpoint.skillsHubPreview.url(base: address),
-                                 query: [URLQueryItem(name: "identifier", value: identifier)])
+                                 query: [URLQueryItem(name: "identifier", value: identifier), Self.profileItem(profile)])
         guard let preview = HubSkillPreview(json, identifier: identifier) else { throw DashboardFailure.unreadableResponse }
         return preview
     }
 
-    func scanHubSkill(_ identifier: String) async throws -> HubSkillScan {
+    func scanHubSkill(_ identifier: String, profile: String) async throws -> HubSkillScan {
         let json = try await get(BotEndpoint.skillsHubScan.url(base: address),
-                                 query: [URLQueryItem(name: "identifier", value: identifier)])
+                                 query: [URLQueryItem(name: "identifier", value: identifier), Self.profileItem(profile)])
         guard json.fields != nil else { throw DashboardFailure.unreadableResponse }
         return HubSkillScan(json)
     }
 
     /// Each returns the spawned action's name, the one `actionStatus` reports on.
-    func installHubSkill(_ identifier: String) async throws -> String {
-        try Self.actionName(try await post(BotEndpoint.skillsHubInstall.url(base: address),
-                                           body: .object(["identifier": .string(identifier)])))
+    func installHubSkill(_ identifier: String, profile: String) async throws -> String {
+        let url = Self.url(BotEndpoint.skillsHubInstall.url(base: address), query: [Self.profileItem(profile)])
+        return try Self.actionName(try await post(url, body: .object(["identifier": .string(identifier)])))
     }
 
-    func uninstallHubSkill(_ name: String) async throws -> String {
-        try Self.actionName(try await post(BotEndpoint.skillsHubUninstall.url(base: address),
-                                           body: .object(["name": .string(name)])))
+    func uninstallHubSkill(_ name: String, profile: String) async throws -> String {
+        let url = Self.url(BotEndpoint.skillsHubUninstall.url(base: address), query: [Self.profileItem(profile)])
+        return try Self.actionName(try await post(url, body: .object(["name": .string(name)])))
     }
 
-    func updateHubSkills() async throws -> String {
-        let json = try await post(BotEndpoint.skillsHubUpdate.url(base: address))
+    func updateHubSkills(profile: String) async throws -> String {
+        let json = try await post(Self.url(BotEndpoint.skillsHubUpdate.url(base: address), query: [Self.profileItem(profile)]))
         return (try? Self.actionName(json)) ?? "skills-update"
     }
 
+    /// Not scoped: the host names an action per skill, not per profile.
     func actionStatus(_ name: String) async throws -> DashboardActionStatus {
         DashboardActionStatus(try await get(BotEndpoint.actionStatusURL(base: address, name: name)))
     }
@@ -224,12 +228,19 @@ extension DashboardClient {
         guard let name = json["name"].text, !name.isEmpty else { throw DashboardFailure.unreadableResponse }
         return name
     }
+
+    /// The query item that scopes a Skills Hub or MCP request to one profile.
+    private static func profileItem(_ profile: String) -> URLQueryItem {
+        URLQueryItem(name: "profile", value: profile)
+    }
 }
 
-/// The MCP routes in `BotEndpoint`, with no `profile`, so the host's launch profile answers.
+/// The MCP routes in `BotEndpoint`, each scoped to one of the host's profiles by name. The
+/// profile goes in the query only, never in a body: the host lets a body's `profile` win.
 extension DashboardClient {
-    func mcpServers() async throws -> [MCPServer] {
-        guard let rows = try await get(BotEndpoint.mcpServers.url(base: address))["servers"].list else {
+    func mcpServers(profile: String) async throws -> [MCPServer] {
+        guard let rows = try await get(BotEndpoint.mcpServers.url(base: address),
+                                       query: [Self.profileItem(profile)])["servers"].list else {
             throw DashboardFailure.unreadableResponse
         }
         return rows.compactMap(MCPServer.init)
@@ -237,26 +248,29 @@ extension DashboardClient {
 
     /// Connects to the server on the host and lists its tools. A failed probe is a result,
     /// not an error: the host answers 200 with its reason.
-    func testMCPServer(_ name: String) async throws -> MCPTestResult {
-        let json = try await post(BotEndpoint.mcpServerURL(base: address, name: name, action: "test"))
+    func testMCPServer(_ name: String, profile: String) async throws -> MCPTestResult {
+        let json = try await post(Self.url(BotEndpoint.mcpServerURL(base: address, name: name, action: "test"),
+                                           query: [Self.profileItem(profile)]))
         guard let result = MCPTestResult(json) else { throw DashboardFailure.unreadableResponse }
         return result
     }
 
     /// Returns the `enabled` value the host saved. It applies from the next session.
-    func setMCPServer(_ name: String, enabled: Bool) async throws -> Bool {
-        let json = try await put(BotEndpoint.mcpServerURL(base: address, name: name, action: "enabled"),
+    func setMCPServer(_ name: String, enabled: Bool, profile: String) async throws -> Bool {
+        let json = try await put(Self.url(BotEndpoint.mcpServerURL(base: address, name: name, action: "enabled"),
+                                          query: [Self.profileItem(profile)]),
                                  body: .object(["enabled": .bool(enabled)]))
         guard let saved = json["enabled"].flag else { throw DashboardFailure.unreadableResponse }
         return saved
     }
 
-    func deleteMCPServer(_ name: String) async throws {
-        _ = try await delete(BotEndpoint.mcpServerURL(base: address, name: name))
+    func deleteMCPServer(_ name: String, profile: String) async throws {
+        _ = try await delete(BotEndpoint.mcpServerURL(base: address, name: name), query: [Self.profileItem(profile)])
     }
 
-    func mcpCatalog() async throws -> MCPCatalog {
-        guard let catalog = MCPCatalog(try await get(BotEndpoint.mcpCatalog.url(base: address))) else {
+    func mcpCatalog(profile: String) async throws -> MCPCatalog {
+        guard let catalog = MCPCatalog(try await get(BotEndpoint.mcpCatalog.url(base: address),
+                                                     query: [Self.profileItem(profile)])) else {
             throw DashboardFailure.unreadableResponse
         }
         return catalog
@@ -264,8 +278,10 @@ extension DashboardClient {
 
     /// `env` goes to the host's `.env` before the install runs; callers send only declared,
     /// non-empty values and never keep them.
-    func installMCPCatalogEntry(_ name: String, env: [String: String], enable: Bool) async throws -> MCPInstallStart {
-        let json = try await post(BotEndpoint.mcpCatalogInstall.url(base: address), body: .object([
+    func installMCPCatalogEntry(_ name: String, env: [String: String], enable: Bool,
+                                profile: String) async throws -> MCPInstallStart {
+        let url = Self.url(BotEndpoint.mcpCatalogInstall.url(base: address), query: [Self.profileItem(profile)])
+        let json = try await post(url, body: .object([
             "name": .string(name), "env": .object(env.mapValues(BotJSON.string)), "enable": .bool(enable)
         ]))
         guard let start = MCPInstallStart(json) else { throw DashboardFailure.unreadableResponse }
@@ -273,8 +289,9 @@ extension DashboardClient {
     }
 }
 
-/// The plugin routes in `BotEndpoint`, none of which takes a `profile`. Every mutation reads
-/// the host's reason from a 400; install and update wait `longRequestTimeout`.
+/// The plugin routes in `BotEndpoint`, sent without a `profile`: the host's plugin writes take
+/// none, so the reads stay unscoped too and the screen shows what it changes. Every mutation
+/// reads the host's reason from a 400; install and update wait `longRequestTimeout`.
 extension DashboardClient {
     func pluginsHub() async throws -> [AgentPlugin] {
         guard let rows = try await get(BotEndpoint.pluginsHub.url(base: address))["plugins"].list else {

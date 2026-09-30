@@ -20,12 +20,13 @@ import XCTest
     func testEachMCPRouteSendsItsMethodPathAndBody() async throws {
         let client = DashboardHTTPFixture.client()
 
-        let servers = try await client.mcpServers()
-        let test = try await client.testMCPServer("github")
-        let saved = try await client.setMCPServer("github", enabled: false)
-        try await client.deleteMCPServer("linear")
-        let catalog = try await client.mcpCatalog()
-        let start = try await client.installMCPCatalogEntry("brave-search", env: ["BRAVE_API_KEY": "sk-test"], enable: false)
+        let servers = try await client.mcpServers(profile: "default")
+        let test = try await client.testMCPServer("github", profile: "default")
+        let saved = try await client.setMCPServer("github", enabled: false, profile: "default")
+        try await client.deleteMCPServer("linear", profile: "default")
+        let catalog = try await client.mcpCatalog(profile: "default")
+        let start = try await client.installMCPCatalogEntry("brave-search", env: ["BRAVE_API_KEY": "sk-test"], enable: false,
+                                                            profile: "default")
 
         XCTAssertEqual(servers.map(\.name), ["dev-tools", "github", "linear", "odd one"])
         guard case .connected(let tools, let prompts, _) = test else { return XCTFail("Expected a connected test") }
@@ -35,33 +36,33 @@ import XCTest
         XCTAssertEqual(catalog.entries.count, 5)
         XCTAssertEqual(start, .finished)
         XCTAssertEqual(Array(DashboardHTTPFixture.calls.dropFirst(3)), [
-            "GET \(host)/api/mcp/servers",
-            "POST \(host)/api/mcp/servers/github/test",
-            "PUT \(host)/api/mcp/servers/github/enabled",
-            "DELETE \(host)/api/mcp/servers/linear",
-            "GET \(host)/api/mcp/catalog",
-            "POST \(host)/api/mcp/catalog/install"
-        ], "The catalog is read without detect_apps, and no route carries a profile")
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/servers/github/test"), .object([:]))
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "PUT \(host)/api/mcp/servers/github/enabled"),
+            "GET \(host)/api/mcp/servers?profile=default",
+            "POST \(host)/api/mcp/servers/github/test?profile=default",
+            "PUT \(host)/api/mcp/servers/github/enabled?profile=default",
+            "DELETE \(host)/api/mcp/servers/linear?profile=default",
+            "GET \(host)/api/mcp/catalog?profile=default",
+            "POST \(host)/api/mcp/catalog/install?profile=default"
+        ], "The catalog is read without detect_apps, and every route names the profile in its query")
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/servers/github/test?profile=default"), .object([:]))
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "PUT \(host)/api/mcp/servers/github/enabled?profile=default"),
                        .object(["enabled": .bool(false)]))
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "DELETE \(host)/api/mcp/servers/linear"), .null)
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install"), .object([
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "DELETE \(host)/api/mcp/servers/linear?profile=default"), .null)
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install?profile=default"), .object([
             "name": .string("brave-search"), "env": .object(["BRAVE_API_KEY": .string("sk-test")]), "enable": .bool(false)
         ]))
     }
 
     func testTheInstallBodyCarriesOnlyDeclaredNonEmptyValues() async throws {
         let client = DashboardHTTPFixture.client()
-        let catalog = try await client.mcpCatalog()
+        let catalog = try await client.mcpCatalog(profile: "default")
         let entry = try XCTUnwrap(catalog.entries.first { $0.name == "brave-search" })
 
         let env = MCPCatalogViewModel.environment(for: entry, values: [
             "BRAVE_API_KEY": "  sk-test  ", "BRAVE_REGION": "", "UNDECLARED": "x"
         ])
-        _ = try await client.installMCPCatalogEntry(entry.name, env: env, enable: true)
+        _ = try await client.installMCPCatalogEntry(entry.name, env: env, enable: true, profile: "default")
 
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install")["env"],
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install?profile=default")["env"],
                        .object(["BRAVE_API_KEY": .string("sk-test")]),
                        "An empty optional value and an undeclared name are never sent")
     }
@@ -74,16 +75,16 @@ import XCTest
                        "\(host)/api/mcp/servers/odd%20one/test")
         let client = DashboardHTTPFixture.client()
 
-        _ = try await client.testMCPServer("odd one")
+        _ = try await client.testMCPServer("odd one", profile: "default")
 
-        XCTAssertEqual(DashboardHTTPFixture.calls.last, "POST \(host)/api/mcp/servers/odd%20one/test")
+        XCTAssertEqual(DashboardHTTPFixture.calls.last, "POST \(host)/api/mcp/servers/odd%20one/test?profile=default")
     }
 
     func testSyncAndBackgroundInstallAnswersDecode() async throws {
         let client = DashboardHTTPFixture.client()
 
-        let sync = try await client.installMCPCatalogEntry("airtable", env: [:], enable: true)
-        let background = try await client.installMCPCatalogEntry("blender-mcp", env: [:], enable: true)
+        let sync = try await client.installMCPCatalogEntry("airtable", env: [:], enable: true, profile: "default")
+        let background = try await client.installMCPCatalogEntry("blender-mcp", env: [:], enable: true, profile: "default")
 
         XCTAssertEqual(sync, .finished)
         XCTAssertEqual(background, .background(action: MCPHTTPFixture.actionName))
@@ -93,13 +94,13 @@ import XCTest
         let client = DashboardHTTPFixture.client()
 
         do {
-            _ = try await client.setMCPServer("dev-tools", enabled: false)
+            _ = try await client.setMCPServer("dev-tools", enabled: false, profile: "default")
             XCTFail("A plugin server can't be changed")
         } catch {
             XCTAssertEqual(error as? BotFailure, .rejected(409))
         }
         do {
-            _ = try await client.testMCPServer("missing")
+            _ = try await client.testMCPServer("missing", profile: "default")
             XCTFail("An unknown server is a 404")
         } catch {
             XCTAssertEqual(error as? BotFailure, .rejected(404))

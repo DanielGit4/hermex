@@ -8,46 +8,65 @@ import Foundation
 /// One bundle at a time, keyed by the active server and the whole saved Bot
 /// connection: another server, another connection, or a changed address or password
 /// builds a new bundle and drops the old one. Server switch, sign-out, server removal
-/// and Bot connection removal drop it explicitly too.
+/// and Bot connection removal drop it explicitly too. Inside a bundle, each host profile
+/// has its own Skills Hub and MCP models, so one profile's rows never show under another.
 @MainActor final class DashboardModelStore {
     static let shared = DashboardModelStore()
 
-    @MainActor final class Bundle {
-        let client: DashboardClient
+    /// One host profile's Skills Hub and MCP screens, sharing the bundle's signed-in client.
+    /// Every request they make names `profile`.
+    @MainActor final class ProfileModels {
+        let profile: String
         let skillsHub: SkillsHubViewModel
         let mcpServers: MCPServersViewModel
         let mcpCatalog: MCPCatalogViewModel
+
+        init(profile: String, client: DashboardClient) {
+            self.profile = profile
+            skillsHub = SkillsHubViewModel(client: client, profile: profile)
+            mcpServers = MCPServersViewModel(client: client, profile: profile)
+            mcpCatalog = MCPCatalogViewModel(client: client, profile: profile, servers: mcpServers)
+        }
+    }
+
+    @MainActor final class Bundle {
+        let client: DashboardClient
+        /// Unscoped: the host's plugin writes take no profile.
         let plugins: PluginsViewModel
         let pluginCatalog: PluginCatalogViewModel
-        /// Loads only when Tools opens, so it stays out of `refreshLists`.
+        /// Loads only when Profiles opens, so it stays out of `refreshLists`.
         let tools: ToolsProfilesViewModel
+        private var profiles: [String: ProfileModels] = [:]
         private var listRefresh: Task<Void, Never>?
         private var listGeneration = 0
 
         init(client: DashboardClient) {
             self.client = client
-            skillsHub = SkillsHubViewModel(client: client)
-            mcpServers = MCPServersViewModel(client: client)
-            mcpCatalog = MCPCatalogViewModel(client: client, servers: mcpServers)
             plugins = PluginsViewModel(client: client)
             pluginCatalog = PluginCatalogViewModel(client: client, plugins: plugins)
             tools = ToolsProfilesViewModel(client: client)
         }
 
-        /// Loads installed skills, plugins and MCP servers side by side, keeping any rows
-        /// already shown. The store owns the task, so opening a section doesn't cancel
-        /// it; a call while one runs joins it, and a call once it has finished starts
-        /// a new one.
+        /// The kept Skills Hub and MCP models for a profile, created on first access without
+        /// a request; each screen loads when it opens. Kept as long as the bundle, even after
+        /// the host stops listing the profile.
+        func profile(_ name: String) -> ProfileModels {
+            if let kept = profiles[name] { return kept }
+            let models = ProfileModels(profile: name, client: client)
+            profiles[name] = models
+            return models
+        }
+
+        /// Loads the plugins, keeping any rows already shown. The store owns the task, so
+        /// opening a section doesn't cancel it; a call while one runs joins it, and a call
+        /// once it has finished starts a new one.
         @discardableResult
         func refreshLists() -> Task<Void, Never> {
             if let listRefresh { return listRefresh }
             listGeneration += 1
             let generation = listGeneration
-            let task = Task { [weak self, skillsHub, mcpServers, plugins] in
-                async let skills: Void = skillsHub.loadInstalled()
-                async let servers: Void = mcpServers.load(force: true)
-                async let installed: Void = plugins.load(force: true)
-                _ = await (skills, servers, installed)
+            let task = Task { [weak self, plugins] in
+                await plugins.load(force: true)
                 // Cleared on the main actor before `value` resolves, and only if no newer
                 // refresh replaced this one after `cancel()`.
                 if self?.listGeneration == generation { self?.listRefresh = nil }

@@ -1,8 +1,8 @@
 import SwiftUI
 
-/// The Hermes host's dashboard, reached over the saved Bot connection for this server. Tools,
-/// the Skills Hub, MCP and Plugins are live; the other sections are listed so the
-/// destination's shape is clear and stay inert until they are built.
+/// The Hermes host's dashboard, reached over the saved Bot connection for this server.
+/// Profiles (each profile's tools, skills and MCP servers) and Plugins are live; the other
+/// sections are listed so the destination's shape is clear and stay inert until they are built.
 struct DashboardView: View {
     let server: URL
 
@@ -18,7 +18,8 @@ struct DashboardView: View {
                 guard !didLoadConnection else { return }
                 if let connection = try? BotConnectionStore().load(server: server) {
                     let bundle = DashboardModelStore.shared.bundle(server: server, connection: connection)
-                    // Each visit refreshes the three lists at once, so a section opens with rows.
+                    // Each visit refreshes the plugins, so Plugins opens with rows. A profile's
+                    // skills and MCP servers load when their screen opens.
                     bundle.refreshLists()
                     models = bundle
                 }
@@ -29,33 +30,20 @@ struct DashboardView: View {
     @ViewBuilder
     private var content: some View {
         if let models {
-            let skillsHub = models.skillsHub, mcpServers = models.mcpServers, mcpCatalog = models.mcpCatalog
-            let plugins = models.plugins, pluginCatalog = models.pluginCatalog, tools = models.tools
+            let plugins = models.plugins, pluginCatalog = models.pluginCatalog
             List {
                 Section {
                     NavigationLink {
-                        ToolsDestination(model: tools)
+                        ToolsDestination(models: models)
                     } label: {
-                        DashboardSectionLabel(title: "Tools", systemImage: "wrench.and.screwdriver",
-                                              subtitle: "Choose which tools each profile can use.")
-                    }
-                    NavigationLink {
-                        SkillsHubView(model: skillsHub)
-                    } label: {
-                        DashboardSectionLabel(title: "Skills Hub", systemImage: "hammer",
-                                              subtitle: "Search, install and update skills on your Hermes host.")
-                    }
-                    NavigationLink {
-                        MCPServersView(model: mcpServers, catalog: mcpCatalog)
-                    } label: {
-                        DashboardSectionLabel(title: "MCP", systemImage: "point.3.connected.trianglepath.dotted",
-                                              subtitle: "Test, enable and remove MCP servers, or install from the catalog.")
+                        DashboardSectionLabel(title: "Profiles", systemImage: "person.crop.circle",
+                                              subtitle: "Tools, skills and MCP servers for each profile.")
                     }
                     NavigationLink {
                         PluginsView(model: plugins, catalog: pluginCatalog)
                     } label: {
                         DashboardSectionLabel(title: "Plugins", systemImage: "puzzlepiece.extension",
-                                              subtitle: "Enable, update and remove plugins, or install from the catalog.")
+                                              subtitle: "For the default profile: enable, update and remove plugins, or install from the catalog.")
                     }
                 }
 

@@ -31,7 +31,7 @@ import XCTest
         XCTAssertEqual(model.matching("").map(\.name), model.entries.map(\.name))
         XCTAssertNotNil(model.entry(named: "sparse"), "A sparse entry still opens its review")
         XCTAssertEqual(model.diagnostics.map(\.name), ["future-thing"])
-        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/"), ["GET \(host)/api/mcp/catalog"])
+        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/"), ["GET \(host)/api/mcp/catalog?profile=default"])
     }
 
     func testSearchMatchesNamesAndDescriptions() async {
@@ -82,11 +82,11 @@ import XCTest
         XCTAssertEqual(model.entry(named: "airtable")?.installed, true, "The catalog's badges refresh")
         XCTAssertEqual(model.entry(named: "airtable")?.enabled, true)
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/"), [
-            "POST \(host)/api/mcp/catalog/install",
-            "GET \(host)/api/mcp/servers",
-            "GET \(host)/api/mcp/catalog"
+            "POST \(host)/api/mcp/catalog/install?profile=default",
+            "GET \(host)/api/mcp/servers?profile=default",
+            "GET \(host)/api/mcp/catalog?profile=default"
         ])
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install"), .object([
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install?profile=default"), .object([
             "name": .string("airtable"), "env": .object([:]), "enable": .bool(true)
         ]))
     }
@@ -117,13 +117,13 @@ import XCTest
         XCTAssertEqual(model.operation?.phase, .succeeded(String(localized: "Installed “blender-mcp” on your Hermes host.")))
         XCTAssertEqual(model.operation?.lines, ["Finished \(MCPHTTPFixture.actionName)"], "Only this run's log lines")
         XCTAssertEqual(servers.server(named: "blender-mcp")?.enabled, true)
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install")["enable"], .bool(true))
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install?profile=default")["enable"], .bool(true))
         XCTAssertEqual(DashboardHTTPFixture.calls.filter { !$0.contains("/api/mcp/catalog") || $0.hasPrefix("POST") }, [
-            "POST \(host)/api/mcp/catalog/install",
+            "POST \(host)/api/mcp/catalog/install?profile=default",
             "GET \(host)/api/actions/\(MCPHTTPFixture.actionName)/status",
             "GET \(host)/api/actions/\(MCPHTTPFixture.actionName)/status",
             "GET \(host)/api/actions/\(MCPHTTPFixture.actionName)/status",
-            "GET \(host)/api/mcp/servers"
+            "GET \(host)/api/mcp/servers?profile=default"
         ])
     }
 
@@ -178,7 +178,7 @@ import XCTest
         XCTAssertNil(model.confirmation)
         XCTAssertEqual(model.operation?.phase, .failed(String(localized:
             "Your Hermes host refused to install “brave-search”. Check the values you entered, then try again.")))
-        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/"), ["POST \(host)/api/mcp/catalog/install"])
+        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/"), ["POST \(host)/api/mcp/catalog/install?profile=default"])
     }
 
     func testATimeoutAfterSendingSaysItMayStillFinish() async throws {
@@ -214,7 +214,7 @@ import XCTest
 
         XCTAssertEqual(model.operation?.phase, .succeeded(String(localized: "Installed “brave-search” on your Hermes host.")))
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/mcp/catalog/install").count, 1)
-        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install")["env"],
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/catalog/install?profile=default")["env"],
                        .object(["BRAVE_API_KEY": .string(secret)]))
         XCTAssertEqual(servers.server(named: "brave-search")?.enabled, false, "Enable after install was off")
         var catalogState = ""
@@ -244,9 +244,9 @@ import XCTest
 
     private func makeModels(maxPolls: Int = 600) -> (MCPCatalogViewModel, MCPServersViewModel, InstallSleepProbe) {
         let client = DashboardHTTPFixture.client()
-        let servers = MCPServersViewModel(client: client, authenticate: { _ in .confirmed })
+        let servers = MCPServersViewModel(client: client, profile: "default", authenticate: { _ in .confirmed })
         let probe = InstallSleepProbe()
-        let model = MCPCatalogViewModel(client: client, servers: servers, maxPolls: maxPolls,
+        let model = MCPCatalogViewModel(client: client, profile: "default", servers: servers, maxPolls: maxPolls,
                                         sleep: { [probe] in try await probe.sleep($0) })
         probe.model = model
         return (model, servers, probe)
