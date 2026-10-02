@@ -2,6 +2,23 @@ import Foundation
 
 struct MarkdownMathFormatter {
     static func replacingInlineMath(in markdown: String) -> String {
+        replacingInlineMath(in: markdown) { renderedText(for: $0) }
+    }
+
+    /// Image destinations carry only expression source; font and appearance belong
+    /// to the view, so streaming and settled segmentation produce identical output.
+    static func inlineMathImages(in markdown: String) -> String {
+        replacingInlineMath(in: markdown) { latex in
+            guard latex.utf8.count <= 512 else { return nil }
+            let encoded = Data(latex.utf8).base64EncodedString()
+                .replacingOccurrences(of: "+", with: "-")
+                .replacingOccurrences(of: "/", with: "_")
+            // A nonempty alt keeps Foundation from dropping an image inside a link.
+            return "![\u{FFFC}](hermex-math:///" + encoded + ")"
+        }
+    }
+
+    private static func replacingInlineMath(in markdown: String, render: (String) -> String?) -> String {
         // Neither supported opener ($ or \() can occur without these ASCII bytes.
         guard markdown.utf8.contains(0x24) || markdown.utf8.contains(0x5C) else { return markdown }
         let characters = Array(markdown)
@@ -27,7 +44,7 @@ struct MarkdownMathFormatter {
 
             let latex = String(characters[(index + delimiter.openLength)..<closeIndex])
             if looksLikeMath(latex) {
-                result += renderedText(for: latex)
+                result += render(latex) ?? String(characters[index..<(closeIndex + delimiter.closeLength)])
                 index = closeIndex + delimiter.closeLength
             } else {
                 result.append(characters[index])
@@ -162,6 +179,10 @@ struct MarkdownMathFormatter {
             return true
         }
         if looksLikeAssignment(trimmed) { return true }
+        // Bare numeric tuples are mathematical; bare prices and ordinary prose are not.
+        if trimmed.first == "(", trimmed.last == ")",
+           trimmed.range(of: #"^\(\s*[+-]?\d+(?:\.\d+)?(?:\s*,\s*[+-]?\d+(?:\.\d+)?)+\s*\)$"#,
+                         options: .regularExpression) != nil { return true }
         if trimmed.contains("\\") || trimmed.contains("^") || trimmed.contains("_") { return true }
         return trimmed.range(of: #"[A-Za-z0-9]\s*[=<>+\-*/|]\s*[A-Za-z0-9]"#, options: .regularExpression) != nil
     }

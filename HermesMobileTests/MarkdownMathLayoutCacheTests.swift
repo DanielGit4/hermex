@@ -22,7 +22,7 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
 
     /// The load-bearing equivalence: `.plain` must equal what the old
     /// `replacingInlineMath(in:)` pass produced, or rendering changed.
-    func testPlainLayoutMatchesLegacyInlineMathPass() {
+    func testPlainLayoutMatchesInlineImageInlineMathPass() {
         let inputs = [
             "plain prose with no math at all",
             "**bold** and _italic_ and `code`",
@@ -44,8 +44,8 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
             }
             XCTAssertEqual(
                 layout,
-                MarkdownMathFormatter.replacingInlineMath(in: input),
-                "Cached plain layout diverged from the legacy pass for \(input.debugDescription)"
+                MarkdownMathFormatter.inlineMathImages(in: input),
+                "Cached plain layout diverged from the inline-image pass for \(input.debugDescription)"
             )
         }
     }
@@ -106,12 +106,12 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
     }
 
     /// Differential check over generated content: for every no-math input, the
-    /// cached `.plain` payload must equal the legacy two-pass output exactly.
+    /// cached `.plain` payload must equal the inline-image two-pass output exactly.
     ///
     /// This is the test that actually licenses dropping the second
     /// `replacingInlineMath` pass. It is randomized but seeded, so a failure is
     /// reproducible from the printed input.
-    func testPlainLayoutMatchesLegacyPassAcrossGeneratedContent() {
+    func testPlainLayoutMatchesInlineImagePassAcrossGeneratedContent() {
         let fragments = [
             "prose ", "**bold** ", "`code` ", "$5 ", "$x^2$ ", "\\$escaped ",
             "\n\n", "- item\n", "> quote\n", "café ", "| a | b |\n", "[l](u) ",
@@ -140,8 +140,8 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
 
             XCTAssertEqual(
                 layout,
-                MarkdownMathFormatter.replacingInlineMath(in: content),
-                "Layout diverged from the legacy pass for \(content.debugDescription)"
+                MarkdownMathFormatter.inlineMathImages(in: content),
+                "Layout diverged from the inline-image pass for \(content.debugDescription)"
             )
         }
 
@@ -175,7 +175,7 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
             }
             XCTAssertEqual(
                 layout,
-                MarkdownMathFormatter.replacingInlineMath(in: input),
+                MarkdownMathFormatter.inlineMathImages(in: input),
                 "Empty display-math delimiters were dropped for \(input.debugDescription)"
             )
         }

@@ -9,7 +9,7 @@ enum MarkdownMathSegment: Equatable {
 ///
 /// `plain` is the overwhelmingly common case (an answer with no display math).
 /// Its payload has **already** been through
-/// `MarkdownMathFormatter.replacingInlineMath(in:)`, so callers must not run
+/// `MarkdownMathFormatter.inlineMathImages(in:)`, so callers must not run
 /// that pass again — doing so scans the whole string a second time for no
 /// change in output.
 enum MarkdownMathLayout: Equatable {
@@ -25,7 +25,7 @@ struct MarkdownMathSegmenter {
         }
         let characters = Array(content)
         guard characters.count >= 4 else {
-            return [.markdown(MarkdownMathFormatter.replacingInlineMath(in: content))]
+            return [.markdown(MarkdownMathFormatter.inlineMathImages(in: content))]
         }
 
         let protected = MarkdownMathProtection.mask(for: characters)
@@ -54,7 +54,7 @@ struct MarkdownMathSegmenter {
         }
 
         appendMarkdown(String(characters[cursor...]), to: &segments)
-        return segments.isEmpty ? [.markdown(MarkdownMathFormatter.replacingInlineMath(in: content))] : segments
+        return segments.isEmpty ? [.markdown(MarkdownMathFormatter.inlineMathImages(in: content))] : segments
     }
 
     private static func closingDisplayDelimiter(
@@ -88,7 +88,7 @@ struct MarkdownMathSegmenter {
         _ markdown: String,
         to segments: inout [MarkdownMathSegment]
     ) {
-        let rendered = MarkdownMathFormatter.replacingInlineMath(in: markdown)
+        let rendered = MarkdownMathFormatter.inlineMathImages(in: markdown)
         guard !rendered.isEmpty else { return }
         segments.append(.markdown(rendered))
     }
@@ -311,7 +311,7 @@ extension [MarkdownMathSegment] {
 ///
 /// **Why this exists.** `segments(in:)` walks the whole string twice (once to
 /// build the protection mask, once to scan) and the no-math branch then ran
-/// `replacingInlineMath` over the whole string *again*. Measured on this repo's
+/// `inlineMathImages` over the whole string *again*. Measured on this repo's
 /// sources with `-O`, an 8 KB assistant answer cost ~7.5 ms per call. SwiftUI
 /// re-evaluates a body for reasons unrelated to the text — a sibling fold
 /// toggling, a scroll-position flip, a `@AppStorage` write — so that cost was
@@ -358,7 +358,7 @@ enum MarkdownMathLayoutCache {
     /// Streaming text changes on nearly every token, so caching it would insert
     /// a new entry per token and evict the settled answers the cache exists to
     /// protect. Callers on the streaming path still get the single-pass benefit
-    /// (no redundant second `replacingInlineMath` walk) without the churn.
+    /// (no redundant second `inlineMathImages` walk) without the churn.
     static func uncachedLayout(for content: String) -> MarkdownMathLayout {
         computeLayout(for: content)
     }
@@ -389,7 +389,7 @@ enum MarkdownMathLayoutCache {
             // display delimiters at all -- the overwhelmingly common case --
             // takes the fast path untouched.
             guard !containsDisplayDelimiter(content) else {
-                return .plain(MarkdownMathFormatter.replacingInlineMath(in: content))
+                return .plain(MarkdownMathFormatter.inlineMathImages(in: content))
             }
 
             let joined = segments.compactMap { segment -> String? in

@@ -163,20 +163,38 @@ final class ResponseGlyphGeometry: @unchecked Sendable {
     }
 }
 
+/// Attachments occupy a Text character index but no selectable source character.
+struct ResponseSelectionImageAttribute: TextAttribute {}
+
 private struct ResponseSelectionRenderer: TextRenderer {
     let geometry: ResponseGlyphGeometry
 
     func draw(layout: Text.Layout, in context: inout GraphicsContext) {
         let indices = layout.flatMap { $0.flatMap { $0.characterIndices } }
         guard let start = indices.min() else { return }
+        let imageOffsets = layout.flatMap { line in
+            line.filter { $0[ResponseSelectionImageAttribute.self] != nil }
+                .flatMap { $0.characterIndices }
+        }.map { start.distance(to: $0) }.sorted()
+        func selectableOffset(_ raw: Int) -> Int {
+            var lower = 0
+            var upper = imageOffsets.count
+            while lower < upper {
+                let middle = (lower + upper) / 2
+                if imageOffsets[middle] < raw { lower = middle + 1 } else { upper = middle }
+            }
+            return raw - lower
+        }
         var glyphs: [ResponseSelectionGlyph] = []
         for line in layout {
             context.draw(line)
-            for run in line {
+            for run in line where run[ResponseSelectionImageAttribute.self] == nil {
                 for slice in run {
                     guard let lower = slice.characterIndices.min(), let upper = slice.characterIndices.max() else { continue }
+                    let location = selectableOffset(start.distance(to: lower))
+                    let end = selectableOffset(start.distance(to: upper) + 1)
                     glyphs.append(ResponseSelectionGlyph(
-                        range: NSRange(location: start.distance(to: lower), length: lower.distance(to: upper) + 1),
+                        range: NSRange(location: location, length: end - location),
                         rect: slice.typographicBounds.rect,
                         rightToLeft: run.layoutDirection == .rightToLeft
                     ))

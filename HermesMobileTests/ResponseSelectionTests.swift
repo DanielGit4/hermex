@@ -55,6 +55,7 @@ final class ResponseSelectionTests: XCTestCase {
     }
 
     func testRealMarkdownRegistersHeadingsListsCodeAndTableButNotEquations() async throws {
+        _ = try await InlineMathImageCache.shared.image(latex: "M_S", fontSize: 16, dark: false, scale: 3)
         let markdown = """
         # Heading
 
@@ -69,6 +70,8 @@ final class ResponseSelectionTests: XCTestCase {
 
         $$x^2$$
 
+        Inline $M_S$ after.
+
         | Column | Value |
         | --- | --- |
         | Row | Cell |
@@ -82,9 +85,10 @@ final class ResponseSelectionTests: XCTestCase {
         window.makeKeyAndVisible()
         defer { window.isHidden = true }
         await render(window)
+        await render(window)
         controller.input.selectAll(nil)
         let text = try XCTUnwrap(controller.input.text(in: XCTUnwrap(controller.input.selectedTextRange)))
-        for expected in ["Heading", "First paragraph with a link.", "List entry", "Another entry", "let value = 1", "Column", "Value", "Row", "Cell"] {
+        for expected in ["Heading", "First paragraph with a link.", "List entry", "Another entry", "let value = 1", "Column", "Value", "Row", "Cell", "Inline  after."] {
             XCTAssertTrue(text.contains(expected), "Missing \(expected) in \(text)")
         }
         XCTAssertTrue(text.contains("Column\tValue\nRow\tCell\n\n"), text)
@@ -255,5 +259,127 @@ private func render(_ window: UIWindow) async {
     window.layoutIfNeeded()
     _ = UIGraphicsImageRenderer(bounds: window.bounds).image { _ in
         window.drawHierarchy(in: window.bounds, afterScreenUpdates: true)
+    }
+}
+
+extension ResponseSelectionTests {
+    func testInlineMathBaselineAndSelectionLeaveAnImageGap() async throws {
+        let result = try await InlineMathTextRequest(
+            markdown: MarkdownMathFormatter.inlineMathImages(in: "A $M_S$ Z"),
+            fontSize: 16, dark: false, scale: 3
+        ).render()
+        let controller = ResponseSelectionController()
+        controller.loadViewIfNeeded()
+        controller.host.rootView = AnyView(result.text.font(.system(size: 16))
+            .responseSelectableText(result.selectableText)
+            .responseSelectionDocument(controller.scope))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 200))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        await render(window)
+        controller.input.selectAll(nil)
+        let range = try XCTUnwrap(controller.input.selectedTextRange)
+        XCTAssertEqual(controller.input.text(in: range), "A  Z\n")
+        let leaf = try XCTUnwrap(controller.input.leaves.allObjects.first)
+        let glyphs = try XCTUnwrap(leaf.geometry).glyphs
+        XCTAssertEqual(glyphs.map { NSMaxRange($0.range) }.max(), 4, "Images must not shift subsequent selectable character offsets")
+        let a = try XCTUnwrap(glyphs.first { $0.range.location == 0 })
+        let z = try XCTUnwrap(glyphs.first { $0.range.location == 3 })
+        XCTAssertEqual(a.rect.minY, z.rect.minY, accuracy: 0.5, "Text on either side shares a baseline")
+        XCTAssertGreaterThan(z.rect.minX - a.rect.maxX, 15, "Equation occupies a non-selectable inline gap")
+    }
+
+    func testInlineMathWrapsAtLargeTypeWithoutChangingSelection() async throws {
+        let result = try await InlineMathTextRequest(
+            markdown: MarkdownMathFormatter.inlineMathImages(in: "Before $M_I = M_S^*$ after and more words."),
+            fontSize: 32, dark: true, scale: 3
+        ).render()
+        let controller = ResponseSelectionController()
+        controller.loadViewIfNeeded()
+        controller.host.rootView = AnyView(result.text.font(.system(size: 32))
+            .frame(width: 220, alignment: .leading)
+            .responseSelectableText(result.selectableText)
+            .responseSelectionDocument(controller.scope))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 220, height: 500))
+        window.rootViewController = controller
+        window.makeKeyAndVisible()
+        defer { window.isHidden = true }
+        await render(window)
+        controller.input.selectAll(nil)
+        XCTAssertEqual(controller.input.text(in: try XCTUnwrap(controller.input.selectedTextRange)), "Before  after and more words.\n")
+        let glyphs = try XCTUnwrap(controller.input.leaves.allObjects.first?.geometry).glyphs
+        XCTAssertGreaterThan(Set(glyphs.map { Int($0.rect.minY.rounded()) }).count, 1, "Large text must wrap")
+        XCTAssertEqual(glyphs.map { NSMaxRange($0.range) }.max(), result.selectableText.utf16.count)
+    }
+}
+
+/// Comparative benchmark: report medians, never assert noisy wall-clock budgets.
+/// This same test is run against baseline and final production sources.
+@MainActor
+final class MathTranscriptPerformanceTests: XCTestCase {
+    func testRepresentativeTranscriptsAndIncrementalScroll() async throws {
+        var results: [String: [Double]] = [:]
+        for mode in ["math-free", "math-heavy", "long-stream"] {
+            for sample in 0..<7 {
+                let model = MathTranscriptBenchmarkModel()
+                let paragraph = mode == "math-free"
+                    ? "A normal response with **bold text**, a list and some ordinary prose.\n\n"
+                    : #"The map $M_S$ keeps $K$ rows and $M_I = M_S^*$ restores them. Compare $(4,-2)$ and $(4,4)$."# + "\n\n"
+                model.rows = (0..<20).map { "Response \($0).\n\n" + String(repeating: paragraph, count: 5) }
+                model.tail = String(repeating: paragraph, count: mode == "long-stream" ? 60 : 2)
+                let host = UIHostingController(rootView: MathTranscriptBenchmarkView(model: model))
+                let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+                let window = UIWindow(windowScene: scene)
+                window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+                window.rootViewController = host
+                window.makeKeyAndVisible()
+                await render(window)
+                await render(window)
+                let scroll = try XCTUnwrap(findScroll(host.view))
+                XCTAssertGreaterThan(scroll.contentSize.height, 844)
+                let start = CACurrentMediaTime()
+                for step in 0..<12 {
+                    model.tail += step.isMultiple(of: 3) ? paragraph : " next"
+                    scroll.setContentOffset(CGPoint(x: 0, y: step.isMultiple(of: 2) ? 0 : max(0, scroll.contentSize.height - 844)), animated: false)
+                    await render(window)
+                    await render(window)
+                }
+                let elapsed = (CACurrentMediaTime() - start) * 1000
+                if sample >= 2 { results[mode, default: []].append(elapsed) }
+                window.isHidden = true
+                window.rootViewController = nil
+            }
+        }
+        for mode in results.keys.sorted() {
+            let samples = results[mode]!.sorted()
+            print("MATH_TRANSCRIPT_BENCH \(mode) median_ms=\(samples[2]) samples=\(samples)")
+        }
+    }
+
+    private func findScroll(_ view: UIView) -> UIScrollView? {
+        (view as? UIScrollView) ?? view.subviews.lazy.compactMap(findScroll).first
+    }
+}
+
+@MainActor @Observable
+private final class MathTranscriptBenchmarkModel {
+    var rows: [String] = []
+    var tail = ""
+}
+
+private struct MathTranscriptBenchmarkView: View {
+    let model: MathTranscriptBenchmarkModel
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading) {
+                ForEach(model.rows.indices, id: \.self) { index in
+                    MarkdownRenderer(content: model.rows[index])
+                }
+                MarkdownRenderer(content: model.tail, isStreaming: true)
+            }
+            .padding(12)
+        }
+        .environment(\.allowsStreamedTextAnimation, false)
     }
 }
