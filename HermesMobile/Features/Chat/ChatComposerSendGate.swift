@@ -99,3 +99,36 @@ struct ChatComposerSendHold {
         return false
     }
 }
+
+/// Device-local presentation choices shared by Sessions servers, never Bot Chat.
+enum SessionChatPreferences {
+    static let dismissKeyboardKey = "sessionChat.dismissKeyboardAfterSend"
+    static let completionPositionKey = "sessionChat.completionPosition"
+
+    enum CompletionPosition: String, CaseIterable {
+        case latest
+        case beginning
+
+        static func storedValue(_ rawValue: String) -> Self {
+            Self(rawValue: rawValue) ?? .latest
+        }
+
+        var title: String {
+            switch self {
+            case .latest: String(localized: "Keep at latest content")
+            case .beginning: String(localized: "Show beginning of completed response")
+            }
+        }
+    }
+}
+
+/// An asynchronous send must not overwrite a newer editing session or draft.
+enum ChatSendFocusPolicy {
+    static func focusAfterSubmission(
+        succeeded: Bool, dismissKeyboard: Bool, wasFocused: Bool,
+        submittedRevision: Int, currentRevision: Int, hasNewDraft: Bool
+    ) -> Bool? {
+        guard succeeded, submittedRevision == currentRevision, !hasNewDraft else { return nil }
+        return dismissKeyboard ? false : wasFocused
+    }
+}

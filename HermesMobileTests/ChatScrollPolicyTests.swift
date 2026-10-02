@@ -3,6 +3,78 @@ import XCTest
 @testable import HermesMobile
 
 final class ChatScrollPolicyTests: XCTestCase {
+    func testCompletionJumpRemembersReaderTakeoverAfterFollowingRearms() {
+        var run = ChatCompletionScrollPolicy()
+        run.begin(streamID: "run", isFollowing: true)
+        run.observe(.userScrollBegin)
+        run.observe(.reset)
+        XCTAssertFalse(run.consumeCompletion(streamID: "run", enabled: true))
+    }
+
+    func testBackgroundCompletionWaitsForActiveSceneAndStillHonorsReaderOwnership() {
+        var run = ChatCompletionScrollPolicy()
+        run.begin(streamID: "background", isFollowing: true)
+        XCTAssertFalse(run.consumeCompletion(streamID: "background", enabled: true, sceneIsActive: false))
+        XCTAssertTrue(run.consumeCompletion(streamID: "background", enabled: true, sceneIsActive: true))
+        XCTAssertFalse(run.consumeCompletion(streamID: "background", enabled: true, sceneIsActive: true))
+
+        run.begin(streamID: "reading", isFollowing: true)
+        XCTAssertFalse(run.consumeCompletion(streamID: "reading", enabled: true, sceneIsActive: false))
+        run.readerDidInteract()
+        XCTAssertFalse(run.consumeCompletion(streamID: "reading", enabled: true, sceneIsActive: true))
+    }
+
+    func testCompletionJumpConsumesOnlyOwnedRunOnce() {
+        var run = ChatCompletionScrollPolicy()
+        run.begin(streamID: "run", isFollowing: true)
+        XCTAssertFalse(run.consumeCompletion(streamID: "stale", enabled: true))
+        XCTAssertTrue(run.consumeCompletion(streamID: "run", enabled: true))
+        XCTAssertFalse(run.consumeCompletion(streamID: "run", enabled: true))
+    }
+
+    func testCompletionDefaultAndReaderAlreadyAboveDoNotJump() {
+        var run = ChatCompletionScrollPolicy()
+        run.begin(streamID: "default", isFollowing: true)
+        XCTAssertFalse(run.consumeCompletion(streamID: "default", enabled: false))
+        run.begin(streamID: "reading", isFollowing: false)
+        XCTAssertFalse(run.consumeCompletion(streamID: "reading", enabled: true))
+    }
+
+    func testReattachmentCannotEraseReaderOwnershipAndNewRunReplacesPendingCompletion() {
+        var run = ChatCompletionScrollPolicy()
+        run.begin(streamID: "run", isFollowing: true)
+        run.observe(.contentScrolled(isAtBottom: false, isUserScrolling: false, movedAwayFromBottom: true))
+        run.begin(streamID: "run", isFollowing: true)
+        XCTAssertFalse(run.consumeCompletion(streamID: "run", enabled: true))
+        run.begin(streamID: "next", isFollowing: true)
+        XCTAssertFalse(run.consumeCompletion(streamID: "run", enabled: true))
+        XCTAssertTrue(run.consumeCompletion(streamID: "next", enabled: true))
+    }
+
+    func testDisclosureDuringHydrationPreventsCompletionJump() {
+        var run = ChatCompletionScrollPolicy()
+        run.begin(streamID: "run", isFollowing: true)
+        run.readerDidInteract()
+        XCTAssertFalse(run.consumeCompletion(streamID: "run", enabled: true))
+    }
+
+    func testCompletionTargetsStableFinalRowAndNeverPriorOrInterimReply() {
+        func row(_ index: Int, _ role: String, _ renderID: String) -> TranscriptMessage {
+            TranscriptMessage(loadedIndex: index, renderID: renderID, anchorID: "anchor-\(index)",
+                              message: ChatMessage(role: role, content: "body", timestamp: nil, messageId: "server-\(index)"))
+        }
+        let prior = row(0, "assistant", "prior")
+        let user = row(1, "user", "user")
+        let interim = row(2, "assistant", "interim")
+        let final = row(3, "assistant", "stable-final")
+        XCTAssertNil(ChatCompletionScrollPolicy.finalResponseRenderID(
+            in: [prior, user, interim], terminalReplyRenderIDs: ["prior"]
+        ))
+        XCTAssertEqual(ChatCompletionScrollPolicy.finalResponseRenderID(
+            in: [prior, user, interim, final], terminalReplyRenderIDs: ["prior", "stable-final"]
+        ), "stable-final")
+    }
+
     func testExistingTranscriptUsesBottomAsItsInitialLayoutAnchor() {
         XCTAssertEqual(ChatScrollPolicy.initialTranscriptAnchor, .bottom)
     }

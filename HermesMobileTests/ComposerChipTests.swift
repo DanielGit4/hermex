@@ -855,6 +855,56 @@ final class ComposerFocusTransitionTests: XCTestCase {
         }
     }
 
+    func testHostedSuccessfulSendDismissesButFailureAndNewerFocusKeepEditing() throws {
+        for (success, revision, expectedFocus) in [(true, 1, false), (false, 1, true), (true, 2, true)] {
+            let state = ComposerPresentationHarnessState()
+            let host = UIHostingController(rootView: ComposerPresentationHarness(state: state, updateRevision: 0))
+            let window = try show(host)
+            defer { cleanUp(window) }
+            let editor = try XCTUnwrap(findEditor(in: host.view))
+            XCTAssertTrue(editor.becomeFirstResponder())
+            let draft = state.text
+            if let focus = ChatSendFocusPolicy.focusAfterSubmission(
+                succeeded: success, dismissKeyboard: true, wasFocused: true,
+                submittedRevision: 1, currentRevision: revision, hasNewDraft: false
+            ) { state.isFocused = focus }
+            host.rootView = ComposerPresentationHarness(state: state, updateRevision: 1)
+            host.view.layoutIfNeeded()
+            let settled = expectation(description: "queued focus update")
+            Task { @MainActor in
+                await Task.yield()
+                settled.fulfill()
+            }
+            wait(for: [settled], timeout: 5)
+            XCTAssertEqual(editor.isFirstResponder, expectedFocus)
+            XCTAssertEqual(state.text, draft)
+        }
+    }
+
+    func testHostedQueuedSendBlurCannotDismissNewerEditingSession() throws {
+        let state = ComposerPresentationHarnessState()
+        let host = UIHostingController(rootView: ComposerPresentationHarness(state: state, updateRevision: 0))
+        let window = try show(host)
+        defer { cleanUp(window) }
+        let editor = try XCTUnwrap(findEditor(in: host.view))
+        XCTAssertTrue(editor.becomeFirstResponder())
+        state.isFocused = false
+        host.rootView = ComposerPresentationHarness(state: state, updateRevision: 1)
+        host.view.layoutIfNeeded()
+        // A real new editing session lands before the representable's queued blur.
+        XCTAssertTrue(editor.resignFirstResponder())
+        state.isFocused = true
+        XCTAssertTrue(editor.becomeFirstResponder())
+        let settled = expectation(description: "queued blur rechecks focus")
+        Task { @MainActor in
+            await Task.yield()
+            settled.fulfill()
+        }
+        wait(for: [settled], timeout: 5)
+        XCTAssertTrue(editor.isFirstResponder)
+        XCTAssertTrue(state.isFocused)
+    }
+
     func testFocusDuringAPopWaitsUntilTheTransitionFinishes() throws {
         let textView = ComposerChipTextView(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
         try withPopTransition(content: textView) { _ in

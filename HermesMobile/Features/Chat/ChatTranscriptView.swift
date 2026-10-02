@@ -61,6 +61,7 @@ struct ChatTranscriptView: View {
     /// calls it, so a bump re-runs that leaf rather than this view and its owner.
     let streamingScrollTrigger: () -> Int
     let transcriptRelayoutScrollToken: Int
+    let completedResponseRenderID: String?
     let bottomAnchorID: String
     let transcriptSpacing: CGFloat
     let transcriptBottomInsetHeight: CGFloat
@@ -219,6 +220,16 @@ struct ChatTranscriptView: View {
                             releasingHold { onScrollToLatestContent(proxy, true) }
                         }
                     }
+                }
+                .task(id: completedResponseRenderID) {
+                    guard let renderID = completedResponseRenderID else { return }
+                    // Let hydration's layout/pin pass settle before moving the
+                    // viewport. A new run or reader action cancels this task.
+                    await Task.yield()
+                    guard !Task.isCancelled else { return }
+                    // No animation or accessibility-focus move: only the viewport
+                    // changes, and Reduce Motion is respected automatically.
+                    releasingHold { proxy.scrollTo(renderID, anchor: .top) }
                 }
                 .onChange(of: messages.count) {
                     guard isFollowingLatestContent else { return }

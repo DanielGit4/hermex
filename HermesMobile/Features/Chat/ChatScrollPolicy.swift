@@ -320,3 +320,51 @@ enum ChatInitialAppearancePolicy {
         hasCompletedAppearance
     }
 }
+
+/// A run keeps reader ownership even after an explicit latest/send re-arms follow.
+/// Only an owned successful completion can consume this one-shot permission.
+struct ChatCompletionScrollPolicy {
+    /// Use the final visible row of the current turn, never an older reply or
+    /// an interim bubble. Render identity remains stable through hydration.
+    static func finalResponseRenderID(
+        in messages: [TranscriptMessage], terminalReplyRenderIDs: Set<String>
+    ) -> String? {
+        let lastUserIndex = messages.last(where: {
+            $0.message.role == "user" && !$0.message.isSteerMessage
+        })?.loadedIndex ?? -1
+        return messages.last(where: {
+            $0.loadedIndex > lastUserIndex && $0.message.role == "assistant"
+                && terminalReplyRenderIDs.contains($0.renderID)
+        })?.renderID
+    }
+
+    private var streamID: String?
+    private var readerTookOwnership = false
+    private var consumed = false
+
+    mutating func begin(streamID: String, isFollowing: Bool) {
+        guard self.streamID != streamID else { return }
+        self.streamID = streamID
+        readerTookOwnership = !isFollowing
+        consumed = false
+    }
+
+    mutating func observe(_ event: ChatScrollPolicy.FollowEvent) {
+        switch event {
+        case .userScrollBegin:
+            readerTookOwnership = true
+        case .contentScrolled(_, let isUserScrolling, let movedAway, _):
+            if isUserScrolling || movedAway { readerTookOwnership = true }
+        default:
+            break
+        }
+    }
+
+    mutating func readerDidInteract() { readerTookOwnership = true }
+
+    mutating func consumeCompletion(streamID: String, enabled: Bool, sceneIsActive: Bool = true) -> Bool {
+        guard sceneIsActive, self.streamID == streamID, !consumed else { return false }
+        consumed = true
+        return enabled && !readerTookOwnership
+    }
+}

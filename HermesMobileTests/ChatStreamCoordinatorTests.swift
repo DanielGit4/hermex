@@ -987,12 +987,24 @@ final class ChatStreamCoordinatorTests: APIClientTestCase {
             return apiTestJSONResponse(#"{"active": false, "stream_id": "stream-123"}"#, for: request)
         }
 
+        delegate.onLoadMessages = {
+            let preparation = coordinator.prepareForSessionLoad()
+            coordinator.reconcileSessionLoad(
+                loadedActiveStreamID: nil,
+                preparation: preparation,
+                usedCacheFallback: false
+            )
+            XCTAssertNil(coordinator.activeStreamID)
+        }
+
         coordinator.start(streamID: "stream-123")
         coordinator.suspendActiveStreamConnection()
 
         await coordinator.reconnectIfNeeded()
 
         XCTAssertNil(coordinator.activeStreamID)
+        XCTAssertEqual(coordinator.successfulResponseCompletion?.streamID, "stream-123")
+        XCTAssertEqual(coordinator.successfulResponseCompletion?.needsTranscriptRefresh, false)
         XCTAssertEqual(delegate.loadMessagesCount, 1)
         XCTAssertEqual(delegate.completedNeedsTranscriptRefreshValues, [false])
         XCTAssertEqual(liveActivityManager.ends.last?.status, .complete)
@@ -1866,6 +1878,26 @@ final class ChatStreamCoordinatorTests: APIClientTestCase {
         XCTAssertNil(coordinator.activeStreamID)
         XCTAssertNil(coordinator.liveTokensPerSecond)
         XCTAssertEqual(liveActivityManager.ends.last?.status, .cancelled)
+    }
+
+    @MainActor
+    func testSuccessfulCompletionRetainsOwnerAndHydrationAcrossDuplicateDoneAndTeardown() {
+        let streamClient = CoordinatorSpySSEStreamingClient()
+        let delegate = CoordinatorDelegateSpy()
+        let coordinator = makeCoordinator(streamClient: streamClient, delegate: delegate)
+        coordinator.start(streamID: "owned-run")
+        XCTAssertNil(coordinator.successfulResponseCompletion)
+        streamClient.emit(.done(DoneStreamEvent()))
+        XCTAssertEqual(coordinator.successfulResponseCompletion?.streamID, "owned-run")
+        XCTAssertEqual(coordinator.successfulResponseCompletion?.needsTranscriptRefresh, true)
+        streamClient.emit(.done(DoneStreamEvent()))
+        streamClient.emit(.streamEnd)
+        XCTAssertEqual(coordinator.successfulResponseCompletion?.streamID, "owned-run")
+        XCTAssertEqual(coordinator.successfulResponseCompletion?.needsTranscriptRefresh, true)
+        coordinator.start(streamID: "new-run")
+        XCTAssertNil(coordinator.successfulResponseCompletion)
+        streamClient.emit(.error("failed"))
+        XCTAssertNil(coordinator.successfulResponseCompletion)
     }
 
     @MainActor

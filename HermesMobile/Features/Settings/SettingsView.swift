@@ -80,6 +80,8 @@ struct SettingsView: View {
     @AppStorage(SessionRowDisplaySettings.showSubagentSessionsKey)
     private var showsSubagentSessions = SessionRowDisplaySettings.defaultShowsSubagentSessions
     @State private var cliSessionsSync: CliSessionsSyncModel
+    @AppStorage(SessionChatPreferences.dismissKeyboardKey) private var dismissKeyboardAfterSend = false
+    @AppStorage(SessionChatPreferences.completionPositionKey) private var completionPositionRawValue = SessionChatPreferences.CompletionPosition.latest.rawValue
     @AppStorage(StreamingSendBehavior.storageKey) private var streamingSendBehaviorRawValue = StreamingSendBehavior.steer.rawValue
     @AppStorage(ComposerSTTProviderPreference.storageKey) private var sttProviderPreferenceRawValue = ComposerSTTProviderPreference.defaultValue.rawValue
     @AppStorage(ChatTranscriptDisplaySettings.showsThinkingAndToolCardsKey) private var showsThinkingAndToolCards = true
@@ -275,6 +277,24 @@ struct SettingsView: View {
                 }
 
                 SettingsCard(title: String(localized: "Chat")) {
+                    SettingsToggleRow(
+                        title: String(localized: "Dismiss keyboard after sending"),
+                        systemImage: "keyboard.chevron.compact.down",
+                        isOn: $dismissKeyboardAfterSend
+                    )
+                    SettingsDivider()
+                    SettingsPickerRow(
+                        title: String(localized: "Position after response completes"),
+                        systemImage: "text.alignleft",
+                        selection: $completionPositionRawValue
+                    ) {
+                        ForEach(SessionChatPreferences.CompletionPosition.allCases, id: \.rawValue) { position in
+                            Text(position.title).tag(position.rawValue)
+                        }
+                    }
+                    SettingsFootnote(String(localized: "Applies to Sessions on this device."))
+                    SettingsDivider()
+
                     SettingsToggleRow(
                         title: String(localized: "Thinking and Tool Cards"),
                         systemImage: "brain.head.profile",

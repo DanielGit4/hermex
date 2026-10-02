@@ -234,6 +234,9 @@ final class ChatViewModel {
     private(set) var isCancellingStream = false
     private(set) var isViewingCachedData = false
     var activeStreamID: String? { streamCoordinator.activeStreamID }
+    var successfulResponseCompletion: ChatStreamCoordinator.SuccessfulResponseCompletion? {
+        streamCoordinator.successfulResponseCompletion
+    }
     var activeRunStartedAt: Date? { streamCoordinator.activeRunStartedAt }
     /// How the latest run ended, keyed to the turn it answered. Drives the
     /// settled-turn fold label and which turns start expanded.
