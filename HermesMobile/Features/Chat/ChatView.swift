@@ -261,6 +261,7 @@ struct ChatView: View {
     private let composerMaximumWidth = ChatReadingWidth.maximumWidth(horizontalPadding: 16)
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Environment(\.scenePhase) private var scenePhase
@@ -794,6 +795,7 @@ struct ChatView: View {
         }
         .navigationTitle(displayTitle)
         .navigationBarTitleDisplayMode(.inline)
+        .modifier(ChatNavigationBackground(reduceTransparency: reduceTransparency))
         .accessibilityIdentifier("chat-detail:\(viewModel.displayTitle)")
         .pushPresence(viewModel.pushPresence)
     }
@@ -3510,5 +3512,24 @@ private struct ChatDraftSyncModifier: ViewModifier {
             .onChange(of: composerSettings) { _, newSettings in
                 onSettingsChange(newSettings)
             }
+    }
+}
+
+/// Owns the Sessions navigation background independently of the nested transcript's
+/// scroll-edge detection. UIKit extends this native background through the status bar.
+struct ChatNavigationBackground: ViewModifier {
+    let reduceTransparency: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .toolbarBackground(backgroundStyle, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
+    }
+
+    private var backgroundStyle: AnyShapeStyle {
+        if #available(iOS 26, *), !reduceTransparency {
+            return AnyShapeStyle(.regularMaterial)
+        }
+        return AnyShapeStyle(Color(uiColor: .systemBackground))
     }
 }
