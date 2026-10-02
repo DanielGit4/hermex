@@ -34,6 +34,40 @@ import XCTest
         XCTAssertTrue(BotMessageActions.items(copyText: "  \n ", isHapticsEnabled: false, copy: { _ in }).isEmpty)
     }
 
+    func testSettledReplyFooterCopiesOriginalMarkdownWithoutAHostRowID() throws {
+        let markdown = "  **Reply**\n\n```swift\nlet value = 1\n```\n"
+        var copied: [String] = []
+        let action = try XCTUnwrap(BotMessageActions.footerCopy(
+            message: ChatMessage(role: "assistant", content: markdown, timestamp: nil, messageId: nil), isLive: false,
+            isHapticsEnabled: false, copy: { copied.append($0) }
+        ))
+
+        action()
+
+        XCTAssertEqual(copied, [markdown])
+    }
+
+    func testFooterCopyExcludesPromptsLiveRepliesDelegationAndEmptyText() {
+        let excluded: [(ChatMessage, Bool)] = [
+            (ChatMessage(role: "user", content: "Prompt", timestamp: nil, messageId: nil), false),
+            (ChatMessage(role: "assistant", content: "Streaming", timestamp: nil, messageId: nil), true),
+            (ChatMessage(role: "delegation_completion", content: "Result", timestamp: nil, messageId: nil), false),
+            (ChatMessage(role: "assistant", content: "Delegated result", timestamp: nil, messageId: nil, displayKind: BotDelegationCompletion.displayKind), false),
+            (ChatMessage(role: "tool", content: "Tool result", timestamp: nil, messageId: nil), false),
+            (ChatMessage(role: "assistant", content: nil, timestamp: nil, messageId: nil), false),
+            (ChatMessage(role: "assistant", content: "", timestamp: nil, messageId: nil), false),
+            (ChatMessage(role: "assistant", content: "  \n\t", timestamp: nil, messageId: nil), false)
+        ]
+        var copied: [String] = []
+        for (message, isLive) in excluded {
+            let action = BotMessageActions.footerCopy(message: message, isLive: isLive,
+                                                     isHapticsEnabled: false, copy: { copied.append($0) })
+            XCTAssertNil(action, "No footer Copy for \(message.role), live=\(isLive), text=\(message.content.debugDescription)")
+            action?()
+        }
+        XCTAssertEqual(copied, [])
+    }
+
     // MARK: - Tapbacks
 
     func testPromptMenuOffersTheTapbackRowAboveCopyAndNoRemoveWithoutAReaction() throws {

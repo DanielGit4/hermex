@@ -13,7 +13,7 @@ struct BotArtifactMessageView: View {
     var isLive = false
     /// The time for the reply footer, set only on settled user messages and
     /// turn-ending replies (`BotTranscriptTimes`). The footer still draws
-    /// without one when the row has reactions to show or offer.
+    /// without one when the row has Copy or reactions to show or offer.
     var footerTime: Double? = nil
     /// BotChatView's `transcriptLinks` router, which opens every link this row
     /// does not own.
@@ -28,7 +28,8 @@ struct BotArtifactMessageView: View {
             content
             // Outside ResponseTextSelection, so the footer never joins a selection.
             if !isLive {
-                BotReplyFooter(isUserMessage: message.role == "user", timestamp: footerTime, reactions: reactions)
+                BotReplyFooter(isUserMessage: message.role == "user", timestamp: footerTime,
+                               reactions: reactions, onCopy: footerCopy)
             }
         }
     }
@@ -99,7 +100,12 @@ struct BotArtifactMessageView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .chatMessageContextMenu(actions, longPress: isLive)
+        // The footer button is the settled reply's sole VoiceOver Copy control.
+        .chatMessageContextMenu(footerCopy == nil ? actions : [], longPress: isLive)
+    }
+
+    private var footerCopy: (() -> Void)? {
+        BotMessageActions.footerCopy(message: message, isLive: isLive, isHapticsEnabled: isHapticsEnabled)
     }
 
     private var actions: [ChatMessageActionItem] {
@@ -143,25 +149,26 @@ struct BotArtifactMessageView: View {
 }
 
 /// The one row under a settled Bot message, built on the Sessions meta row:
-/// replies read `[… → React][chips][time]`, prompts `[chips][time]`. Rooms
-/// pass no reactions and get the time only. Takes the raw timestamp so a
+/// replies read `[… → React][Copy][chips][time]`, prompts `[chips][time]`. Rooms
+/// pass no reactions or Copy and get the time only. Takes the raw timestamp so a
 /// streaming snapshot never re-formats a settled row, and follows Settings →
 /// Chat → Message Timestamps like Sessions.
 struct BotReplyFooter: View {
     let isUserMessage: Bool
     let timestamp: Double?
     var reactions: BotReplyReactions? = nil
+    var onCopy: (() -> Void)? = nil
 
     @AppStorage(ChatTranscriptDisplaySettings.showsAssistantTurnTimestampsKey)
     private var showsTimestamps = ChatTranscriptDisplaySettings.defaultShowsTimestamps
 
     var body: some View {
         let time = showsTimestamps ? ChatMessageTimestampFormatter.shortTime(forUnixTimestamp: timestamp) : nil
-        if time != nil || reactions?.drawsSomething == true {
+        if time != nil || onCopy != nil || reactions?.drawsSomething == true {
             ChatMessageMetaRow(isUserMessage: isUserMessage, timeText: time, onCopy: nil) {
-                if let reactions {
-                    BotReactionControls(content: reactions)
-                }
+                // Bot order differs from Sessions: keep Copy inside the accessory,
+                // between the React menu and chips, without changing the shared row.
+                BotReactionControls(content: reactions, onCopy: onCopy)
             }
         }
     }
@@ -188,11 +195,12 @@ struct BotReplyReactions {
 /// The footer's "…" menu with Desktop's six Tapbacks as one inline row, then
 /// a chip per reaction: yours removes it, the Bot's is static.
 private struct BotReactionControls: View {
-    let content: BotReplyReactions
+    let content: BotReplyReactions?
+    let onCopy: (() -> Void)?
 
     var body: some View {
-        let isEnabled = content.isEnabled()
-        if content.offersPicker {
+        let isEnabled = content?.isEnabled() ?? false
+        if let content, content.offersPicker {
             Menu {
                 Section(String(localized: "React")) {
                     Picker(String(localized: "React"), selection: Binding(get: { content.mine }, set: content.react)) {
@@ -219,8 +227,14 @@ private struct BotReactionControls: View {
             .disabled(!isEnabled)
             .accessibilityLabel("More")
         }
-        ForEach(content.reactions, id: \.self) { reaction in
-            BotReactionChip(reaction: reaction, content: content, isEnabled: isEnabled)
+        if let onCopy {
+            ChatCopyButton(action: onCopy)
+                .foregroundStyle(.secondary)
+        }
+        if let content {
+            ForEach(content.reactions, id: \.self) { reaction in
+                BotReactionChip(reaction: reaction, content: content, isEnabled: isEnabled)
+            }
         }
     }
 }
