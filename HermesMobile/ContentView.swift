@@ -122,6 +122,7 @@ struct ContentView: View {
     }
 
     private func handleOpenURL(_ url: URL) {
+        Task { await AgentLiveActivityManager.shared.dismissFinishedActivity(from: url) }
         pendingWebuiPush = nil
         if let destination = WebuiPushDestination(url: url) {
             pendingBotDestination = nil

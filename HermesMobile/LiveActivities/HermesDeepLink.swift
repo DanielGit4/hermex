@@ -148,12 +148,31 @@ enum HermesDeepLink {
 
 /// Shared by the Lock Screen and Dynamic Island, and exercised by main-app tests.
 enum AgentRunTapTarget {
-    static func url(attributes: AgentRunActivityAttributes, sessionID: String) -> URL? {
-        if let bot = attributes.bot { return bot.destinationURL }
-        if let server = attributes.server {
-            return HermesDeepLink.webuiSessionURL(server: server, sessionID: sessionID)
+    static func url(attributes: AgentRunActivityAttributes, sessionID: String, activityID: String) -> URL? {
+        let destination: URL?
+        if let bot = attributes.bot {
+            destination = bot.destinationURL
+        } else if let server = attributes.server {
+            destination = HermesDeepLink.webuiSessionURL(server: server, sessionID: sessionID)
+        } else {
+            // Activities persisted before server ownership was recorded keep their old route.
+            destination = HermesDeepLink.sessionURL(sessionID: sessionID)
         }
-        // Activities persisted before server ownership was recorded keep their old route.
-        return HermesDeepLink.sessionURL(sessionID: sessionID)
+        guard let destination,
+              var components = URLComponents(url: destination, resolvingAgainstBaseURL: false) else { return nil }
+        var items = components.queryItems ?? []
+        items.removeAll { $0.name == "activity" }
+        items.append(URLQueryItem(name: "activity", value: activityID))
+        components.queryItems = items
+        return components.url
+    }
+
+    static func activityID(from url: URL) -> String? {
+        guard url.scheme?.lowercased() == HermesDeepLink.scheme,
+              [HermesDeepLink.sessionHost, HermesDeepLink.botHost, "webui-push"].contains(url.host?.lowercased() ?? "")
+        else { return nil }
+        let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .first(where: { $0.name == "activity" })?.value
+        return id?.isEmpty == false ? id : nil
     }
 }
