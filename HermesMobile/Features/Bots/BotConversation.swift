@@ -626,6 +626,7 @@ import OSLog
 
     private func recoverConnection() async {
         resetConnection()
+        attachments.activate()
         if hasRecentTranscript, historyCache?.recent.snapshot(for: recentKey) == nil {
             // Clear Offline Cache may have run after construction but before entry.
             messages = []; settledActivity = []; recentRoot = nil; hasRecentTranscript = false
@@ -635,16 +636,17 @@ import OSLog
         connectionState = .recovering
         errorMessage = nil; needsSignIn = false
         do {
+            await drafts.markUsed(draftKey)
+            let saved = await drafts.draft(for: draftKey)
+            try check(owner)
             if !hydrated {
-                let saved = await drafts.draft(for: draftKey)
-                try check(owner)
                 draft = saved?.text ?? ""
                 quotes = saved?.quotes ?? []
                 uncertainSend = saved?.botSubmissionUncertain ?? false
-                await attachments.restore(saved?.attachments ?? [])
-                try check(owner)
                 hydrated = true
             }
+            await attachments.restore(saved?.attachments ?? [])
+            try check(owner)
             // Recovered text and attachments are an ordinary editable draft.
             // Clearing this local marker never retries the earlier prompt.
             if uncertainSend { try await releasePromptMarker(owner: owner) }
@@ -1021,6 +1023,8 @@ import OSLog
     func submit(_ action: PromptAction) async {
         guard action == preparePrompt(action.mode) else { return }
         let owner = action.generation
+        let attachmentLease = attachments.protectOperation()
+        defer { withExtendedLifetime(attachmentLease) {} }
         let mentionNote = mentions.annotation(for: action.text)
         localOperation = true; submittingPrompt = action.mode
         errorMessage = nil
@@ -1100,6 +1104,7 @@ import OSLog
             try await drafts.flush()
             try check(owner)
             draft = ""; quotes = []; uncertainSend = false
+            attachmentLease.files = []
             await attachments.consumed()
             try check(owner)
             localOperation = false
@@ -1747,6 +1752,7 @@ import OSLog
     }
 
     func suspend() {
+        attachments.deactivate()
         rememberEnvelopeOnScreen()
         completionArmed = false
         saveRecentTranscript()

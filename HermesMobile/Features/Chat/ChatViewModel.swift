@@ -623,6 +623,7 @@ final class ChatViewModel {
         listenRemoteControlCenter: (any ListenRemoteControlControlling)? = nil,
         serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
         draftAttachmentStore: any ChatDraftAttachmentStoring = ChatDraftAttachmentStore.shared,
+        draftStore: ChatDraftStore? = nil,
         userDefaults: UserDefaults = .standard
     ) {
         sessionID = session.sessionId
@@ -650,7 +651,8 @@ final class ChatViewModel {
         )
         self.attachmentCoordinator = ChatAttachmentCoordinator(
             client: resolvedClient,
-            draftAttachmentStore: draftAttachmentStore
+            draftAttachmentStore: draftAttachmentStore,
+            draftStore: draftStore
         )
         self.btwStreamClient = btwStreamClient ?? SSEClient()
         self.liveActivityManager = resolvedLiveActivityManager
@@ -1426,6 +1428,15 @@ final class ChatViewModel {
 
     func clearPendingAttachments() {
         attachmentCoordinator.clearPendingAttachments()
+    }
+
+    func protectDraftAttachments(for key: ChatDraftKey, restoring records: [ChatDraftAttachment] = []) {
+        attachmentCoordinator.protectDraft(key)
+        attachmentCoordinator.protectRestoringAttachments(records)
+    }
+
+    func deleteDraftAttachmentCopy(named file: String, attachmentID: UUID) async {
+        await attachmentCoordinator.deleteDraftCopy(named: file, attachmentID: attachmentID)
     }
 
     func removePendingAttachment(id: UUID) {
@@ -2502,7 +2513,7 @@ final class ChatViewModel {
         if didStart {
             for attachment in attachmentPreparation.attachments {
                 guard let fileName = attachment.draftFileName else { continue }
-                await attachmentCoordinator.deleteDraftCopy(named: fileName)
+                await attachmentCoordinator.deleteDraftCopy(named: fileName, attachmentID: attachment.id)
             }
         }
         return didStart
@@ -2965,8 +2976,9 @@ final class ChatViewModel {
             // Delete the durable copies of the files that rode along, as
             // `sendMessage` does.
             takeSteeredAttachments(steeredAttachments)
-            for fileName in steeredAttachments.compactMap(\.draftFileName) {
-                await attachmentCoordinator.deleteDraftCopy(named: fileName)
+            for attachment in steeredAttachments {
+                guard let fileName = attachment.draftFileName else { continue }
+                await attachmentCoordinator.deleteDraftCopy(named: fileName, attachmentID: attachment.id)
             }
             return .executed(message: nil)
         case .refused(let transportError):

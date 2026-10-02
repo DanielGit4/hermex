@@ -66,6 +66,32 @@ to `CacheStore`. Two consequences:
 - All call sites pass the active `server` URL: `SessionListViewModel` and
   `ChatViewModel`.
 
+## Retained draft attachments
+
+Draft content and settings remain keyed by server and context. Their app-owned
+attachment copies share a 200 MB device-wide budget, measured from file lengths
+on disk rather than optional server upload sizes. New staging reclaims only the
+oldest inactive copies needed to fit. Unreferenced copies left by interrupted
+saves or cleanup are reclaimed first, excluding live reservations. There is no
+age expiry or cleanup UI.
+Optional `lastUsedAt` metadata in the version-4 draft document records genuine
+use; reading drafts for enumeration does not refresh it. Equal recency uses the
+persisted attachment order, then filename, for a stable eviction order.
+
+`ChatDraftStore` serializes admission with persistence and cleanup. It writes
+removed references before deleting copies, rechecks live ownership after a
+suspending write, and remeasures after deletion. A shared copy takes its newest
+reference's recency and survives while any reference is protected. Composer and
+operation leases protect open windows, restores, uploads, queued and in-flight
+sends. A protected-only budget refuses new staging through the attachment error
+path. Retained restores and standalone voice uploads do not consume new space.
+
+Webui staging keeps the 20 MB file limit and admits at most 10 attachments,
+including concurrent reservations and retained records awaiting restore. Bot
+attachments use the same disk budget and protection, while retaining their
+existing transport limits (8 files, 25 MB each, 50 MB total). Share-inbox originals
+and server uploads are outside this store and are never eviction targets.
+
 ## Global (intentionally shared) state
 
 These are app-wide preferences, stored as plain `@AppStorage` (see the block at

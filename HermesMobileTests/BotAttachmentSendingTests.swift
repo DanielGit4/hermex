@@ -29,6 +29,29 @@ import UIKit
         }
     }
 
+    func testSharedRetentionProtectsOpenBotAndReclaimsItOnlyAfterSuspending() async throws {
+        let copies = BotAttachmentCopies()
+        let drafts = ChatDraftStore(persistence: BotMemoryDrafts(), attachmentStore: copies, retainedByteLimit: 4)
+        let model = make(BotFixtureWire(), drafts: drafts, copies: copies)
+        await model.recover()
+        model.editDraft("Keep typed text")
+        await model.attachments.stage(data: Data([1, 2, 3, 4]), filename: "note.txt")
+        XCTAssertEqual(model.attachments.items.count, 1)
+        let webui = drafts.makeAttachmentLease()
+        do {
+            _ = try await drafts.stageAttachment(data: Data([5]), filename: "webui", lease: webui)
+            XCTFail("An open Bot composer shares the same protected budget")
+        } catch {}
+        model.suspend()
+        _ = try await drafts.stageAttachment(data: Data([5]), filename: "webui", lease: webui)
+        await model.recover()
+        XCTAssertEqual(model.attachments.items, [], "Resuming a retained model must reload evicted attachment records")
+        XCTAssertEqual(model.draft, "Keep typed text")
+        let inventory = try await copies.retainedFileBytes()
+        XCTAssertEqual(inventory.values.reduce(0, +), 1)
+        model.suspend()
+    }
+
     func testTransparentImageStaysPNGWhenStaged() async throws {
         let copies = BotAttachmentCopies()
         let model = make(BotFixtureWire(), drafts: store(), copies: copies)
@@ -215,6 +238,7 @@ import UIKit
 actor BotAttachmentCopies: ChatDraftAttachmentStoring {
     private var values: [String: Data] = [:]
     var count: Int { values.count }
+    func retainedFileBytes() async throws -> [String: Int] { values.mapValues(\.count) }
     func save(data: Data, suggestedFilename: String) -> String {
         let name = UUID().uuidString + "-" + suggestedFilename; values[name] = data; return name
     }

@@ -11,6 +11,27 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
         super.tearDown()
     }
 
+    func testEleventhAttachmentIsRefusedBeforeSavingOrUploading() async throws {
+        var requests = 0
+        let client = makeClient { request in
+            requests += 1
+            return apiTestJSONResponse(#"{"path":"/uploads/file","mime":"text/plain"}"#, for: request)
+        }
+        let store = RecordingAttachmentStore()
+        let coordinator = makeCoordinator(client: client, attachmentStore: store)
+        for index in 0..<10 {
+            let result = await coordinator.uploadAttachment(data: Data([1]), filename: "file-\(index).txt")
+            XCTAssertEqual(result?.name, "file-\(index).txt")
+        }
+        let before = coordinator.pendingAttachments
+        let refused = await coordinator.uploadAttachment(data: Data([2]), filename: "eleventh.txt")
+        XCTAssertNil(refused, "The eleventh attachment must be refused without replacing an active attachment")
+        XCTAssertEqual(coordinator.pendingAttachments, before)
+        XCTAssertEqual(requests, 10, "Refusal must happen before network upload")
+        let saves = await store.savedNames()
+        XCTAssertEqual(saves.count, 10, "Refusal must happen before durable staging")
+    }
+
     func testUploadSuccessAddsPendingAttachmentAndPreparesLocalPreview() async throws {
         let imageData = try XCTUnwrap(Self.imageData())
         var uploadedFilename: String?
@@ -452,13 +473,209 @@ final class ChatAttachmentCoordinatorTests: APIClientTestCase {
         XCTAssertTrue(delegate.failedErrors.isEmpty)
     }
 
+    func testPerFileExactLimitSucceedsAndOneByteOverDoesNotSaveOrUpload() async throws {
+        var requests = 0
+        let client = makeClient { request in
+            requests += 1
+            XCTAssertEqual(try Self.multipartFilename(from: request), "exact.bin")
+            return apiTestJSONResponse(#"{"path":"/uploads/exact","mime":"application/octet-stream"}"#, for: request)
+        }
+        let files = RecordingAttachmentStore()
+        let coordinator = makeCoordinator(client: client, attachmentStore: files)
+        let exact = await coordinator.uploadAttachment(data: Data(repeating: 1, count: 20 * 1024 * 1024), filename: "exact.bin")
+        let over = await coordinator.uploadAttachment(data: Data(repeating: 1, count: 20 * 1024 * 1024 + 1), filename: "over.bin")
+        XCTAssertEqual(exact?.path, "/uploads/exact")
+        XCTAssertNil(over)
+        XCTAssertEqual(requests, 1)
+        let saved = await files.savedNames()
+        XCTAssertEqual(saved, ["saved-1-exact.bin"])
+        XCTAssertEqual(coordinator.pendingAttachments.map(\.name), ["exact.bin"])
+    }
+
+    func testConcurrentTenthUploadReservesItsSlotBeforeNetworkCompletion() async throws {
+        let started = expectation(description: "tenth upload started")
+        let state = DeferredUploadState()
+        let client = makeDeferredUploadClient { request, protocolClient in
+            XCTAssertEqual(try Self.multipartFilename(from: request), "tenth")
+            let response = apiTestJSONResponse(#"{"path":"/uploads/tenth","mime":"text/plain"}"#, for: request)
+            state.setFirstUploadCompletion { protocolClient.complete(with: response) }
+            started.fulfill()
+        }
+        let files = RecordingAttachmentStore()
+        let coordinator = makeCoordinator(client: client, attachmentStore: files)
+        coordinator.appendPendingAttachments((0..<9).map { index in
+            PendingAttachment(name: "existing-\(index)", path: "/uploads/\(index)", mime: "text/plain", size: nil, isImage: false)
+        })
+        let tenth = Task { await coordinator.uploadAttachment(data: Data([1]), filename: "tenth") }
+        await fulfillment(of: [started], timeout: 2)
+        let refused = await coordinator.uploadAttachment(data: Data([2]), filename: "eleventh")
+        XCTAssertNil(refused)
+        XCTAssertEqual(coordinator.pendingAttachments.count, 9)
+        let finish = try XCTUnwrap(state.firstUploadCompletion())
+        finish()
+        let result = await tenth.value
+        XCTAssertEqual(result?.name, "tenth")
+        XCTAssertEqual(coordinator.pendingAttachments.count, 10)
+        let saves = await files.savedNames()
+        XCTAssertEqual(saves, ["saved-1-tenth"])
+    }
+
+    func testRemovalReleasesSlotForAnotherComposerOnSameDraft() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = ChatDraftAttachmentStore(directoryURL: directory)
+        let drafts = ChatDraftStore(persistence: ChatDraftFilePersistence(directoryURL: directory), attachmentStore: files)
+        var requests = 0
+        let client = makeClient { request in
+            requests += 1
+            return apiTestJSONResponse(#"{"path":"/uploads/file","mime":"text/plain"}"#, for: request)
+        }
+        let first = makeCoordinator(client: client, attachmentStore: files, draftStore: drafts)
+        let second = makeCoordinator(client: client, attachmentStore: files, draftStore: drafts)
+        let key = ChatDraftKey(serverID: "server", context: .newChat)
+        first.protectDraft(key)
+        second.protectDraft(key)
+        for index in 0..<10 {
+            _ = await first.uploadAttachment(data: Data([1]), filename: "file-\(index).txt")
+        }
+        XCTAssertEqual(first.pendingAttachments.count, 10)
+        let removed = try XCTUnwrap(first.pendingAttachments.first)
+        first.removePendingAttachment(id: removed.id)
+        await first.deleteDraftCopy(named: try XCTUnwrap(removed.draftFileName), attachmentID: removed.id)
+        let replacement = await second.uploadAttachment(data: Data([2]), filename: "replacement.txt")
+        XCTAssertEqual(replacement?.name, "replacement.txt")
+        XCTAssertEqual(first.pendingAttachments.count, 9)
+        XCTAssertEqual(second.pendingAttachments.map(\.name), ["replacement.txt"])
+        XCTAssertEqual(requests, 11)
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(inventory.count, 10)
+        withExtendedLifetime(first) {}
+    }
+
+    func testBudgetRefusalHasNoNetworkOrNewFileSideEffects() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = ChatDraftAttachmentStore(directoryURL: directory)
+        let existing = try await files.save(data: Data(repeating: 1, count: 4), suggestedFilename: "live")
+        let drafts = ChatDraftStore(persistence: ChatDraftFilePersistence(directoryURL: directory), attachmentStore: files, retainedByteLimit: 4)
+        let live = drafts.makeAttachmentLease()
+        live.files.insert(existing)
+        var requests = 0
+        let client = makeClient { request in
+            requests += 1
+            return apiTestJSONResponse(#"{"path":"/unexpected"}"#, for: request)
+        }
+        let coordinator = makeCoordinator(client: client, attachmentStore: files, draftStore: drafts)
+        let result = await coordinator.uploadAttachment(data: Data([2]), filename: "refused")
+        withExtendedLifetime(live) {}
+        XCTAssertNil(result)
+        XCTAssertEqual(requests, 0)
+        XCTAssertEqual(coordinator.pendingAttachments.count, 0)
+        XCTAssertEqual(coordinator.uploadAttachmentErrorMessage, "Attachment storage is busy. Try again shortly.")
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(inventory, [existing: 4])
+    }
+
+    func testRetainedRestoreAndStandaloneVoiceAreExemptFromBothAdmissionCaps() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = ChatDraftAttachmentStore(directoryURL: directory)
+        let file = try await files.save(data: Data([1, 2, 3, 4]), suggestedFilename: "retained")
+        let drafts = ChatDraftStore(persistence: ChatDraftFilePersistence(directoryURL: directory), attachmentStore: files, retainedByteLimit: 1)
+        var filenames: [String] = []
+        let client = makeClient { request in
+            filenames.append(try Self.multipartFilename(from: request))
+            return apiTestJSONResponse(#"{"path":"/uploads/restored","mime":"text/plain"}"#, for: request)
+        }
+        let coordinator = makeCoordinator(client: client, attachmentStore: files, draftStore: drafts)
+        coordinator.appendPendingAttachments((0..<10).map { index in
+            PendingAttachment(name: "existing-\(index)", path: "/uploads/\(index)", mime: "text/plain", size: nil, isImage: false)
+        })
+        let record = ChatDraftAttachment(id: UUID(), name: "retained", mime: "text/plain", size: nil, isImage: false, file: file)
+        let restored = await coordinator.reuploadDraftAttachment(data: Data([1, 2, 3, 4]), draftAttachment: record)
+        let voice = await coordinator.uploadStandaloneAttachment(data: Data([5]), filename: "voice.m4a")
+        XCTAssertEqual(restored?.id, record.id)
+        XCTAssertEqual(restored?.draftFileName, file)
+        XCTAssertEqual(voice?.name, "voice.m4a")
+        XCTAssertNil(voice?.draftFileName)
+        XCTAssertEqual(coordinator.pendingAttachments.count, 11)
+        XCTAssertEqual(filenames, ["retained", "voice.m4a"])
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(inventory, [file: 4])
+    }
+
+    func testQueueAndSendKeepCopiesProtectedUntilOwnerReleasesThem() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = ChatDraftAttachmentStore(directoryURL: directory)
+        let file = try await files.save(data: Data([1, 2, 3, 4]), suggestedFilename: "retained")
+        let drafts = ChatDraftStore(persistence: ChatDraftFilePersistence(directoryURL: directory), attachmentStore: files, retainedByteLimit: 4)
+        let key = ChatDraftKey(serverID: "a", context: .newChat)
+        let record = ChatDraftAttachment(id: UUID(), name: "retained", mime: "text/plain", size: nil, isImage: false, file: file)
+        drafts.setAttachments([record], for: key)
+        let client = makeClient { request in apiTestJSONResponse(#"{"path":"/uploads/retained"}"#, for: request) }
+        var coordinator: ChatAttachmentCoordinator? = makeCoordinator(client: client, attachmentStore: files, draftStore: drafts)
+        let pending = PendingAttachment(id: record.id, name: record.name, path: "/uploads/retained", mime: record.mime, size: nil, isImage: false, draftFileName: file)
+        coordinator?.appendPendingAttachments([pending])
+        let queued = coordinator?.consumePendingAttachments() ?? []
+        let incoming = drafts.makeAttachmentLease()
+        do {
+            _ = try await drafts.stageAttachment(data: Data([1]), filename: "queued-pressure", lease: incoming)
+            XCTFail("Queued copies must be protected")
+        } catch {}
+        coordinator?.restorePendingAttachments(queued)
+        let send = coordinator?.prepareForSend(localMessageID: "send")
+        XCTAssertEqual(send?.attachments.map(\.id), [record.id])
+        do {
+            _ = try await drafts.stageAttachment(data: Data([1]), filename: "send-pressure", lease: incoming)
+            XCTFail("In-flight send copies must be protected")
+        } catch {}
+        coordinator = nil
+        let staged = try await drafts.stageAttachment(data: Data([1]), filename: "inactive", lease: incoming)
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(inventory, [staged: 1], "An inactive draft becomes eligible when its live owner is gone")
+    }
+
+    func testExplicitCleanupKeepsSharedReferencesWithinAndAcrossDrafts() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = ChatDraftAttachmentStore(directoryURL: directory)
+        let file = try await files.save(data: Data([1]), suggestedFilename: "shared")
+        let persistence = ChatDraftFilePersistence(directoryURL: directory)
+        let drafts = ChatDraftStore(persistence: persistence, attachmentStore: files)
+        let a = ChatDraftKey(serverID: "a", context: .newChat)
+        let b = ChatDraftKey(serverID: "b", context: .newChat)
+        let first = PendingAttachment(name: "first", path: "/uploads/a", mime: "text/plain", size: nil, isImage: false, draftFileName: file)
+        let second = PendingAttachment(name: "second", path: "/uploads/b", mime: "text/plain", size: nil, isImage: false, draftFileName: file)
+        drafts.setAttachments([first, second].map(ChatDraftAttachment.init(pending:)), for: a)
+        drafts.setAttachments([ChatDraftAttachment(pending: second)], for: b)
+        let client = makeClient { request in apiTestJSONResponse(#"{"path":"/unused"}"#, for: request) }
+        let coordinator = makeCoordinator(client: client, attachmentStore: files, draftStore: drafts)
+        coordinator.protectDraft(a)
+        coordinator.appendPendingAttachments([first, second])
+        coordinator.removePendingAttachment(id: first.id)
+        await coordinator.deleteDraftCopy(named: file, attachmentID: first.id)
+        let afterFirst = await persistence.load()
+        XCTAssertEqual(afterFirst[a]?.attachments.map(\.id), [second.id])
+        XCTAssertEqual(afterFirst[b]?.attachments.map(\.id), [second.id])
+        coordinator.removePendingAttachment(id: second.id)
+        await coordinator.deleteDraftCopy(named: file, attachmentID: second.id)
+        let sharedBytes = try await files.data(named: file)
+        XCTAssertEqual(sharedBytes, Data([1]))
+        await drafts.discardDraft(for: b)
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(inventory, [:])
+    }
+
     private func makeCoordinator(
         client: APIClient,
-        attachmentStore: (any ChatDraftAttachmentStoring)? = nil
+        attachmentStore: (any ChatDraftAttachmentStoring)? = nil,
+        draftStore: ChatDraftStore? = nil
     ) -> ChatAttachmentCoordinator {
         let coordinator = ChatAttachmentCoordinator(
             client: client,
-            draftAttachmentStore: attachmentStore ?? RecordingAttachmentStore()
+            draftAttachmentStore: attachmentStore ?? RecordingAttachmentStore(),
+            draftStore: draftStore
         )
         let delegate = ChatAttachmentCoordinatorDelegateSpy()
         delegateSpies.append(delegate)

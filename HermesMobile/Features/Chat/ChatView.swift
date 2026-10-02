@@ -419,7 +419,8 @@ struct ChatView: View {
             showsLiveActivityResponseExcerpts: UserDefaults.standard.bool(
                 forKey: AgentRunLiveActivityPrivacy.showsResponseExcerptsKey
             ),
-            draftAttachmentStore: resolvedDraftAttachmentStore
+            draftAttachmentStore: resolvedDraftAttachmentStore,
+            draftStore: self.draftStore
         ))
         _gitAvailabilityViewModel = State(initialValue: GitWorkspaceAvailabilityViewModel(
             session: session,
@@ -564,7 +565,8 @@ struct ChatView: View {
                 // Explicit discard: the record drops out of the draft via the
                 // observation sync; delete its now-unreferenced local copy.
                 if let file = removedAttachment?.draftFileName {
-                    Task { await draftAttachmentStore.delete(named: file) }
+                    syncDraftAttachments()
+                    Task { await viewModel.deleteDraftAttachmentCopy(named: file, attachmentID: id) }
                 }
             },
             onPreviewAttachment: { attachment in
@@ -838,6 +840,7 @@ struct ChatView: View {
                 viewModel.cleanupPollingTasks()
             }
             .onAppear {
+                viewModel.protectDraftAttachments(for: draftKey)
                 isOnScreen = true
                 appearanceTask?.cancel()
                 appearanceTask = Task {
@@ -2236,10 +2239,13 @@ struct ChatView: View {
     }
 
     private func hydrateDraftIfNeeded() async {
+        viewModel.protectDraftAttachments(for: draftKey)
         guard !didHydrateDraft else { return }
+        await draftStore.markUsed(draftKey)
         let textBeforeHydration = draftMessage
         let quotesBeforeHydration = draftQuotes
         let persistedDraft = await draftStore.draft(for: draftKey)
+        viewModel.protectDraftAttachments(for: draftKey, restoring: persistedDraft?.attachments ?? [])
         guard !Task.isCancelled,
               draftMessage == textBeforeHydration,
               draftQuotes == quotesBeforeHydration

@@ -110,7 +110,7 @@ final class ChatDraftStoreTests: XCTestCase {
 
         XCTAssertEqual(resolved, .empty)
         let stored = await store.draft(for: key)
-        XCTAssertEqual(stored, ChatDraft(settings: settings))
+        assertDraftContentEqual(stored, ChatDraft(settings: settings))
     }
 
     func testActiveStreamConsumptionClearsQuoteSnapshotUnlessComposerRevisionChanged() async {
@@ -137,7 +137,7 @@ final class ChatDraftStoreTests: XCTestCase {
         )
         XCTAssertEqual(consumed, .empty)
         var stored = await store.draft(for: key)
-        XCTAssertEqual(stored, ChatDraft(attachments: [attachment], settings: settings))
+        assertDraftContentEqual(stored, ChatDraft(attachments: [attachment], settings: settings))
 
         store.setContent(submitted, for: key)
         let revised = ComposerDraftContent(
@@ -427,7 +427,7 @@ final class ChatDraftStoreTests: XCTestCase {
 
         XCTAssertEqual(result, "")
         let draft = await store.draft(for: key)
-        XCTAssertEqual(draft, ChatDraft(text: "", attachments: [], settings: settings))
+        assertDraftContentEqual(draft, ChatDraft(text: "", attachments: [], settings: settings))
     }
 
     func testTextEnteredDuringSendIsNeverClearedOrReplaced() async {
@@ -577,15 +577,15 @@ final class ChatDraftStoreTests: XCTestCase {
         store.setSettings(settings, for: key)
 
         var draft = await store.draft(for: key)
-        XCTAssertEqual(draft, ChatDraft(text: "Keep me", attachments: [attachment], settings: settings))
+        assertDraftContentEqual(draft, ChatDraft(text: "Keep me", attachments: [attachment], settings: settings))
 
         store.setDraft("Keep me edited", for: key)
         draft = await store.draft(for: key)
-        XCTAssertEqual(draft, ChatDraft(text: "Keep me edited", attachments: [attachment], settings: settings))
+        assertDraftContentEqual(draft, ChatDraft(text: "Keep me edited", attachments: [attachment], settings: settings))
 
         store.setAttachments([], for: key)
         draft = await store.draft(for: key)
-        XCTAssertEqual(draft, ChatDraft(text: "Keep me edited", attachments: [], settings: settings))
+        assertDraftContentEqual(draft, ChatDraft(text: "Keep me edited", attachments: [], settings: settings))
     }
 
     func testSettingsOnlyDraftPersists() async throws {
@@ -773,9 +773,9 @@ final class ChatDraftStoreTests: XCTestCase {
         let expected = ChatDraft(text: "a\n\nb", attachments: [
             ChatDraftAttachment(id: photo.id, name: "photo.jpg", mime: "text/plain", size: 5, isImage: false, file: "a-photo.jpg")
         ])
-        XCTAssertEqual(parked, expected)
+        assertDraftContentEqual(parked, expected)
         let stored = await store.draft(for: key)
-        XCTAssertEqual(stored, expected)
+        assertDraftContentEqual(stored, expected)
     }
 
     /// Queued texts were typed first, so the draft's own text goes last. A
@@ -808,7 +808,7 @@ final class ChatDraftStoreTests: XCTestCase {
         let stored = await store.draft(for: key)
         XCTAssertEqual(stored, parked)
         let untouched = await store.draft(for: otherServer)
-        XCTAssertEqual(untouched, ChatDraft(text: "other server"))
+        assertDraftContentEqual(untouched, ChatDraft(text: "other server"))
     }
 
     /// On iPad the chat stays on screen while its session is deleted from the
@@ -1105,6 +1105,321 @@ final class ChatDraftStoreTests: XCTestCase {
         )
     }
 
+    func testRetentionEvictsOldestAcrossServersAndContextsWithoutLosingContent() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let files = ChatDraftAttachmentStore(directoryURL: directory)
+        let oldFile = try await files.save(data: Data(repeating: 1, count: 4), suggestedFilename: "old")
+        let newerFile = try await files.save(data: Data(repeating: 2, count: 4), suggestedFilename: "new")
+        let first = ChatDraftKey(serverID: "server-one", context: .newChat)
+        let second = ChatDraftKey(serverID: "server-two", context: .session("session"))
+        let quote = ComposerQuote(text: "Keep this quote")
+        let settings = ChatDraftSettings(modelID: "chosen")
+        let old = ChatDraft(text: "Keep text", quotes: [quote], attachments: [Self.sampleAttachment(file: oldFile)], settings: settings, lastUsedAt: Date(timeIntervalSince1970: 1))
+        let newer = ChatDraft(text: "Other server", attachments: [Self.sampleAttachment(file: newerFile)], lastUsedAt: Date(timeIntervalSince1970: 2))
+        let persistence = ChatDraftFilePersistence(directoryURL: directory)
+        try await persistence.write([first: old, second: newer])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 10)
+        let lease = store.makeAttachmentLease()
+        let staged = try await store.stageAttachment(data: Data(repeating: 3, count: 3), filename: "incoming", lease: lease)
+        let remaining = try await files.retainedFileBytes()
+        XCTAssertEqual(remaining, [newerFile: 4, staged: 3], "Only the oldest physical copy is needed")
+        let relaunched = await ChatDraftFilePersistence(directoryURL: directory).load()
+        XCTAssertEqual(relaunched[first]?.text, "Keep text")
+        XCTAssertEqual(relaunched[first]?.quotes, [quote])
+        XCTAssertEqual(relaunched[first]?.settings, settings)
+        XCTAssertEqual(relaunched[first]?.attachments, [])
+        XCTAssertEqual(relaunched[second], newer)
+    }
+
+    func testRetentionExactBoundaryAndProtectedOverLimitRefusal() async throws {
+        let files = RetentionTestFiles(bytes: ["live": 4])
+        let key = ChatDraftKey(serverID: "server", context: .newChat)
+        let original = ChatDraft(text: "unchanged", attachments: [Self.sampleAttachment(file: "live")])
+        let persistence = RetentionTestPersistence(drafts: [key: original])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 8)
+        let lease = store.makeAttachmentLease(key: key)
+        let admitted = try await store.stageAttachment(data: Data(repeating: 1, count: 4), filename: "exact", lease: lease)
+        XCTAssertEqual(admitted, "new-1")
+        await assertRetentionThrows(try await store.stageAttachment(data: Data([1]), filename: "over", lease: lease))
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(inventory, ["live": 4, "new-1": 4])
+        let saves = await files.saveCount
+        XCTAssertEqual(saves, 1)
+        let restored = await store.draft(for: key)
+        XCTAssertEqual(restored, original)
+    }
+
+    func testSharedCopyUsesNewestReferenceAndAnyProtectedReferencePreventsEviction() async throws {
+        let files = RetentionTestFiles(bytes: ["shared": 4, "middle": 4])
+        let a = ChatDraftKey(serverID: "a", context: .newChat)
+        let b = ChatDraftKey(serverID: "b", context: .session("shared"))
+        let c = ChatDraftKey(serverID: "c", context: .newChat)
+        let persistence = RetentionTestPersistence(drafts: [
+            a: ChatDraft(text: "a", attachments: [Self.sampleAttachment(file: "shared")], lastUsedAt: Date(timeIntervalSince1970: 1)),
+            b: ChatDraft(text: "b", attachments: [Self.sampleAttachment(file: "shared")], lastUsedAt: Date(timeIntervalSince1970: 3)),
+            c: ChatDraft(text: "c", attachments: [Self.sampleAttachment(file: "middle")], lastUsedAt: Date(timeIntervalSince1970: 2))
+        ])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 8)
+        let incoming = store.makeAttachmentLease()
+        _ = try await store.stageAttachment(data: Data(repeating: 1, count: 4), filename: "one", lease: incoming)
+        let firstDeletes = await files.deleted
+        XCTAssertEqual(firstDeletes, ["middle"], "A shared file takes the newest reference's recency")
+        let protected = store.makeAttachmentLease(key: a)
+        await assertRetentionThrows(try await store.stageAttachment(data: Data([1]), filename: "refused", lease: incoming))
+        withExtendedLifetime(protected) {}
+        protected.key = nil
+        _ = try await store.stageAttachment(data: Data([1]), filename: "two", lease: incoming)
+        let final = await persistence.load()
+        XCTAssertEqual(final[a]?.attachments, [])
+        XCTAssertEqual(final[b]?.attachments, [])
+        let deletes = await files.deleted
+        XCTAssertEqual(deletes, ["middle", "shared"])
+    }
+
+    func testRetentionRecencySurvivesRelaunchAndEnumerationDoesNotRefreshIt() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let a = ChatDraftKey(serverID: "a", context: .newChat)
+        let b = ChatDraftKey(serverID: "b", context: .newChat)
+        let persistence = ChatDraftFilePersistence(directoryURL: directory)
+        try await persistence.write([
+            a: ChatDraft(text: "a", attachments: [Self.sampleAttachment(file: "a")], lastUsedAt: Date(timeIntervalSince1970: 1)),
+            b: ChatDraft(text: "b", attachments: [Self.sampleAttachment(file: "b")], lastUsedAt: Date(timeIntervalSince1970: 2))
+        ])
+        let store = ChatDraftStore(persistence: persistence)
+        await store.markUsed(a)
+        try await store.flush()
+        let reopened = ChatDraftStore(persistence: persistence, attachmentStore: RetentionTestFiles(bytes: ["a": 4, "b": 4]), retainedByteLimit: 8)
+        let before = await reopened.draft(for: b)
+        _ = await reopened.draft(for: b)
+        let after = await reopened.draft(for: b)
+        XCTAssertEqual(before?.lastUsedAt, Date(timeIntervalSince1970: 2))
+        XCTAssertEqual(after, before)
+        let lease = reopened.makeAttachmentLease()
+        _ = try await reopened.stageAttachment(data: Data([1]), filename: "new", lease: lease)
+        let result = await persistence.load()
+        XCTAssertEqual(result[a]?.attachments.map(\.file), ["a"])
+        XCTAssertEqual(result[b]?.attachments, [])
+    }
+
+    func testOldAndMalformedRecencyDocumentsStayVersionFourAndUseStableTieBreak() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let folder = directory.appendingPathComponent("ChatDrafts")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let json = #"{"version":4,"drafts":[{"serverID":"a","context":"newChat","text":"old","lastUsedAt":"invalid","attachments":[{"id":"11111111-1111-1111-1111-111111111111","name":"a","mime":"text/plain","file":"a"}]},{"serverID":"b","context":"newChat","text":"legacy","attachments":[{"id":"22222222-2222-2222-2222-222222222222","name":"b","mime":"text/plain","file":"b"}]}]}"#
+        try Data(json.utf8).write(to: folder.appendingPathComponent("drafts.json"))
+        let persistence = ChatDraftFilePersistence(directoryURL: directory)
+        let files = RetentionTestFiles(bytes: ["a": 4, "b": 4])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 8)
+        let lease = store.makeAttachmentLease()
+        _ = try await store.stageAttachment(data: Data([1]), filename: "new", lease: lease)
+        let deletes = await files.deleted
+        XCTAssertEqual(deletes, ["a"])
+        let result = await persistence.load()
+        XCTAssertEqual(result[ChatDraftKey(serverID: "a", context: .newChat)]?.text, "old")
+        XCTAssertEqual(result[ChatDraftKey(serverID: "b", context: .newChat)]?.attachments.map(\.file), ["b"])
+        let data = try Data(contentsOf: folder.appendingPathComponent("drafts.json"))
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        XCTAssertEqual(object["version"] as? Int, 4)
+    }
+
+    func testPersistenceFailureDoesNotDeleteOrStageAndPreservesOriginalDraft() async throws {
+        let key = ChatDraftKey(serverID: "a", context: .newChat)
+        let original = ChatDraft(text: "keep", attachments: [Self.sampleAttachment(file: "old")])
+        let persistence = RetentionTestPersistence(drafts: [key: original], failWrites: true)
+        let files = RetentionTestFiles(bytes: ["old": 4])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 4)
+        let lease = store.makeAttachmentLease()
+        await assertRetentionThrows(try await store.stageAttachment(data: Data([1]), filename: "new", lease: lease))
+        let deletes = await files.deleted
+        let saves = await files.saveCount
+        let draft = await store.draft(for: key)
+        XCTAssertEqual(deletes, [])
+        XCTAssertEqual(saves, 0)
+        XCTAssertEqual(draft, original)
+    }
+
+    func testPressureReclaimsOnlyNeededOrphansAndProtectsLiveCopies() async throws {
+        let key = ChatDraftKey(serverID: "a", context: .newChat)
+        let original = ChatDraft(text: "keep", attachments: [Self.sampleAttachment(file: "referenced")])
+        let persistence = RetentionTestPersistence(drafts: [key: original])
+        let files = RetentionTestFiles(bytes: ["orphan-a": 2, "orphan-b": 2, "live": 2, "referenced": 2])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 8)
+        let live = store.makeAttachmentLease()
+        live.files.insert("live")
+        let incoming = store.makeAttachmentLease()
+        let staged = try await store.stageAttachment(data: Data([1, 2]), filename: "new", lease: incoming)
+        let inventory = try await files.retainedFileBytes()
+        let deleted = await files.deleted
+        let restored = await store.draft(for: key)
+        XCTAssertEqual(deleted, ["orphan-a"])
+        XCTAssertEqual(inventory, ["orphan-b": 2, "live": 2, "referenced": 2, staged: 2])
+        XCTAssertEqual(restored, original)
+        withExtendedLifetime(live) {}
+    }
+
+    func testPartialDeletionCommitsRecordsBeforeFilesAndRefusesIfBytesRemain() async throws {
+        let key = ChatDraftKey(serverID: "a", context: .newChat)
+        let persistence = RetentionTestPersistence(drafts: [key: ChatDraft(text: "keep", attachments: [Self.sampleAttachment(file: "a"), Self.sampleAttachment(file: "b")])])
+        let files = RetentionTestFiles(bytes: ["a": 2, "b": 2], undeletable: ["b"])
+        await files.setDeletionObserver { file in
+            let persisted = await persistence.load()
+            XCTAssertFalse(persisted.values.contains { $0.attachments.contains { $0.file == file } })
+        }
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 4)
+        let lease = store.makeAttachmentLease()
+        await assertRetentionThrows(try await store.stageAttachment(data: Data(repeating: 1, count: 4), filename: "new", lease: lease))
+        let inventory = try await files.retainedFileBytes()
+        let saves = await files.saveCount
+        XCTAssertEqual(inventory, ["b": 2])
+        XCTAssertEqual(saves, 0)
+        let relaunched = ChatDraftStore(persistence: persistence, attachmentStore: files)
+        let restored = await relaunched.draft(for: key)
+        XCTAssertEqual(restored?.text, "keep")
+        XCTAssertEqual(restored?.attachments, [])
+    }
+
+    func testComposerOpeningDuringCommitCancelsEvictionAndRepairsRecords() async throws {
+        let key = ChatDraftKey(serverID: "a", context: .newChat)
+        let original = ChatDraft(text: "keep", attachments: [Self.sampleAttachment(file: "old")])
+        let persistence = RetentionTestPersistence(drafts: [key: original], blockFirstWrite: true)
+        let files = RetentionTestFiles(bytes: ["old": 4])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 4)
+        let lease = store.makeAttachmentLease()
+        let admission = Task { try await store.stageAttachment(data: Data([1]), filename: "new", lease: lease) }
+        await persistence.waitForWrite()
+        let composer = store.makeAttachmentLease(key: key)
+        await persistence.releaseWrite()
+        await assertRetentionThrows(try await admission.value)
+        withExtendedLifetime(composer) {}
+        let persisted = await persistence.load()
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(persisted[key], original)
+        XCTAssertEqual(inventory, ["old": 4])
+    }
+
+    func testEditDuringCommitWinsWithoutDeletingItsAttachment() async throws {
+        let key = ChatDraftKey(serverID: "a", context: .newChat)
+        let persistence = RetentionTestPersistence(drafts: [key: ChatDraft(text: "before", attachments: [Self.sampleAttachment(file: "old")])], blockFirstWrite: true)
+        let files = RetentionTestFiles(bytes: ["old": 4])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 4)
+        let lease = store.makeAttachmentLease()
+        let admission = Task { try await store.stageAttachment(data: Data([1]), filename: "new", lease: lease) }
+        await persistence.waitForWrite()
+        store.setDraft("edited during commit", for: key)
+        await persistence.releaseWrite()
+        await assertRetentionThrows(try await admission.value)
+        try await store.flush()
+        let persisted = await persistence.load()
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(persisted[key]?.text, "edited during commit")
+        XCTAssertEqual(persisted[key]?.attachments.map(\.file), ["old"])
+        XCTAssertEqual(inventory, ["old": 4])
+    }
+
+    func testConcurrentAdmissionCannotOvershootAndRuntimeFilesRemainProtected() async throws {
+        let files = RetentionTestFiles(bytes: [:])
+        let store = ChatDraftStore(persistence: RetentionTestPersistence(drafts: [:]), attachmentStore: files, retainedByteLimit: 4)
+        let first = store.makeAttachmentLease()
+        let second = store.makeAttachmentLease()
+        async let a: Bool = retentionAdmissionSucceeded(store, lease: first)
+        async let b: Bool = retentionAdmissionSucceeded(store, lease: second)
+        let results = await [a, b]
+        XCTAssertEqual(results.filter { $0 }.count, 1)
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(inventory.values.reduce(0, +), 4)
+        let saves = await files.saveCount
+        XCTAssertEqual(saves, 1)
+    }
+
+    func testCountReservationsComposeAcrossWindowsAndRetainedRestoreRecords() async throws {
+        let key = ChatDraftKey(serverID: "a", context: .session("open"))
+        let existing = (0..<9).map { Self.sampleAttachment(file: "saved-\($0)") }
+        let files = RetentionTestFiles(bytes: [:])
+        let persistence = RetentionTestPersistence(drafts: [key: ChatDraft(text: "keep", attachments: existing)])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files)
+        let firstWindow = store.makeAttachmentLease(key: key)
+        let secondWindow = store.makeAttachmentLease(key: key)
+        _ = try await store.stageAttachment(data: Data([1]), filename: "tenth", lease: firstWindow)
+        await assertRetentionThrows(try await store.stageAttachment(data: Data([2]), filename: "eleventh", lease: secondWindow))
+        let saves = await files.saveCount
+        XCTAssertEqual(saves, 1, "The other window's in-flight slot counts before it reaches the draft document")
+        let draft = await store.draft(for: key)
+        XCTAssertEqual(draft?.attachments, existing)
+        XCTAssertEqual(draft?.text, "keep")
+    }
+
+    func testOverLimitMigratedDraftIsUnchangedOnLoadAndNewAdmissionRefuses() async throws {
+        let key = ChatDraftKey(serverID: "a", context: .newChat)
+        let original = ChatDraft(text: "keep", attachments: (0..<11).map { Self.sampleAttachment(file: "saved-\($0)") })
+        let persistence = RetentionTestPersistence(drafts: [key: original])
+        let files = RetentionTestFiles(bytes: ["saved-0": 9])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 4)
+        let lease = store.makeAttachmentLease(key: key)
+        let loaded = await store.draft(for: key)
+        XCTAssertEqual(loaded, original)
+        await assertRetentionThrows(try await store.stageAttachment(data: Data([1]), filename: "new", lease: lease))
+        let after = await store.draft(for: key)
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(after, original)
+        XCTAssertEqual(inventory, ["saved-0": 9])
+    }
+
+    func testMovingNewChatTransfersProtectionAndOldestStripItemWinsRecencyTie() async throws {
+        let newChat = ChatDraftKey(serverID: "a", context: .newChat)
+        let session = ChatDraftKey(serverID: "a", context: .session("created"))
+        let original = ChatDraft(text: "keep", attachments: [Self.sampleAttachment(file: "z-first"), Self.sampleAttachment(file: "a-second")])
+        let files = RetentionTestFiles(bytes: ["z-first": 4, "a-second": 4])
+        let persistence = RetentionTestPersistence(drafts: [newChat: original])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 8)
+        var composer: ChatDraftAttachmentLease? = store.makeAttachmentLease(key: newChat)
+        _ = await store.draft(for: newChat)
+        let moved = store.moveDraft(from: newChat, to: session)
+        XCTAssertEqual(composer?.key, session)
+        XCTAssertEqual(moved.attachments, original.attachments)
+        let incoming = store.makeAttachmentLease()
+        await assertRetentionThrows(try await store.stageAttachment(data: Data([1]), filename: "protected", lease: incoming))
+        composer = nil
+        _ = try await store.stageAttachment(data: Data([1]), filename: "inactive", lease: incoming)
+        let deletes = await files.deleted
+        XCTAssertEqual(deletes, ["z-first"], "Stage order wins over a random generated filename within the same draft")
+        let result = await store.draft(for: session)
+        XCTAssertEqual(result?.attachments.map(\.file), ["a-second"])
+        XCTAssertEqual(result?.text, "keep")
+    }
+
+    func testCancellationDuringCommitRepairsRecordsWithoutDeletingFiles() async throws {
+        let key = ChatDraftKey(serverID: "a", context: .newChat)
+        let original = ChatDraft(text: "keep", attachments: [Self.sampleAttachment(file: "old")])
+        let persistence = RetentionTestPersistence(drafts: [key: original], blockFirstWrite: true)
+        let files = RetentionTestFiles(bytes: ["old": 4])
+        let store = ChatDraftStore(persistence: persistence, attachmentStore: files, retainedByteLimit: 4)
+        let lease = store.makeAttachmentLease()
+        let admission = Task { try await store.stageAttachment(data: Data([1]), filename: "new", lease: lease) }
+        await persistence.waitForWrite()
+        admission.cancel()
+        await persistence.releaseWrite()
+        do {
+            _ = try await admission.value
+            XCTFail("Cancelled admission must fail")
+        } catch is CancellationError {} catch { XCTFail("Expected cancellation, got \(error)") }
+        let restored = await persistence.load()
+        let inventory = try await files.retainedFileBytes()
+        XCTAssertEqual(restored[key], original)
+        XCTAssertEqual(inventory, ["old": 4])
+        XCTAssertEqual(lease.slotIDs, [])
+    }
+
+    private func assertDraftContentEqual(_ actual: ChatDraft?, _ expected: ChatDraft?, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(actual?.text, expected?.text, file: file, line: line)
+        XCTAssertEqual(actual?.quotes, expected?.quotes, file: file, line: line)
+        XCTAssertEqual(actual?.attachments, expected?.attachments, file: file, line: line)
+        XCTAssertEqual(actual?.settings, expected?.settings, file: file, line: line)
+        XCTAssertEqual(actual?.botSubmissionUncertain, expected?.botSubmissionUncertain, file: file, line: line)
+    }
+
     private func temporaryDirectory() -> URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("ChatDraftStoreTests-\(UUID().uuidString)", isDirectory: true)
@@ -1223,4 +1538,82 @@ private actor RecordingChatDraftAttachmentStore: ChatDraftAttachmentStoring {
     func deletedNames() -> [String] {
         deletes
     }
+}
+
+@MainActor
+private func retentionAdmissionSucceeded(_ store: ChatDraftStore, lease: ChatDraftAttachmentLease) async -> Bool {
+    do {
+        _ = try await store.stageAttachment(data: Data(repeating: 1, count: 4), filename: "incoming", lease: lease)
+        return true
+    } catch { return false }
+}
+
+private actor RetentionTestFiles: ChatDraftAttachmentStoring {
+    private var bytes: [String: Int]
+    private let undeletable: Set<String>
+    private var deletionObserver: (@Sendable (String) async -> Void)?
+    private(set) var saveCount = 0
+    private(set) var deleted: [String] = []
+    init(bytes: [String: Int], undeletable: Set<String> = []) {
+        self.bytes = bytes
+        self.undeletable = undeletable
+    }
+    func setDeletionObserver(_ observer: @escaping @Sendable (String) async -> Void) { deletionObserver = observer }
+    func retainedFileBytes() async throws -> [String: Int] { bytes }
+    func save(data: Data, suggestedFilename: String) async throws -> String {
+        saveCount += 1
+        let file = "new-\(saveCount)"
+        bytes[file] = data.count
+        return file
+    }
+    func data(named fileName: String) async throws -> Data { Data(repeating: 0, count: bytes[fileName] ?? 0) }
+    func fileURL(named fileName: String) async throws -> URL { throw CocoaError(.fileNoSuchFile) }
+    func delete(named fileName: String) async {
+        await deletionObserver?(fileName)
+        deleted.append(fileName)
+        if !undeletable.contains(fileName) { bytes[fileName] = nil }
+    }
+    func sweep(keepingReferenced fileNames: Set<String>, olderThan maxAge: TimeInterval) async {}
+}
+
+private actor RetentionTestPersistence: ChatDraftPersisting {
+    private var drafts: [ChatDraftKey: ChatDraft]
+    private let failWrites: Bool
+    private var blockFirstWrite: Bool
+    private var started = false
+    private var startWaiter: CheckedContinuation<Void, Never>?
+    private var releaseWaiter: CheckedContinuation<Void, Never>?
+    init(drafts: [ChatDraftKey: ChatDraft], failWrites: Bool = false, blockFirstWrite: Bool = false) {
+        self.drafts = drafts
+        self.failWrites = failWrites
+        self.blockFirstWrite = blockFirstWrite
+    }
+    func load() async -> [ChatDraftKey: ChatDraft] { drafts }
+    func write(_ drafts: [ChatDraftKey: ChatDraft]) async throws {
+        if failWrites { throw CocoaError(.fileWriteOutOfSpace) }
+        if blockFirstWrite {
+            blockFirstWrite = false
+            started = true
+            startWaiter?.resume()
+            startWaiter = nil
+            await withCheckedContinuation { releaseWaiter = $0 }
+        }
+        self.drafts = drafts
+    }
+    func waitForWrite() async {
+        if started { return }
+        await withCheckedContinuation { startWaiter = $0 }
+    }
+    func releaseWrite() {
+        releaseWaiter?.resume()
+        releaseWaiter = nil
+    }
+}
+
+@MainActor
+private func assertRetentionThrows<T>(_ expression: @autoclosure () async throws -> T, file: StaticString = #filePath, line: UInt = #line) async {
+    do {
+        _ = try await expression()
+        XCTFail("Expected retention admission to fail", file: file, line: line)
+    } catch {}
 }

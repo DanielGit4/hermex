@@ -30,6 +30,7 @@ final class ChatAttachmentCoordinator {
     private(set) var uploadAttachmentErrorMessage: String?
     private(set) var localAttachmentPreviews: [String: [String: Data]] = [:]
     private var activeUploadCount = 0
+    private var stagingIDs: Set<UUID> = []
     private(set) var uploadStartGeneration = 0
 
     var isUploadingAttachment: Bool {
@@ -44,14 +45,34 @@ final class ChatAttachmentCoordinator {
 
     private let client: APIClient
     private let draftAttachmentStore: any ChatDraftAttachmentStoring
+    private let draftStore: ChatDraftStore?
+    private let attachmentLease: ChatDraftAttachmentLease?
     private var reservedUploadFilenames: Set<String> = []
 
     init(
         client: APIClient,
-        draftAttachmentStore: any ChatDraftAttachmentStoring = ChatDraftAttachmentStore.shared
+        draftAttachmentStore: any ChatDraftAttachmentStoring = ChatDraftAttachmentStore.shared,
+        draftStore: ChatDraftStore? = nil
     ) {
         self.client = client
         self.draftAttachmentStore = draftAttachmentStore
+        let retention = draftStore ?? ((draftAttachmentStore as? ChatDraftAttachmentStore) === ChatDraftAttachmentStore.shared ? .shared : nil)
+        self.draftStore = retention
+        self.attachmentLease = retention?.makeAttachmentLease()
+    }
+
+    private func refreshAttachmentSlots() {
+        attachmentLease?.slotIDs = Set(pendingAttachments.map(\.id)).union(stagingIDs)
+    }
+
+    func protectDraft(_ key: ChatDraftKey) {
+        attachmentLease?.key = key
+    }
+
+    func protectRestoringAttachments(_ records: [ChatDraftAttachment]) {
+        for record in records {
+            if let file = record.file { attachmentLease?.filesByAttachmentID[record.id] = file }
+        }
     }
 
     /// Saves a durable app-owned copy, uploads it, and appends the result to the
@@ -64,30 +85,60 @@ final class ChatAttachmentCoordinator {
             return nil
         }
 
+        guard pendingAttachments.count + stagingIDs.count < ChatDraftStore.maximumAttachmentCount else {
+            uploadAttachmentErrorMessage = String(localized: "A draft can have up to 10 attachments.")
+            return nil
+        }
+        let stagingID = UUID()
+        stagingIDs.insert(stagingID)
+        refreshAttachmentSlots()
+        defer {
+            stagingIDs.remove(stagingID)
+            refreshAttachmentSlots()
+        }
         let draftFileName: String
         do {
-            draftFileName = try await draftAttachmentStore.save(
-                data: data,
-                suggestedFilename: filename
-            )
+            if let draftStore, let attachmentLease {
+                draftFileName = try await draftStore.stageAttachment(data: data, filename: filename, lease: attachmentLease, attachmentID: stagingID)
+            } else {
+                draftFileName = try await draftAttachmentStore.save(data: data, suggestedFilename: filename)
+            }
+        } catch is CancellationError {
+            return nil
+        } catch let error as ChatDraftStorageError {
+            switch error {
+            case .attachmentLimit:
+                uploadAttachmentErrorMessage = String(localized: "A draft can have up to 10 attachments.")
+            case .unavailable:
+                uploadAttachmentErrorMessage = String(localized: "Attachment storage is busy. Try again shortly.")
+            }
+            return nil
         } catch {
             uploadAttachmentErrorMessage = String(localized: "Could not save the attachment on this device.")
             delegate?.attachmentCoordinatorDidFail(error)
             return nil
         }
 
+        attachmentLease?.filesByAttachmentID[stagingID] = draftFileName
+        attachmentLease?.files.remove(draftFileName)
         guard let attachment = await performUpload(
             data: data,
             filename: filename,
             previewData: previewData,
             draftFileName: draftFileName,
-            draftAttachmentID: nil,
+            draftAttachmentID: stagingID,
             reportsErrors: true
         ) else {
-            await draftAttachmentStore.delete(named: draftFileName)
+            attachmentLease?.filesByAttachmentID[stagingID] = nil
+            if let draftStore {
+                await draftStore.deleteAttachmentIfUnreferenced(draftFileName)
+            } else {
+                await draftAttachmentStore.delete(named: draftFileName)
+            }
             return nil
         }
         pendingAttachments.append(attachment)
+        refreshAttachmentSlots()
         return attachment
     }
 
@@ -98,6 +149,7 @@ final class ChatAttachmentCoordinator {
     /// reports them in aggregate and keeps the record for a later retry.
     @discardableResult
     func reuploadDraftAttachment(data: Data, draftAttachment: ChatDraftAttachment) async -> PendingAttachment? {
+        if let file = draftAttachment.file { attachmentLease?.filesByAttachmentID[draftAttachment.id] = file }
         guard let attachment = await performUpload(
             data: data,
             filename: draftAttachment.name,
@@ -109,6 +161,7 @@ final class ChatAttachmentCoordinator {
             return nil
         }
         pendingAttachments.append(attachment)
+        refreshAttachmentSlots()
         return attachment
     }
 
@@ -209,19 +262,29 @@ final class ChatAttachmentCoordinator {
 
     func clearPendingAttachments() {
         pendingAttachments.removeAll()
+        refreshAttachmentSlots()
         uploadAttachmentErrorMessage = nil
     }
 
     func removePendingAttachment(id: UUID) {
         pendingAttachments.removeAll { $0.id == id }
+        refreshAttachmentSlots()
     }
 
     func setUploadAttachmentError(_ message: String?) {
         uploadAttachmentErrorMessage = message
     }
 
-    func deleteDraftCopy(named fileName: String) async {
-        await draftAttachmentStore.delete(named: fileName)
+    func deleteDraftCopy(named fileName: String, attachmentID: UUID) async {
+        attachmentLease?.filesByAttachmentID[attachmentID] = nil
+        if let draftStore {
+            if let key = attachmentLease?.key {
+                draftStore.removeAttachmentReference(id: attachmentID, for: key)
+            }
+            await draftStore.deleteAttachmentIfUnreferenced(fileName)
+        } else {
+            await draftAttachmentStore.delete(named: fileName)
+        }
     }
 
     func attachmentImageData(path: String) async -> Data? {
@@ -300,6 +363,7 @@ final class ChatAttachmentCoordinator {
         }
 
         pendingAttachments.removeAll()
+        refreshAttachmentSlots()
         return ChatAttachmentSendPreparation(
             attachments: attachmentsForSend,
             messageAttachments: messageAttachments
@@ -307,23 +371,30 @@ final class ChatAttachmentCoordinator {
     }
 
     func restorePendingAttachments(_ attachments: [PendingAttachment]) {
+        protectRestoringAttachments(attachments.map(ChatDraftAttachment.init(pending:)))
         guard !attachments.isEmpty else { return }
         pendingAttachments = attachments + pendingAttachments
+        refreshAttachmentSlots()
     }
 
     func appendPendingAttachments(_ attachments: [PendingAttachment]) {
+        protectRestoringAttachments(attachments.map(ChatDraftAttachment.init(pending:)))
         guard !attachments.isEmpty else { return }
         pendingAttachments += attachments
+        refreshAttachmentSlots()
     }
 
     func consumePendingAttachments() -> [PendingAttachment] {
         let attachments = pendingAttachments
         pendingAttachments.removeAll()
+        refreshAttachmentSlots()
         return attachments
     }
 
     func replacePendingAttachments(_ attachments: [PendingAttachment]) {
+        protectRestoringAttachments(attachments.map(ChatDraftAttachment.init(pending:)))
         pendingAttachments = attachments
+        refreshAttachmentSlots()
     }
 
     func removeLocalPreviews(messageID: String) {

@@ -9,6 +9,7 @@ protocol ChatDraftAttachmentStoring: Sendable {
     /// Writes a copy of the attachment bytes, returning the generated file name
     /// the caller stores in the draft record.
     func save(data: Data, suggestedFilename: String) async throws -> String
+    func retainedFileBytes() async throws -> [String: Int]
     func data(named fileName: String) async throws -> Data
     /// Where the copy lives, for readers that need a file rather than its
     /// bytes (Quick Look thumbnails). Rejects the names `data(named:)` rejects;
@@ -19,6 +20,13 @@ protocol ChatDraftAttachmentStoring: Sendable {
     /// age grace keeps copies whose owning upload/record write is still in
     /// flight from being collected.
     func sweep(keepingReferenced fileNames: Set<String>, olderThan maxAge: TimeInterval) async
+}
+
+extension ChatDraftAttachmentStoring {
+    // Stores that cannot account for their bytes must refuse budgeted admission.
+    func retainedFileBytes() async throws -> [String: Int] {
+        throw CocoaError(.fileReadUnknown)
+    }
 }
 
 /// Why a draft attachment's durable copy could not be read, and therefore
@@ -85,6 +93,20 @@ actor ChatDraftAttachmentStore: ChatDraftAttachmentStoring {
         try data.write(to: target, options: [.atomic])
         try setProtectedFileAttributes(at: target)
         return fileName
+    }
+
+    func retainedFileBytes() async throws -> [String: Int] {
+        guard fileManager.fileExists(atPath: directoryURL.path) else { return [:] }
+        let urls = try fileManager.contentsOfDirectory(
+            at: directoryURL, includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]
+        )
+        var bytes: [String: Int] = [:]
+        for url in urls {
+            let values = try url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey])
+            guard values.isRegularFile == true, values.isSymbolicLink != true else { continue }
+            bytes[url.lastPathComponent] = values.fileSize ?? 0
+        }
+        return bytes
     }
 
     func data(named fileName: String) async throws -> Data {
