@@ -101,6 +101,8 @@ import UserNotifications
     /// whenever the section checks; cleared once the user allows notifications again.
     private(set) var notificationsOff = false
     private(set) var pluginUpdate: PluginUpdate?
+    /// Deliberate plugin actions supersede passive reads, even after the action finishes.
+    private var pluginCheckGeneration = 0
 
     /// The saved connection this host is reached with. The screen keeps it current so a
     /// password edit made just above this section is the one provisioning signs in with.
@@ -387,8 +389,9 @@ import UserNotifications
     /// so no confirmation; a host that doesn't answer leaves the card as it was.
     func checkPlugin() async {
         guard pairing != nil, let connection, !isUpdatingPlugin else { return }
+        let generation = pluginCheckGeneration
         guard let standing = try? await pluginStanding(dashboard(connection)), !Task.isCancelled,
-              pairing != nil, !isUpdatingPlugin else { return }
+              pairing != nil, !isUpdatingPlugin, generation == pluginCheckGeneration else { return }
         // A plugin already on the newest needs no card; only an update run says so.
         if case .upToDate = standing { pluginUpdate = nil } else { pluginUpdate = standing }
     }
@@ -401,6 +404,7 @@ import UserNotifications
     /// error is a failed read.
     func checkPluginAgain() async {
         guard !isWorking, let connection else { return }
+        pluginCheckGeneration &+= 1
         setupRanLast = false
         phase = .checkingPlugin
         do {
@@ -428,6 +432,7 @@ import UserNotifications
     /// 0.4.0 or newer can then restart it from the phone (`restartHermes`).
     func updatePlugin() async {
         guard !isWorking else { return }
+        pluginCheckGeneration &+= 1
         setupRanLast = false
         guard let connection else {
             phase = .failed(Failure(title: PluginUpdateStep.reinstall.failureTitle,
@@ -485,6 +490,7 @@ import UserNotifications
     func restartHermes() async {
         guard !isWorking, let connection, case .restartNeeded(let loaded)? = pluginUpdate,
               HermexPushPlugin.canRestart(loaded) else { return }
+        pluginCheckGeneration &+= 1
         setupRanLast = false
         completed = []
         phase = .restartingHermes

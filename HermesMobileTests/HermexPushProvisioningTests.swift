@@ -1208,6 +1208,73 @@ import XCTest
         XCTAssertNil(provisioner.failure)
     }
 
+    func testPassiveReadCannotReplaceAFinishedUpdate() async throws {
+        try await assertPassiveReadCannotReplaceResult { await $0.updatePlugin() }
+    }
+
+    func testPassiveReadCannotReplaceAFinishedRecheck() async throws {
+        try await assertPassiveReadCannotReplaceResult { await $0.checkPluginAgain() }
+    }
+
+    func testPassiveReadCannotReplaceAFinishedRestart() async throws {
+        try await assertPassiveReadCannotReplaceResult { await $0.restartHermes() }
+    }
+
+    /// Hold an old read until the deliberate action has finished, including a stale
+    /// newest-version answer (which would hide the success card) and a failed read.
+    private func assertPassiveReadCannotReplaceResult(
+        action: (HermexPushProvisioner) async -> Void
+    ) async throws {
+        for staleVersion in ["0.4.0", "0.5.0", nil] as [String?] {
+            PushHTTPFixture.reset()
+            let registrar = try await pairedRegistrar(serverA)
+            var loaded = "0.4.0"
+            PushHTTPFixture.handler = { request in
+                switch request.url?.path {
+                case "/api/plugins/hermex-push/pairing":
+                    return (200, PushHTTPFixture.pairingBody(version: loaded))
+                case "/api/dashboard/plugins/hub":
+                    return (200, PushHTTPFixture.hubBody(version: "0.5.0"))
+                default: return nil
+                }
+            }
+            let provisioner = makeProvisioner(server: serverA, registrar: registrar, newest: future)
+            await provisioner.checkPlugin()
+            XCTAssertEqual(provisioner.pluginCard, .status(.restartNeeded(loaded: HermexPushPluginVersion("0.4.0"))))
+            let originalPairing = provisioner.pairing
+            let held = expectation(description: "Passive pairing read held")
+            var pending: PushHTTPFixture?
+            PushHTTPFixture.holdResponse = { fixture in
+                guard fixture.request.url?.path == "/api/plugins/hermex-push/pairing" else { return false }
+                pending = fixture
+                held.fulfill()
+                return true
+            }
+            let passive = Task { await provisioner.checkPlugin() }
+            await fulfillment(of: [held], timeout: 5)
+            PushHTTPFixture.holdResponse = nil
+            let response = try XCTUnwrap(pending)
+            loaded = "0.5.0"
+
+            await action(provisioner)
+
+            XCTAssertEqual(provisioner.pluginCard, .status(.upToDate(future)))
+            XCTAssertFalse(provisioner.isWorking)
+            if let staleVersion {
+                response.respond(status: 200, value: PushHTTPFixture.pairingBody(version: staleVersion))
+            } else {
+                response.respond(status: 500, value: .null)
+            }
+            await passive.value
+
+            XCTAssertEqual(provisioner.pluginCard, .status(.upToDate(future)),
+                           "A stale passive completion must preserve the deliberate action's result (\(staleVersion ?? "failure"))")
+            XCTAssertNil(provisioner.failure)
+            XCTAssertEqual(provisioner.pairing, originalPairing)
+            XCTAssertEqual(registrar.actions, [])
+        }
+    }
+
     /// A server already paired with the fixture host's keys, with its setup call cleared.
     private func pairedRegistrar(_ server: URL) async throws -> FakePushRegistrar {
         let registrar = FakePushRegistrar()
@@ -1321,6 +1388,7 @@ private final class PushHTTPFixture: URLProtocol {
     static let installKey = String(repeating: "0123456789abcdef", count: 4)
     static let previewKey = Data(repeating: 7, count: 32).base64EncodedString()
     nonisolated(unsafe) static var handler: ((URLRequest) -> (Int, BotJSON)?)?
+    nonisolated(unsafe) static var holdResponse: ((PushHTTPFixture) -> Bool)?
     /// Whether the host already has the plugin loaded and a relay address set. A fresh
     /// host only answers the pairing route once a restart has loaded the plugin.
     nonisolated(unsafe) static var isSetUp = false
@@ -1338,7 +1406,7 @@ private final class PushHTTPFixture: URLProtocol {
     static var calls: [String] { lock.withLock { recorded.map(\.call) } }
     static func body(of call: String) -> BotJSON { lock.withLock { recorded.first { $0.call == call }?.body ?? .null } }
     static func clearCalls() { lock.withLock { recorded = [] } }
-    static func reset() { handler = nil; isSetUp = false; isUnreachable = false; clearCalls() }
+    static func reset() { handler = nil; holdResponse = nil; isSetUp = false; isUnreachable = false; clearCalls() }
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -1367,6 +1435,12 @@ private final class PushHTTPFixture: URLProtocol {
         }
         if url.path == "/api/gateway/restart" { Self.isSetUp = true }
         let (status, value) = Self.handler?(request) ?? Self.success(for: url)
+        if Self.holdResponse?(self) == true { return }
+        respond(status: status, value: value)
+    }
+
+    func respond(status: Int, value: BotJSON) {
+        let url = request.url!
         if status == Self.dropped {
             client?.urlProtocol(self, didFailWithError: URLError(.networkConnectionLost))
             return
