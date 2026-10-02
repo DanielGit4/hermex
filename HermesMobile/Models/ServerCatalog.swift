@@ -340,6 +340,8 @@ struct SettingsResponse: Decodable, Equatable {
     let passwordAuthEnabled: Bool?
     let passkeysEnabled: Bool?
     let passwordlessEnabled: Bool?
+    let ttsVoice: String?
+    let ttsEngine: String?
 
     private enum CodingKeys: String, CodingKey {
         case botName
@@ -355,6 +357,8 @@ struct SettingsResponse: Decodable, Equatable {
         case passwordAuthEnabled
         case passkeysEnabled
         case passwordlessEnabled
+        case ttsVoice
+        case ttsEngine
     }
 
     init(from decoder: Decoder) throws {
@@ -372,6 +376,9 @@ struct SettingsResponse: Decodable, Equatable {
         passwordAuthEnabled = container.decodeLossyBoolIfPresent(forKey: .passwordAuthEnabled)
         passkeysEnabled = container.decodeLossyBoolIfPresent(forKey: .passkeysEnabled)
         passwordlessEnabled = container.decodeLossyBoolIfPresent(forKey: .passwordlessEnabled)
+        // Preferences must be strings; malformed values behave like omitted settings.
+        ttsVoice = try? container.decode(String.self, forKey: .ttsVoice)
+        ttsEngine = try? container.decode(String.self, forKey: .ttsEngine)
     }
 }
 

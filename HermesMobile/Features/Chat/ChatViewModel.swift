@@ -544,7 +544,7 @@ final class ChatViewModel {
     // `activeListeningUtteranceID`: a stale finish callback from a superseded player
     // must not clear the new listen state or deactivate the session.
     private var activeListenPlayerID: ObjectIdentifier?
-    // In-flight `POST /api/tts` fetch for the Listen action. Cancelled by
+    // In-flight settings/audio fetch for the Listen action. Cancelled by
     // `stopListening()`; exposed (read-only) so tests can await the async
     // server-first path deterministically.
     @ObservationIgnored private(set) var listenPreparationTask: Task<Void, Never>?
@@ -4569,14 +4569,24 @@ final class ChatViewModel {
                 // would be dropped anyway.
                 return
             }
+            // Fetch for every Listen using this view's client; preferences never
+            // outlive the request or cross server boundaries.
+            let settings = try? await client.settings()
+            guard !Task.isCancelled, self?.activeListenRequestID == requestID else { return }
+            let engine = TTSEngine(savedValue: settings?.ttsEngine)
             let audioData: Data?
-            do {
-                audioData = try await client.synthesizeSpeech(
-                    text: listenText,
-                    voice: ServerTTSPolicy.defaultVoice
-                )
-            } catch {
+            if engine == .browser {
                 audioData = nil
+            } else {
+                let savedVoice = settings?.ttsVoice?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let voice = engine == .edge
+                    ? (savedVoice?.isEmpty == false ? savedVoice : ServerTTSPolicy.defaultVoice)
+                    : nil
+                audioData = try? await client.synthesizeSpeech(
+                    text: listenText,
+                    voice: voice,
+                    engine: engine
+                )
             }
 
             guard let self, !Task.isCancelled, self.activeListenRequestID == requestID else {
@@ -6880,8 +6890,8 @@ struct SpeechTextNormalizer {
     }
 }
 
-/// Routing policy for the "Listen" action (#15): prefer the server's neural TTS
-/// (`POST /api/tts`, edge engine — no API key needed) and fall back to the
+/// Routing policy for the "Listen" action: honor saved server preferences and
+/// fall back to the
 /// on-device synthesizer when the server can't serve the request.
 enum ServerTTSPolicy {
     /// Server-enforced request cap (`400 text too long` above it); longer text

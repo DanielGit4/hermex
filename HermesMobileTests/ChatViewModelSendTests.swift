@@ -77,9 +77,8 @@ final class ChatViewModelSendTests: XCTestCase {
                 return speechSynthesizer
             }
         ) { request in
-            // Listen now prefers server TTS (#15); refuse it so the on-device
-            // fallback path is what creates the synthesizer.
-            XCTAssertEqual(request.url?.path, "/api/tts")
+            // Refuse settings and audio so the fallback creates the synthesizer.
+            XCTAssertTrue(["/api/settings", "/api/tts"].contains(request.url?.path ?? ""))
             return Self.ttsUnavailableResponse(for: request)
         }
         let context = try XCTUnwrap(MessageActionContext(
@@ -250,6 +249,9 @@ final class ChatViewModelSendTests: XCTestCase {
             },
             userDefaults: userDefaults
         ) { request in
+            if request.url?.path == "/api/settings" {
+                return apiTestJSONResponse(#"{"tts_engine":"edge","tts_voice":"tr-TR-EmelNeural"}"#, for: request)
+            }
             XCTAssertEqual(request.url?.path, "/api/tts")
             guard let body = apiTestBodyData(from: request),
                   let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
@@ -257,7 +259,8 @@ final class ChatViewModelSendTests: XCTestCase {
                 throw URLError(.badServerResponse)
             }
             XCTAssertEqual(json["text"] as? String, "Neural, please.")
-            XCTAssertEqual(json["voice"] as? String, ServerTTSPolicy.defaultVoice)
+            XCTAssertEqual(json["voice"] as? String, "tr-TR-EmelNeural")
+            XCTAssertEqual(json["engine"] as? String, "edge")
             let response = HTTPURLResponse(
                 url: request.url!,
                 statusCode: 200,
@@ -653,6 +656,149 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertTrue(speechSynthesizer.spokenStrings.isEmpty)
         XCTAssertNil(viewModel.listeningMessageID)
         XCTAssertLessThanOrEqual(ttsRequests, 1)
+    }
+
+    @MainActor
+    func testListenRoutesSavedEnginesAndFallsBackForMissingOrFailedSettings() async throws {
+        let scenarios: [(String?, String, String?)] = [
+            (#"{"tts_engine":"browser","tts_voice":"tr-TR-EmelNeural"}"#, "browser", nil),
+            (#"{"tts_engine":"openai","tts_voice":"tr-TR-EmelNeural"}"#, "openai", nil),
+            (#"{"tts_engine":"elevenlabs","tts_voice":"tr-TR-EmelNeural"}"#, "elevenlabs", nil),
+            (#"{}"#, "edge", "en-US-AriaNeural"),
+            (nil, "edge", "en-US-AriaNeural"),
+            (#"{"tts_engine":[],"tts_voice":42}"#, "edge", "en-US-AriaNeural"),
+            (#"{"tts_engine":"future","tts_voice":" "}"#, "edge", "en-US-AriaNeural")
+        ]
+        for (settings, engine, voice) in scenarios {
+            let speech = SpySpeechSynthesizer()
+            let player = SpyListenAudioPlayer()
+            var paths: [String] = []
+            let viewModel = try makeViewModel(
+                speechSynthesizerFactory: { speech },
+                serverTTSAudioPlayerFactory: { _ in player }
+            ) { request in
+                paths.append(request.url!.path)
+                if request.url?.path == "/api/settings" {
+                    guard let settings else { throw URLError(.notConnectedToInternet) }
+                    return apiTestJSONResponse(settings, for: request)
+                }
+                let body = try XCTUnwrap(apiTestBodyData(from: request))
+                let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+                var expected = ["text": "Hello", "engine": engine]
+                expected["voice"] = voice
+                XCTAssertEqual(json, expected)
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data([1]))
+            }
+            let context = try listenContext("Hello", id: "routing")
+            viewModel.toggleListening(to: context)
+            await viewModel.listenPreparationTask?.value
+            XCTAssertEqual(paths, engine == "browser" ? ["/api/settings"] : ["/api/settings", "/api/tts"])
+            XCTAssertEqual(speech.spokenStrings, engine == "browser" ? ["Hello"] : [])
+            XCTAssertEqual(player.prepareToPlayCount, engine == "browser" ? 0 : 1)
+            XCTAssertNil(viewModel.messageActionErrorMessage)
+            viewModel.stopListening()
+        }
+    }
+
+    @MainActor
+    func testStopOrSecondTapWhileSettingsArePendingNeverStartsPlayback() async throws {
+        for secondTap in [false, true] {
+            let started = expectation(description: "settings started")
+            let released = expectation(description: "settings released")
+            let release = DispatchSemaphore(value: 0)
+            let speech = SpySpeechSynthesizer()
+            let audioSession = SpyListenAudioSession()
+            let viewModel = try makeViewModel(
+                speechSynthesizerFactory: { speech },
+                listenAudioSession: audioSession,
+                serverTTSAudioPlayerFactory: { _ in
+                    XCTFail("Stopped settings must not create a player")
+                    return SpyListenAudioPlayer()
+                }
+            ) { request in
+                XCTAssertEqual(request.url?.path, "/api/settings")
+                started.fulfill()
+                release.wait()
+                defer { released.fulfill() }
+                return apiTestJSONResponse(#"{"tts_engine":"browser"}"#, for: request)
+            }
+            let context = try listenContext("Stopped", id: "stopped")
+            viewModel.toggleListening(to: context)
+            let pending = viewModel.listenPreparationTask
+            await fulfillment(of: [started], timeout: 3)
+            XCTAssertEqual(audioSession.activateCount, 0)
+            if secondTap { viewModel.toggleListening(to: context) } else { viewModel.stopListening() }
+            release.signal()
+            await pending?.value
+            await fulfillment(of: [released], timeout: 3)
+            XCTAssertEqual(speech.spokenStrings, [])
+            XCTAssertEqual(audioSession.activateCount, 0)
+            XCTAssertNil(viewModel.listeningMessageID)
+        }
+    }
+
+    @MainActor
+    func testSwitchingMessageOrServerWhileSettingsArePendingDiscardsOldPreference() async throws {
+        for switchesServer in [false, true] {
+            let started = expectation(description: "old settings started")
+            let released = expectation(description: "old settings released")
+            let release = DispatchSemaphore(value: 0)
+            let oldSpeech = SpySpeechSynthesizer()
+            let newSpeech = SpySpeechSynthesizer()
+            let player = SpyListenAudioPlayer()
+            var settingsCount = 0
+            let handler: (URLRequest) throws -> (HTTPURLResponse, Data) = { request in
+                if request.url?.path == "/api/settings" {
+                    settingsCount += 1
+                    if settingsCount == 1 {
+                        XCTAssertEqual(request.url?.host, "example.test")
+                        started.fulfill()
+                        release.wait()
+                        defer { released.fulfill() }
+                        return apiTestJSONResponse(#"{"tts_engine":"browser"}"#, for: request)
+                    }
+                    XCTAssertEqual(request.url?.host, switchesServer ? "second.test" : "example.test")
+                    return apiTestJSONResponse(#"{"tts_engine":"edge","tts_voice":"tr-TR-EmelNeural"}"#, for: request)
+                }
+                XCTAssertEqual(request.url?.host, switchesServer ? "second.test" : "example.test")
+                let body = try XCTUnwrap(apiTestBodyData(from: request))
+                let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+                XCTAssertEqual(json, ["text": "New", "voice": "tr-TR-EmelNeural", "engine": "edge"])
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data([1]))
+            }
+            let old = try makeViewModel(speechSynthesizerFactory: { oldSpeech }, serverTTSAudioPlayerFactory: { _ in player }, handler: handler)
+            old.toggleListening(to: try listenContext("Old", id: "old"))
+            let pending = old.listenPreparationTask
+            await fulfillment(of: [started], timeout: 3)
+            let current: ChatViewModel
+            if switchesServer {
+                // ChatView.onDisappear stops Listen when the server-keyed tree is replaced.
+                old.stopListening()
+                current = try makeViewModel(speechSynthesizerFactory: { newSpeech }, serverTTSAudioPlayerFactory: { _ in player }, serverURL: URL(string: "https://second.test")!, handler: handler)
+            } else {
+                current = old
+            }
+            current.toggleListening(to: try listenContext("New", id: "new"))
+            await current.listenPreparationTask?.value
+            release.signal()
+            await pending?.value
+            await fulfillment(of: [released], timeout: 3)
+            XCTAssertEqual(settingsCount, 2)
+            XCTAssertEqual(oldSpeech.spokenStrings, [])
+            XCTAssertEqual(newSpeech.spokenStrings, [])
+            XCTAssertEqual(player.prepareToPlayCount, 1)
+            XCTAssertEqual(current.listeningMessageID, "new")
+            current.stopListening()
+        }
+    }
+
+    @MainActor
+    private func listenContext(_ text: String, id: String) throws -> MessageActionContext {
+        try XCTUnwrap(MessageActionContext(
+            message: ChatMessage(role: "assistant", content: text, timestamp: 1_770_000_024, messageId: id),
+            visibleIndex: 0,
+            messagesOffset: 0
+        ))
     }
 
     func testServerTTSPolicyRoutesByServerTextCap() {
@@ -10655,6 +10801,7 @@ final class ChatViewModelSendTests: XCTestCase {
         serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
         draftAttachmentStore: any ChatDraftAttachmentStoring = RecordingSendDraftAttachmentStore(),
         userDefaults: UserDefaults = .standard,
+        serverURL: URL? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) throws -> ChatViewModel {
         MockURLProtocol.requestHandler = handler
@@ -10662,7 +10809,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         let urlSession = URLSession(configuration: configuration)
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let server = try XCTUnwrap(serverURL ?? URL(string: "https://example.test"))
         let client = APIClient(baseURL: server, session: urlSession)
         let summary: SessionSummary
         if let sessionSummary {
