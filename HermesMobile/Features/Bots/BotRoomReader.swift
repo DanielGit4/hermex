@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Observation
 
@@ -23,9 +24,18 @@ import Observation
     private(set) var hasEarlier = false
     private(set) var loadingEarlier = false
     private(set) var foreignAuthority = false
-    var draft = ""
+    private var drafts: [String: String] = [:]
+    private var uncertainSends: [String: Send] = [:]
+    private(set) var threads: [BotRoomThread] = []
+    var draft: String {
+        get { draft(in: nil) }
+        set { setDraft(newValue, in: nil) }
+    }
+    func draft(in threadID: String?) -> String { drafts[threadID ?? ""] ?? "" }
+    func setDraft(_ text: String, in threadID: String?) { drafts[threadID ?? ""] = text }
+    func uncertainSend(in threadID: String?) -> Send? { uncertainSends[threadID ?? ""] }
     private(set) var commandMessage: String?
-    private(set) var uncertainSend: Send?
+    var uncertainSend: Send? { uncertainSend(in: nil) }
     private(set) var uncertainDisband = false
     private var renaming = false
     private(set) var busy = false
@@ -39,7 +49,15 @@ import Observation
         let text: String
         let eventID: String
         let threadID: String
-        init(text: String) { self.text = text; eventID = UUID().uuidString; threadID = UUID().uuidString }
+        let contextThreadID: String?
+        init(text: String, threadID: String? = nil) {
+            self.text = text; eventID = UUID().uuidString
+            self.threadID = threadID ?? UUID().uuidString; contextThreadID = threadID
+        }
+        /// Pinned gateway user_event_id: SHA256 of the client retry key.
+        var serverEventID: String {
+            "user:" + SHA256.hash(data: Data(eventID.utf8)).map { String(format: "%02x", $0) }.joined()
+        }
     }
     @ObservationIgnored private var didOpen = false
     @ObservationIgnored private var viewOwner: UUID?
@@ -70,7 +88,7 @@ import Observation
         self.onChanged = onChanged; self.onDisbanded = onDisbanded
         self.makeWire = makeWire ?? { BotClient(saved: $0, server: key.server) }; self.onExpired = onExpired
         if case .room(let recent)? = cache.recent.snapshot(for: .room(key)) {
-            log = recent; events = recent.events; hasEarlier = recent.earlierBoundary > 0
+            log = recent; publishLog()
             hasRecentLog = true
         }
     }
@@ -80,14 +98,16 @@ import Observation
     /// Once the host has refused this reader's password, a reopen only restores the saved
     /// history and stops: the reader signs in with the record it was built from, so it
     /// never sends that password again (#884).
-    func open(owner: UUID? = nil) async {
+    func open(owner: UUID? = nil, preservingLoadedHistory: Bool = false) async {
         viewOwner = owner
         suspend()
-        if case .room(let recent)? = cache.recent.snapshot(for: .room(key)) {
-            log = recent; events = recent.events; hasEarlier = recent.earlierBoundary > 0
+        if preservingLoadedHistory && !log.events.isEmpty {
+            hasRecentLog = true
+        } else if case .room(let recent)? = cache.recent.snapshot(for: .room(key)) {
+            log = recent; publishLog()
             hasRecentLog = true
         } else {
-            log = BotRoomLog(); events = []; hasEarlier = false; hasRecentLog = false
+            log = BotRoomLog(); events = []; threads = []; hasEarlier = false; hasRecentLog = false
         }
         recentOwner = cache.recent.begin(.room(key))
         // Checked before `makeWire`, which can retire a newer shared connection.
@@ -176,15 +196,16 @@ import Observation
         } catch { fail(error, client) }
     }
 
-    func leave(owner: UUID) {
+    func leave(owner: UUID, preservingLoadedHistory: Bool = false) {
         guard viewOwner == owner else { return }
-        close(); viewOwner = nil
+        if preservingLoadedHistory { suspend() } else { close() }
+        viewOwner = nil
     }
 
     func suspend() {
         saveRecentTranscript()
         if busy && dispatched {
-            uncertainSend = sending ?? uncertainSend
+            if let sending { uncertainSends[sending.contextThreadID ?? ""] = sending }
             commandMessage = String(localized: "Outcome unknown. Reconnect to check the room. Commands are never resent automatically.")
         }
         commandID = nil; busy = false; sending = nil; dispatched = false; renaming = false
@@ -195,7 +216,7 @@ import Observation
     }
 
     func close() {
-        suspend(); log = BotRoomLog(); events = []; hasEarlier = false
+        suspend(); log = BotRoomLog(); events = []; threads = []; hasEarlier = false
         hasRecentLog = false
         status = BotRoomStatus(.null); lastAuthority = nil
     }
@@ -209,9 +230,17 @@ import Observation
     var showsWelcome: Bool { link == .live && !hasEarlier && !BotRoomEvent.hasConversation(in: events) }
     var showsStop: Bool { status.working || status.stopping > 0 || awaitingStop }
     var mayStop: Bool { allows("groups.stop") && !busy && !awaitingStop && status.stopping == 0 && status.stoppable > 0 }
-    var mayEditDraft: Bool { !busy && uncertainSend == nil }
-    var maySend: Bool { allows("groups.send") && !busy && uncertainSend == nil && BotRoomRPC.validText(draft) }
-    var mayResend: Bool { allows("groups.send") && !busy && uncertainSend != nil }
+    var mayEditDraft: Bool { mayEditDraft(in: nil) }
+    var maySend: Bool { maySend(in: nil) }
+    var mayResend: Bool { mayResend(in: nil) }
+    func mayEditDraft(in threadID: String?) -> Bool { !busy && uncertainSend(in: threadID) == nil }
+    func maySend(in threadID: String?) -> Bool {
+        allows("groups.send") && mayEditDraft(in: threadID) && BotRoomRPC.validText(draft(in: threadID))
+            && (threadID == nil || threads.contains { $0.id == threadID })
+    }
+    func mayResend(in threadID: String?) -> Bool {
+        allows("groups.send") && !busy && uncertainSend(in: threadID) != nil
+    }
     private func allows(_ method: String) -> Bool { canParticipate && capabilities.methods.contains(method) }
     func mayAct(_ action: BotRoomAction) -> Bool {
         !busy && action.isAnswerable && !inactiveActions.contains(action.id) && status.actions.contains(action)
@@ -263,11 +292,11 @@ import Observation
         return false
     }
 
-    /// Every explicit Send mints a thread so it queues instead of superseding work.
+    /// Overview sends start a thread; detail replies continue its current discussion.
     /// Only the dedicated retry button reuses an uncertain send's id and payload.
-    func send(retry: Bool = false) async {
-        guard retry ? mayResend : maySend else { return }
-        let request = retry ? uncertainSend! : Send(text: draft)
+    func send(retry: Bool = false, threadID: String? = nil) async {
+        guard retry ? mayResend(in: threadID) : maySend(in: threadID) else { return }
+        let request = retry ? uncertainSend(in: threadID)! : Send(text: draft(in: threadID), threadID: threadID)
         sending = request
         let send = HermesCall.groupsSend(roomID: key.roomID, eventID: request.eventID, text: request.text, threadID: request.threadID)
         await command(send, validate: {}, accept: { result in
@@ -278,8 +307,8 @@ import Observation
                   result["event"]["payload"]["text"].text != nil,
                   BotRoomEvent(result["event"]) != nil else { throw BotFailure.unsupported }
             self.log.acknowledge(result["event"])
-            self.uncertainSend = nil; self.sending = nil
-            if self.draft == request.text { self.draft = "" }
+            self.uncertainSends[request.contextThreadID ?? ""] = nil; self.sending = nil
+            if self.draft(in: request.contextThreadID) == request.text { self.setDraft("", in: request.contextThreadID) }
             self.publishLog()
             self.feedback = BotFeedback(.sent, after: self.feedback)
         })
@@ -333,7 +362,7 @@ import Observation
                 if rejection.expired { discardHistory(); close(); onExpired(); return }
                 // A rejected retry does not erase the uncertainty of the original send.
             } else if dispatched {
-                uncertainSend = sending ?? uncertainSend
+                if let sending { uncertainSends[sending.contextThreadID ?? ""] = sending }
                 commandMessage = String(localized: "Outcome unknown. Reconnect to check the room. Commands are never resent automatically.")
             } else { commandMessage = error.localizedDescription }
         }
@@ -423,12 +452,14 @@ import Observation
     private func publishLog() {
         // A poll can race the send acknowledgment. Do not publish our own pending
         // message as sent until the RPC result has been validated.
+        let pendingIDs = Set((Array(uncertainSends.values) + [sending].compactMap { $0 }).map(\.serverEventID))
         let visible = log.events.filter { event in
-            guard let sending else { return true }
-            return event.kind != "message.user" || event.payload["thread_id"].text != sending.threadID
+            event.kind != "message.user" || !pendingIDs.contains(event.eventID ?? "")
         }
         if events != visible { events = visible }
         hasEarlier = log.earlierBoundary > 0
+        let grouped = BotRoomThread.group(visible, hasEarlier: hasEarlier)
+        if threads != grouped { threads = grouped }
     }
 
     private func saveRecentTranscript() {

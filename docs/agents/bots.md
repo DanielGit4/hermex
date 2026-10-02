@@ -1494,7 +1494,10 @@ While visible and foregrounded, state reads run every two seconds when working
 or blocked and every ten seconds when idle. Log reads happen only after sequence
 advancement. Unchanged polls do not assign the transcript. Backgrounding, closing,
 and socket loss stop polling and invalidate late replies. Reconnect closes the
-old client before opening and re-reading state/history. Closing drops the in-memory log; bounded cached messages remain for reopening.
+old client before opening and re-reading state/history. Overview/thread navigation
+keeps the loaded log with the room reader so a search target outside the bounded
+recent cache survives the transition. Bounded cached messages remain after the
+reader is discarded.
 
 The transcript renders `message.user` and `message.member` with the existing
 Bot markdown renderer; member messages include their sender and roster avatar.
@@ -1520,12 +1523,23 @@ Contract: `tui_gateway/methods_groups.py` and `gateway/hosted_rooms.py` at
 capabilities, the “Comms” list/state, and its empty log on 0.21.2. The checked-in
 fixture replaces the installation identity. Synthetic pages cover non-empty replay.
 
+The overview shows compact root previews ordered by latest activity; opening one
+shows chronological thread history. Partial logs use an earlier-root placeholder
+and loaded reply counts. Missing or invalid thread IDs stay readable as unthreaded
+history with no reply target. Disk snapshots persist optional thread and event IDs;
+older snapshots remain readable without inventing either. Search opens the owning
+thread and materializes its sequence target. Both surfaces retain the bounded
+render window and reveal local rows before fetching earlier history. Stop and
+pending actions remain room-wide.
+
 ### Room participation
 
 The text-only composer uses room member handles and display names for mention
 completion, plus `all` and `everyone`. Text is sent as typed, without the Bot Chat
-identification annotation. Each explicit send mints both an `event_id` and a fresh
-`thread_id`: sharing a thread would supersede work rather than queue it.
+identification annotation. Each explicit send mints an `event_id`. The room overview
+starts a fresh `thread_id`; thread detail uses the selected existing `thread_id`.
+A reply becomes that thread's current discussion instead of queuing an independent
+thread. It does not promise immediate cancellation of already running work.
 `groups.send` acknowledges a durable append and admission, not a bot response.
 The result inserts one bubble by sequence without advancing the log read cursor;
 polling cannot duplicate that bubble or skip earlier events. The server may trim
@@ -1533,7 +1547,10 @@ surrounding whitespace in its acknowledged text.
 
 A lost reply preserves the draft and reports an unknown outcome. Reconnect only
 reads state/history. Only the explicit Retry send button reuses the original id,
-thread and text; ordinary Send stays disabled while that outcome is unresolved.
+thread and text; ordinary Send in that composer stays disabled while its outcome
+is unresolved. Overview and each thread keep separate drafts and uncertain sends.
+Pending log suppression matches the exact server event identity, not the thread,
+so earlier user messages in a continued thread remain visible.
 Pending commands are invalidated before a room closes or backgrounds. Drafts and
 uncertain commands stay with that room reader in memory, never another connection.
 

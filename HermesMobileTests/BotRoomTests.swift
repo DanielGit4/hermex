@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import HermesMobile
 
@@ -420,6 +421,97 @@ import XCTest
         reader.close()
     }
 
+    func testContinuedThreadKeepsOldMessagesVisibleUntilExactReplyAcknowledgment() async throws {
+        let wire = RoomWire(), cache = BotHistoryCache()
+        wire.latest = 1
+        var root = RoomFixture.event(1).fields!
+        root["payload"] = .object(["text": .string("Desktop root"), "thread_id": .string("desktop-thread")])
+        try await cache.appendRoom(key: key(), room: BotGroupRoom(RoomFixture.room(latest: 1))!,
+                                   page: RoomFixture.page([.object(root)], cursor: 1), since: 0)
+        let subject = makeReader(wire, cache: cache)
+        await subject.open()
+        let thread = "desktop-thread"
+        subject.setDraft("Phone reply", in: thread)
+        let parked = expectation(description: "reply awaiting acknowledgment")
+        wire.holdWrite = true; wire.onWriteHeld = { parked.fulfill() }
+        let reply = Task { await subject.send(threadID: thread) }
+        await fulfillment(of: [parked], timeout: 2)
+        await subject.poll()
+        XCTAssertEqual(subject.events.map { $0.payload["text"].text }, ["Desktop root"],
+                       "Suppress only this event, never earlier user messages in the same thread")
+        XCTAssertEqual(wire.writes[0].1["payload"]?["thread_id"].text, "desktop-thread")
+        wire.releaseWrite(); await reply.value
+        XCTAssertEqual(subject.events.map { $0.payload["text"].text }, ["Desktop root", "Phone reply"])
+        XCTAssertEqual(subject.threads.count, 1)
+        XCTAssertEqual(subject.threads.first?.replyCount, 1)
+        subject.close()
+    }
+
+    func testThreadDraftsAndUncertainRetriesStayWithTheirOriginalContext() async throws {
+        let wire = RoomWire()
+        let subject = makeReader(wire)
+        await subject.open(); subject.draft = "root"; await subject.send()
+        let thread = try XCTUnwrap(subject.events.first?.threadID)
+        subject.draft = "separate overview draft"
+        subject.setDraft("uncertain reply", in: thread)
+        wire.loseWrite = true; await subject.send(threadID: thread)
+        let original = wire.writes[1].1
+        XCTAssertEqual(subject.draft, "separate overview draft")
+        XCTAssertEqual(subject.draft(in: thread), "uncertain reply")
+        XCTAssertNil(subject.uncertainSend)
+        XCTAssertEqual(subject.uncertainSend(in: thread)?.threadID, thread)
+        wire.loseWrite = false; await subject.open()
+        XCTAssertEqual(subject.events.count, 1, "Replay cannot turn an uncertain reply into an acknowledged bubble")
+        await subject.send()
+        XCTAssertNotEqual(wire.writes[2].1["payload"]?["thread_id"].text, thread)
+        XCTAssertEqual(subject.draft(in: thread), "uncertain reply")
+        await subject.send(retry: true, threadID: thread)
+        XCTAssertEqual(wire.writes[3].1, original, "Retry freezes both event and thread identity")
+        XCTAssertEqual(subject.draft(in: thread), "")
+        XCTAssertEqual(subject.events.count, 3)
+        XCTAssertEqual(subject.threads.count, 2)
+        subject.close()
+    }
+
+    func testThreadNavigationKeepsLocallyLoadedSearchTargetsBeyondRecentCacheLimit() async throws {
+        let wire = RoomWire(), subject = makeReader(wire)
+        wire.latest = 600
+        let overview = UUID(), detail = UUID()
+        await subject.open(owner: overview)
+        await subject.loadEarlier(); await subject.loadEarlier()
+        XCTAssertEqual(subject.events.first?.seq, 1)
+        subject.leave(owner: overview, preservingLoadedHistory: true)
+        await subject.open(owner: detail, preservingLoadedHistory: true)
+        subject.leave(owner: overview)
+        XCTAssertEqual(subject.events.first?.seq, 1, "Navigation must not trim an already materialized search target")
+        XCTAssertEqual(subject.events.count, 600)
+        XCTAssertEqual(subject.link, .live, "The outgoing overview cannot close the detail's reader")
+        subject.close()
+    }
+
+    func testThreadProjectionOrdersActivityWithoutInventingPartialRootsOrReplyTargets() throws {
+        func event(_ seq: Int, _ kind: String, _ thread: BotJSON) -> BotRoomEvent {
+            var value = RoomFixture.event(seq, kind: kind).fields!
+            value["payload"] = .object(["text": .string("row \(seq)"), "thread_id": thread])
+            return BotRoomEvent(.object(value))!
+        }
+        let events = [event(1, "message.user", .string("desktop")),
+                      event(2, "message.user", .string("other")),
+                      event(3, "message.member", .string("desktop")),
+                      event(4, "message.user", .string("desktop")),
+                      event(5, "message.member", .null),
+                      event(6, "message.user", .string("invalid thread"))]
+        let complete = BotRoomThread.group(events, hasEarlier: false)
+        XCTAssertEqual(complete.map(\.id), ["desktop", "other"])
+        XCTAssertEqual(complete[0].events.map(\.seq), [1, 3, 4])
+        XCTAssertEqual(complete[0].root?.seq, 1)
+        XCTAssertEqual(complete[0].replyCount, 2)
+        XCTAssertEqual(events.filter { $0.threadID == nil }.map(\.seq), [5, 6])
+        let partial = BotRoomThread.group(Array(events.dropFirst(2)), hasEarlier: true)
+        XCTAssertNil(partial.first?.root)
+        XCTAssertEqual(partial.first?.replyCount, 2, "Only loaded replies can be counted")
+    }
+
     func testAcknowledgmentDoesNotSkipEarlierUnreadEvents() {
         var log = BotRoomLog(); log.begin(latest: 0)
         log.acknowledge(RoomFixture.event(3))
@@ -641,6 +733,33 @@ import XCTest
 }
 
 final class BotRoomTranscriptWindowTests: XCTestCase {
+    func testExpandedOverviewSurvivesOldestThreadReceivingAReply() {
+        var window = BotRoomTranscriptWindow()
+        let original = Self.events(1...100)
+        window.seed(original, live: true, overview: true)
+        XCTAssertTrue(window.showEarlier(in: original, overview: true))
+        XCTAssertEqual(window.start(in: original, overview: true), 0)
+
+        // Thread 1 moves to the front of the descending overview at sequence 101.
+        let reordered = Self.events(2...101)
+        XCTAssertEqual(window.start(in: reordered, overview: true), 0,
+                       "Incoming activity must not hide the 50 previously revealed threads")
+        window.seed(reordered, live: true, overview: true)
+        XCTAssertEqual(window.start(in: reordered, overview: true), 0)
+    }
+
+    func testOverviewRowIdentitySurvivesThreadActivityWhileDetailTargetsStayDistinct() throws {
+        func event(_ seq: Int) -> BotRoomEvent {
+            var value = RoomFixture.event(seq).fields!
+            value["payload"] = .object(["text": .string("reply"), "thread_id": .string("desktop-thread")])
+            return BotRoomEvent(.object(value))!
+        }
+        XCTAssertEqual(BotRoomTranscriptRow(event: event(1), isOverview: true).id,
+                       BotRoomTranscriptRow(event: event(9), isOverview: true).id)
+        XCTAssertEqual(BotRoomTranscriptRow(event: event(1), isOverview: false).id, .event(1))
+        XCTAssertEqual(BotRoomTranscriptRow(event: event(9), isOverview: false).id, .event(9))
+    }
+
     func testOpensOnTheNewestPageBeforeAndAfterSeeding() {
         let events = Self.events(1...300)
         var window = BotRoomTranscriptWindow()
@@ -815,6 +934,7 @@ enum RoomFixture {
                     var payload = params["payload"]!.fields!
                     payload["text"] = .string(payload["text"]!.text!.trimmingCharacters(in: .whitespacesAndNewlines))
                     event["payload"] = .object(payload)
+                    event["event_id"] = .string("user:" + SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined())
                     sentEvents[id] = .object(event)
                 }
                 result = .object(["accepted": .bool(true), "client_event_id": params["event_id"]!, "event": sentEvents[id]!])

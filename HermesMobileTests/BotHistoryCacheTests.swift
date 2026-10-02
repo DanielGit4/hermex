@@ -16,6 +16,31 @@ final class BotHistoryCacheTests: XCTestCase {
 
     private var room: BotGroupRoom { BotGroupRoom(RoomFixture.room(latest: 3))! }
 
+    func testOldRoomMessageSnapshotRemainsReadableWithoutAReplyTarget() throws {
+        let data = Data(#"{"id":"3","role":"message.member","text":"Old message","seq":3}"#.utf8)
+        let message = try JSONDecoder().decode(BotHistoryCache.Message.self, from: data)
+        let event = try XCTUnwrap(message.roomEvent.flatMap(BotRoomEvent.init))
+        XCTAssertEqual(event.payload["text"].text, "Old message")
+        XCTAssertNil(event.threadID)
+        XCTAssertTrue(BotRoomThread.group([event], hasEarlier: false).isEmpty)
+    }
+
+    func testRoomThreadIdentitySurvivesDiskReplay() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = BotHistoryCache(directory: directory), key = roomKey()
+        let event: BotJSON = .object([
+            "room_id": .string(key.roomID), "seq": .number(1), "kind": .string("message.user"),
+            "event_id": .string("user:fixture"),
+            "payload": .object(["text": .string("Desktop root"), "thread_id": .string("desktop-thread")])
+        ])
+        try await cache.appendRoom(key: key, room: room, page: RoomFixture.page([event], cursor: 1), since: 0)
+        let restored = try await BotHistoryCache(directory: directory).roomHistory(key)
+        XCTAssertEqual(restored?.replayPage["events"].list?.first?["payload"]["thread_id"].text,
+                       "desktop-thread", "Disk replay must preserve the Desktop thread reply target")
+        XCTAssertEqual(restored?.replayPage["events"].list?.first?["event_id"].text, "user:fixture")
+    }
+
     func testRoomOverlapsAreIdempotentOnDiskAndOnlyMessagesAreSearchable() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }

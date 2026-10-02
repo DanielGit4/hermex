@@ -3,6 +3,7 @@ import SwiftUI
 /// The Bot editor and mention panel, with only the controls rooms support.
 struct BotRoomComposerView: View {
     @Bindable var reader: BotRoomReader
+    var threadID: String? = nil
     let roster: [BotProfile]
     let avatars: [String: UIImage]
     @Environment(\.colorScheme) private var colorScheme
@@ -19,13 +20,13 @@ struct BotRoomComposerView: View {
     var body: some View {
         AdaptiveGlassContainer(spacing: 6) {
             VStack(spacing: 8) {
-                if focused, reader.mayEditDraft,
-                   let trigger = BotMentionTrigger.detect(in: reader.draft, selection: selection.range) {
+                if focused, reader.mayEditDraft(in: threadID),
+                   let trigger = BotMentionTrigger.detect(in: reader.draft(in: threadID), selection: selection.range) {
                     let completions = BotRoomMentions.completions(room: reader.room, query: trigger.query)
                     if !completions.isEmpty {
                         BotMentionAutocompleteView(completions: completions, avatars: avatars, room: reader.room, roster: roster) { item in
-                            let result = trigger.applying(tag: item.tag, to: reader.draft)
-                            reader.draft = result.draft
+                            let result = trigger.applying(tag: item.tag, to: reader.draft(in: threadID))
+                            reader.setDraft(result.draft, in: threadID)
                             selection = selection.moved(to: result.selection)
                             ChatHaptics.autocompleteAccepted(isEnabled: isHapticsEnabled)
                         }
@@ -33,15 +34,15 @@ struct BotRoomComposerView: View {
                 }
                 HStack(spacing: 4) {
                     ComposerTextInputView(
-                        text: $reader.draft, selection: $selection, isFocused: $focused,
+                        text: Binding(get: { reader.draft(in: threadID) }, set: { reader.setDraft($0, in: threadID) }), selection: $selection, isFocused: $focused,
                         inputHeight: $inputHeight, measuredHeight: $measuredHeight,
-                        isDisabled: !reader.mayEditDraft, isCollapsed: !focused,
-                        isKeyboardSendEnabled: reader.maySend, verticalPadding: 12,
+                        isDisabled: !reader.mayEditDraft(in: threadID), isCollapsed: !focused,
+                        isKeyboardSendEnabled: reader.maySend(in: threadID), verticalPadding: 12,
                         chipSkills: [], chipFilePaths: [], quotes: [], onKeyboardSend: send,
                         onPasteFileProviders: { _ in }, onPasteFileURLs: { _ in },
                         onPasteImageProviders: { _ in }, onPasteImages: { _ in },
                         onTapChip: { _ in }, onTapQuote: { _ in }, onRemoveQuote: { _ in },
-                        placeholder: String(localized: "Message \(reader.room.name)"), acceptsAttachments: false
+                        placeholder: threadID == nil ? String(localized: "Message \(reader.room.name)") : String(localized: "Reply in thread"), acceptsAttachments: false
                     )
                     actionButton
                 }
@@ -54,7 +55,7 @@ struct BotRoomComposerView: View {
 
     private var actionButton: some View {
         let stop = reader.showsStop
-        let enabled = stop ? reader.mayStop : reader.maySend
+        let enabled = stop ? reader.mayStop : reader.maySend(in: threadID)
         let appearance = ChatComposerActionAppearance(isStop: stop, isDisabled: !enabled,
             colorScheme: colorScheme, tintsPrimaryActions: tintsPrimaryActions, themeHex: themeHex)
         return Button {
@@ -77,7 +78,7 @@ struct BotRoomComposerView: View {
         .accessibilityLabel(stop ? Text("Stop every bot in this room") : Text("Send"))
     }
 
-    private func send() { Task { await reader.send() } }
+    private func send() { Task { await reader.send(threadID: threadID) } }
 }
 
 /// Room handles are server routing keys. Friendly names only help searching;

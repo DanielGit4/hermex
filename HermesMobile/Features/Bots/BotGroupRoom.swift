@@ -77,6 +77,7 @@ struct BotRoomStatus: Equatable {
 
 struct BotRoomEvent: Identifiable, Equatable {
     let seq: Int
+    let eventID: String?
     let kind: String
     let actor: BotJSON
     let payload: BotJSON
@@ -84,9 +85,15 @@ struct BotRoomEvent: Identifiable, Equatable {
     var id: Int { seq }
     init?(_ value: BotJSON) {
         guard let seq = value["seq"].integer, seq > 0 else { return nil }
-        self.seq = seq; kind = value["kind"].text ?? ""
+        self.seq = seq; eventID = value["event_id"].text; kind = value["kind"].text ?? ""
         actor = value["actor"]; payload = value["payload"]; timestamp = value["created_at"].number
     }
+    var threadID: String? {
+        guard let id = payload["thread_id"].text, BotRoomRPC.validID(id) else { return nil }
+        return id
+    }
+    var isMessage: Bool { kind == "message.user" || kind == "message.member" }
+
     /// The events that open a dated stretch of a room. Only user and member
     /// messages carry a time; system rows neither show one nor date a gap.
     static func gapStarts(in events: some Sequence<BotRoomEvent>) -> Set<Int> {
@@ -117,6 +124,29 @@ struct BotRoomEvent: Identifiable, Equatable {
         case "room.renamed": return String(localized: "Room renamed to \(payload["name"].text ?? "")")
         default: return ""
         }
+    }
+}
+
+/// A loaded projection, not a claim about the server's complete thread history.
+struct BotRoomThread: Identifiable, Equatable {
+    let id: String
+    let events: [BotRoomEvent]
+    let historyIsPartial: Bool
+    var messages: [BotRoomEvent] { events.filter(\.isMessage) }
+    var root: BotRoomEvent? {
+        guard !historyIsPartial, let first = messages.first, first.kind == "message.user" else { return nil }
+        return first
+    }
+    var replyCount: Int { messages.count - (root == nil ? 0 : 1) }
+    var latest: BotRoomEvent { events[events.count - 1] }
+
+    static func group(_ events: [BotRoomEvent], hasEarlier: Bool) -> [Self] {
+        var groups: [String: [BotRoomEvent]] = [:]
+        for event in events {
+            if let id = event.threadID { groups[id, default: []].append(event) }
+        }
+        return groups.map { Self(id: $0.key, events: $0.value, historyIsPartial: hasEarlier) }
+            .sorted { $0.latest.seq > $1.latest.seq }
     }
 }
 

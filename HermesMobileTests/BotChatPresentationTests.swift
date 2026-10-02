@@ -301,6 +301,41 @@ import XCTest
         XCTAssertFalse(after.contains("No saved messages found"), after)
     }
 
+    func testThreadSearchOpensChronologicalDetailAndItsOwnComposer() async throws {
+        let server = URL(string: "https://room.example")!
+        let connection = BotConnection(id: UUID(), name: "Fixture", address: server, username: "fixture", password: "fixture")
+        let room = try XCTUnwrap(BotGroupRoom(RoomFixture.room(latest: 80)))
+        let cache = BotHistoryCache()
+        let key = BotRoomKey(server: server, connectionID: connection.id, roomID: room.id)
+        var log = BotRoomLog()
+        let events = (1...80).map { seq -> BotJSON in
+            var event = RoomFixture.event(seq, kind: seq == 1 ? "message.user" : "message.member").fields!
+            event["payload"] = .object(["text": .string("Thread message \(seq)"), "thread_id": .string("desktop-thread")])
+            return .object(event)
+        }
+        log.apply(RoomFixture.page(events, cursor: 80))
+        cache.recent.save(.room(log), for: .room(key), owner: cache.recent.begin(.room(key)))
+        let reader = BotRoomReader(key: key, connection: connection, room: room, cache: cache,
+                                   initialSequence: 20, makeWire: { _ in RoomWire() })
+        reader.draft = "overview draft"
+        reader.setDraft("thread draft", in: "desktop-thread")
+        let window = try show(NavigationStack {
+            BotRoomView(reader: reader, roster: [], avatars: [:])
+        }.environment(\.scenePhase, .inactive))
+        defer { reader.close(); close(window) }
+        await settle(window) {
+            descendants(window).compactMap { $0 as? ComposerChipTextView }
+                .contains { $0.accessibilityLabel == "Reply in thread" }
+        }
+        let editor = try XCTUnwrap(descendants(window).compactMap { $0 as? ComposerChipTextView }
+            .first { $0.accessibilityLabel == "Reply in thread" })
+        XCTAssertEqual(editor.sourceText, "thread draft")
+        XCTAssertEqual(reader.draft, "overview draft")
+        let replies = try replyLeaves(in: window)
+        XCTAssertTrue(replies.visible.contains("Thread message 20"), "Search must materialize and reveal its actual thread: \(replies)")
+        XCTAssertFalse(replies.visible.contains("Thread message 80"), "Search must keep the reading anchor")
+    }
+
     func testWarmRoomBuildsOnlyTheNewestPageOfReplies() async throws {
         let server = URL(string: "https://room.example")!
         let connection = BotConnection(id: UUID(), name: "Fixture", address: server, username: "fixture", password: "fixture")
