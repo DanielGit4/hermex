@@ -10,6 +10,11 @@ final class ComposerVoiceDraftComposerTests: XCTestCase {
         XCTAssertEqual(ComposerKeyboardCommand.modifierFlags, .command)
     }
 
+    func testVoiceInputCannotStartBehindAppLockEvenInAnActiveScene() {
+        XCTAssertFalse(ComposerVoiceInputStartPolicy.canStart(appIsActive: true, appIsLocked: true))
+        XCTAssertTrue(ComposerVoiceInputStartPolicy.canStart(appIsActive: true, appIsLocked: false))
+    }
+
     func testComposedDraftUsesTranscriptWhenDraftIsEmpty() {
         XCTAssertEqual(
             ComposerVoiceDraftComposer.composedDraft(baseDraft: "", transcript: "Open the workspace"),

@@ -5,8 +5,13 @@ import UserNotifications
 /// notification taps, so this delegate hands tokens to `PushRegistrar`, relay taps to
 /// `PushNotificationRouter`, and local run alert taps to
 /// `ResponseCompletionNotificationRequest`. It also gives the scene `AppLockSceneDelegate`.
-/// Nothing else belongs here.
+/// It also supplies the recording-only iPhone orientation policy.
 final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        ComposerDictationLease.supportedOrientations(for: window)
+    }
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil

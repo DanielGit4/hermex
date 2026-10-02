@@ -207,7 +207,12 @@ struct BotChatComposerView: View {
             voiceInput.stopBeforeSubmittingDraft()
         }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase != .active { voiceInput.stopBeforeSubmittingDraft() }
+            if newPhase != .active { voiceInput.suspend() }
+            else { voiceInput.resume() }
+        }
+        .onChange(of: AppLock.shared.isLocked) { _, locked in
+            if locked { voiceInput.suspend() }
+            else if scenePhase == .active { voiceInput.resume() }
         }
         // Ask Hermex lands the passage here, so the keyboard should already be
         // up for whatever the user wants to ask about it.
@@ -433,15 +438,13 @@ struct BotChatComposerView: View {
         let insertion = BotVoiceDraftInsertion(draft: model.draft, selection: insertionRange)
         voiceInput.apiClient = nil
         voiceInput.providerPreference = .onDeviceOnly
-        Task {
-            await voiceInput.toggle(currentDraft: "") { transcript in
-                guard let result = insertion.applying(transcript: transcript, to: model.draft) else {
-                    voiceInput.stopBeforeSubmittingDraft()
-                    return
-                }
-                model.editDraft(result.draft)
-                selection = selection.moved(to: result.selection)
+        voiceInput.scheduleToggle(currentDraft: "") { transcript in
+            guard let result = insertion.applying(transcript: transcript, to: model.draft) else {
+                voiceInput.stopBeforeSubmittingDraft()
+                return
             }
+            model.editDraft(result.draft)
+            selection = selection.moved(to: result.selection)
         }
     }
 

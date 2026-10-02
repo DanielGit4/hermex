@@ -423,7 +423,7 @@ struct MessageComposerView: View {
         }
     }
 
-    var body: some View {
+    private var composerWithLifecycle: some View {
         AdaptiveGlassContainer(spacing: 6) {
             VStack(spacing: 6) {
                 if voiceNoteRecorder.isRecording {
@@ -598,15 +598,19 @@ struct MessageComposerView: View {
             // "New Chat with Voice" intent once its session is created) — start here.
             // Runs again when the app lock changes, since dictation waits for it (#885);
             // one modifier keeps this chain inside CI Xcode's type-checking budget.
+            if AppLock.shared.isLocked { voiceInput.suspend() }
+            else if scenePhase == .active { voiceInput.resume() }
             autoStartVoiceInputIfNeeded()
         }
+        .onChange(of: sessionID) { _, _ in voiceInput.stopBeforeSubmittingDraft() }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase != .active {
-                voiceInput.stopBeforeSubmittingDraft()
+                voiceInput.suspend()
                 // Backgrounding stops the recorder's run-loop ticker, so cancel
                 // the in-flight recording rather than leave it silently stalled.
                 cancelVoiceNote()
             } else {
+                voiceInput.resume()
                 // An intent that opened this composer may have foregrounded the app
                 // a beat after it appeared; auto-start once we're active (#338).
                 autoStartVoiceInputIfNeeded()
@@ -632,6 +636,10 @@ struct MessageComposerView: View {
                 showFileImporter = true
             }
         }
+    }
+
+    var body: some View {
+        composerWithLifecycle
         .sheet(isPresented: $showsAllModelsSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
             ModelPickerSheet(
                 configuration: .composer,
@@ -1377,10 +1385,8 @@ struct MessageComposerView: View {
     private func toggleVoiceInput() {
         voiceInput.apiClient = apiClient
         voiceInput.providerPreference = ComposerSTTProviderPreference.storedValue(sttProviderPreferenceRawValue)
-        Task {
-            await voiceInput.toggle(currentDraft: draftMessage) { newDraft in
-                editDraft(newDraft)
-            }
+        voiceInput.scheduleToggle(currentDraft: draftMessage) { newDraft in
+            editDraft(newDraft)
         }
     }
 
