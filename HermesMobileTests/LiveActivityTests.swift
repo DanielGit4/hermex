@@ -197,6 +197,51 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertTrue(updated.isStale)
     }
 
+    func testWidgetTapRoutesWebuiSessionThroughItsOwningServer() throws {
+        let owner = URL(string: "https://other.example:8787")!
+        let sessionID = "session & /?=✓"
+        let attributes = AgentRunActivityAttributes(
+            sessionID: "original-session", sessionTitle: "Run", startedAt: .now, server: owner
+        )
+        let url = try XCTUnwrap(AgentRunTapTarget.url(attributes: attributes, sessionID: sessionID))
+        XCTAssertEqual(url.host, "webui-push")
+        XCTAssertNil(HermesDeepLink.sessionID(from: url), "An owned activity must never use the active-server route")
+        let destination = try XCTUnwrap(WebuiPushDestination(url: url))
+        XCTAssertEqual(destination.server, owner)
+        XCTAssertEqual(destination.sessionID, sessionID)
+        let account = ServerAccount(id: owner.absoluteString, urlString: owner.absoluteString,
+                                    displayName: "", initials: "", headerLogoColorHex: "",
+                                    createdAt: .now, updatedAt: .now)
+        XCTAssertEqual(destination.route(state: .loggedIn(server: server), servers: [account]), .switchServer(account))
+        XCTAssertEqual(destination.route(state: .loggedOut(server: server), servers: [account]), .switchServer(account))
+        XCTAssertEqual(destination.route(state: .loggedOut(server: owner), servers: [account]), .waitForSignIn)
+        XCTAssertEqual(destination.route(state: .loggedIn(server: owner), servers: [account]), .open)
+        XCTAssertEqual(destination.route(state: .loggedIn(server: server), servers: []), .ignore)
+    }
+
+    func testWidgetTapKeepsLegacyActivitySessionLink() throws {
+        let data = Data(#"{"sessionID":"legacy","sessionTitle":"Run","startedAt":0}"#.utf8)
+        let attributes = try JSONDecoder().decode(AgentRunActivityAttributes.self, from: data)
+        XCTAssertNil(attributes.server)
+        let url = try XCTUnwrap(AgentRunTapTarget.url(attributes: attributes, sessionID: "legacy"))
+        XCTAssertEqual(url.absoluteString, "\(HermesDeepLink.scheme)://session?id=legacy")
+        XCTAssertEqual(HermesDeepLink.sessionID(from: url), "legacy")
+        XCTAssertNil(WebuiPushDestination(url: url))
+    }
+
+    func testWidgetTapKeepsBotDestinationAheadOfWebuiSession() throws {
+        let destination = BotDestination(server: server, connectionID: UUID(), profile: "Research & review")
+        let botURL = try XCTUnwrap(HermesDeepLink.botURL(for: destination))
+        let bot = AgentRunActivityBot(key: "bot-key", destinationURL: botURL)
+        let attributes = AgentRunActivityAttributes(
+            sessionID: "bot-session", sessionTitle: "Bot", startedAt: .now, bot: bot,
+            server: URL(string: "https://other.example")!
+        )
+        let url = try XCTUnwrap(AgentRunTapTarget.url(attributes: attributes, sessionID: "bot-session"))
+        XCTAssertEqual(url, botURL)
+        XCTAssertEqual(HermesDeepLink.botDestination(from: url), destination)
+    }
+
     func testBuildsAndParsesSessionDeepLink() throws {
         let url = try XCTUnwrap(HermesDeepLink.sessionURL(sessionID: "session-abc"))
         let scheme = HermesDeepLink.scheme

@@ -93,6 +93,19 @@ enum HermesDeepLink {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// Server-owned webui destination, shared by notification and Live Activity taps.
+    /// The main app's WebuiPushDestination parses it and owns sign-in/server routing.
+    static func webuiSessionURL(server: URL, sessionID: String) -> URL? {
+        var components = URLComponents()
+        components.scheme = scheme
+        components.host = "webui-push"
+        components.queryItems = [
+            URLQueryItem(name: "server", value: server.absoluteString),
+            URLQueryItem(name: "id", value: sessionID)
+        ]
+        return components.url
+    }
+
     static func sessionURL(sessionID: String) -> URL? {
         guard !sessionID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
@@ -130,5 +143,17 @@ enum HermesDeepLink {
     private static func normalizedSessionID(_ rawValue: String?) -> String? {
         let trimmed = rawValue?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+/// Shared by the Lock Screen and Dynamic Island, and exercised by main-app tests.
+enum AgentRunTapTarget {
+    static func url(attributes: AgentRunActivityAttributes, sessionID: String) -> URL? {
+        if let bot = attributes.bot { return bot.destinationURL }
+        if let server = attributes.server {
+            return HermesDeepLink.webuiSessionURL(server: server, sessionID: sessionID)
+        }
+        // Activities persisted before server ownership was recorded keep their old route.
+        return HermesDeepLink.sessionURL(sessionID: sessionID)
     }
 }

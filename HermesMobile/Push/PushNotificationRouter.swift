@@ -67,14 +67,7 @@ struct WebuiPushDestination: Hashable {
     let sessionID: String
 
     var url: URL? {
-        var components = URLComponents()
-        components.scheme = HermesDeepLink.scheme
-        components.host = "webui-push"
-        components.queryItems = [
-            URLQueryItem(name: "server", value: server.absoluteString),
-            URLQueryItem(name: "id", value: sessionID)
-        ]
-        return components.url
+        HermesDeepLink.webuiSessionURL(server: server, sessionID: sessionID)
     }
 
     init(server: URL, sessionID: String) {

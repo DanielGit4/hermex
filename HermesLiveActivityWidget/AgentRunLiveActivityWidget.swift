@@ -15,7 +15,7 @@ struct AgentRunLiveActivityWidget: Widget {
             AgentRunLockScreenView(context: context)
                 .activityBackgroundTint(AgentRunLiveActivityTheme.background)
                 .activitySystemActionForegroundColor(AgentRunLiveActivityTheme.primaryText)
-                .widgetURL(AgentRunTapTarget.url(for: context))
+                .widgetURL(AgentRunTapTarget.url(attributes: context.attributes, sessionID: context.presentedState.sessionID))
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading) {
@@ -43,16 +43,9 @@ struct AgentRunLiveActivityWidget: Widget {
             } minimal: {
                 AgentRunIslandCompactMark(status: context.presentedState.status)
             }
-            .widgetURL(AgentRunTapTarget.url(for: context))
+            .widgetURL(AgentRunTapTarget.url(attributes: context.attributes, sessionID: context.presentedState.sessionID))
             .keylineTint(AgentRunStatusStyle.color(for: context.presentedState.status, isStale: context.presentedState.isStale))
         }
-    }
-}
-
-/// A bot's activity opens that bot; a session's opens the session (#489).
-private enum AgentRunTapTarget {
-    static func url(for context: ActivityViewContext<AgentRunActivityAttributes>) -> URL? {
-        context.attributes.bot?.destinationURL ?? HermesDeepLink.sessionURL(sessionID: context.presentedState.sessionID)
     }
 }
 
