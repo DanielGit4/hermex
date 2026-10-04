@@ -28,7 +28,8 @@ do by a webui server. `AuthManager.addHermesServer` saves a sign-in the form alr
 verified and activates the server; it needs Bot Mode on and refuses an address already
 in the registry. Turning Bot Mode off later never locks a user out: an existing Hermes
 server still opens, and so do its bot links. Its home is the Bots inbox, with the
-server's avatar for Settings (tap) and switching (hold) where the gear was. Without a
+server's avatar for Settings (tap) and switching (hold) where the gear was; the fork adds
+a Dashboard button there, which opens the Dashboard on the server's own record. Without a
 record (after Sign Out, which deletes the record and Bot data but keeps the server) or
 after the host refuses its saved password at the login step, including the one silent
 re-login a signed-in 401 starts (`HermesConnections.onSignInRejected`), the server is

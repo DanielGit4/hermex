@@ -51,7 +51,8 @@ developed by Hermes Kanban cards worked by Claude Code. Read this file together 
   retirement), the one Bot screens and push provisioning use. Do not add hermes-webui routes.
 - **Placement:** one new utility destination **Dashboard** (`SessionListUtilityDestination.dashboard`)
   next to Skills, visible when a Bot connection exists, with sections Skills Hub, MCP,
-  Plugins, Config, Keys, Logs, Gateway. Existing webui-backed Skills/Memory screens stay.
+  Plugins, Config, Keys, Logs, Gateway. On a Hermes server, the Dashboard opens from the
+  Bots inbox toolbar. Existing webui-backed Skills/Memory screens stay.
 - **Safety rules:**
   - Env keys are write-only from the phone. Never call `POST /api/env/reveal`; show
     only the server's redacted preview.
