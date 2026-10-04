@@ -46,7 +46,7 @@ struct SkillsHubView: View {
                 Button("Uninstall", role: .destructive) { Task { await model.uninstall(skill.name) } }
                 Button("Cancel", role: .cancel) {}
             } message: { _ in
-                Text("This permanently removes the skill from the Hermes host.")
+                Text("Deletes the skill’s folder from the “\(model.profile)” profile on your Hermes host, including any edits made there. New sessions won’t load it. You can install it again from the Skills Hub.")
             }
             .alert("Couldn’t Confirm It’s You", isPresented: authenticationProblemIsPresented) {
                 Button("OK", role: .cancel) {}
