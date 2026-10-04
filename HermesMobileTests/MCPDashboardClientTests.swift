@@ -111,6 +111,73 @@ import XCTest
         }
     }
 
+    func testAddingAServerPostsItsBodyAndDecodesTheHostsSummary() async throws {
+        let client = DashboardHTTPFixture.client()
+        let body: BotJSON = .object([
+            "name": .string("files"), "command": .string("npx"),
+            "args": .array([.string("-y"), .string("@modelcontextprotocol/server-filesystem")]),
+            "env": .object(["ROOT_DIR": .string("/tmp/fake-root-dir"), "MODE": .string("ro")])
+        ])
+
+        let server = try await client.addMCPServer(body, profile: "default")
+
+        XCTAssertEqual(DashboardHTTPFixture.calls.last, "POST \(host)/api/mcp/servers?profile=default")
+        XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/mcp/servers?profile=default"), body)
+        XCTAssertEqual(server.name, "files")
+        XCTAssertEqual(server.transport, "stdio")
+        XCTAssertEqual(server.args, ["-y", "@modelcontextprotocol/server-filesystem"])
+        XCTAssertEqual(server.env.map(\.name), ["MODE", "ROOT_DIR"])
+        XCTAssertEqual(server.env.map(\.redactedValue), ["***", "/tmp...-dir"], "The host's masked values, as sent")
+    }
+
+    func testTheHostsAddRulesComeBackInItsOwnWords() async throws {
+        let client = DashboardHTTPFixture.client()
+        let cases: [(BotJSON, Int, String)] = [
+            (.object(["name": .string("x"), "url": .string("https://a.example"), "command": .string("npx")]), 400,
+             "Provide exactly one of URL (HTTP/SSE) or command (stdio)"),
+            (.object(["name": .string("x"), "url": .string("https://a.example"), "args": .array([.string("-y")])]), 400,
+             "Arguments are only supported for stdio MCP servers"),
+            (.object(["name": .string("x"), "url": .string("https://a.example"), "env": .object(["A": .string("b")])]), 400,
+             "Environment variables are only supported for stdio MCP servers"),
+            (.object(["name": .string("x"), "url": .string("https://a.example"), "auth": .string("header"),
+                      "bearer_token": .string("Bearer ")]), 400, "Bearer token is required"),
+            (.object(["name": .string("x"), "url": .string("https://a.example"), "auth": .string("oauth"),
+                      "bearer_token": .string("fake-token")]), 400, "Bearer token requires header authentication"),
+            (.object(["name": .string("x"), "command": .string("npx"), "auth": .string("oauth")]), 400,
+             "HTTP authentication is not supported for stdio MCP servers"),
+            (.object(["name": .string("github"), "command": .string("npx")]), 409, "Server 'github' already exists"),
+            (.object(["name": .string("dev-tools"), "command": .string("uvx")]), 409,
+             "Server 'dev-tools' is provided by plugin 'devkit' and cannot be modified")
+        ]
+        for (body, status, detail) in cases {
+            do {
+                _ = try await client.addMCPServer(body, profile: "default")
+                XCTFail("\(status) \(detail)")
+            } catch {
+                XCTAssertEqual(error as? DashboardFailure, .refused(.string(detail)), "\(status)")
+            }
+        }
+    }
+
+    func testAnAddAnswerThatIsntTheSentServersSummaryIsUnreadable() async throws {
+        var answer: BotJSON = .object([:])
+        MCPHTTPFixture.activate { request in
+            request.httpMethod == "POST" && request.url?.path == "/api/mcp/servers" ? .json(200, answer) : nil
+        }
+        let client = DashboardHTTPFixture.client()
+        let body: BotJSON = .object(["name": .string("files"), "url": .string("https://files.example/mcp"), "auth": .string("none")])
+
+        for reply in [BotJSON.object([:]), MCPHTTPFixture.serverRow("other", transport: "http", url: "https://files.example/mcp")] {
+            answer = reply
+            do {
+                _ = try await client.addMCPServer(body, profile: "default")
+                XCTFail("Only the sent server's summary is success")
+            } catch {
+                XCTAssertEqual(error as? DashboardFailure, .unreadableResponse)
+            }
+        }
+    }
+
     func testAPluginConflictAndAnUnknownServerCarryTheirStatus() async throws {
         let client = DashboardHTTPFixture.client()
 
@@ -137,9 +204,9 @@ func readOnMain<T: Sendable>(_ read: @MainActor () -> T) -> T {
 }
 
 /// A stand-in for the host's `web_routers/mcp.py`, layered on `DashboardHTTPFixture`, which
-/// keeps answering sign-in and action status. Servers change on toggle, delete and install
-/// the way the host's `config.yaml` would, and every shape carries a field a newer host
-/// might add.
+/// keeps answering sign-in and action status. Servers change on add, toggle, delete and
+/// install the way the host's `config.yaml` would, and every shape carries a field a newer
+/// host might add.
 enum MCPHTTPFixture {
     typealias Reply = DashboardHTTPFixture.Reply
 
@@ -178,6 +245,8 @@ enum MCPHTTPFixture {
         switch (method, parts.first ?? "", parts.count, parts.count > 2 ? parts[2] : nil) {
         case ("GET", "servers", 1, _):
             return .json(200, .object(["servers": .array(servers.keys.sorted().compactMap { servers[$0] })]))
+        case ("POST", "servers", 1, _):
+            return add(body)
         case ("POST", "servers", 3, "test"?):
             guard let row = servers[name] else { return notFound(name) }
             return .json(200, testAnswer(row))
@@ -225,6 +294,48 @@ enum MCPHTTPFixture {
         return .json(200, background
             ? .object(["ok": .bool(true), "name": .string(name), "background": .bool(true), "action": .string(actionName)])
             : .object(["ok": .bool(true), "name": .string(name), "background": .bool(false)]))
+    }
+
+    /// `add_mcp_server`: `_normalize_mcp_server_create`'s rules, each a 400 with its text, then
+    /// the plugin and duplicate 409s, then the saved row's summary with env masked.
+    private static func add(_ body: BotJSON) -> Reply {
+        func trimmed(_ key: String) -> String { (body[key].text ?? "").trimmingCharacters(in: .whitespacesAndNewlines) }
+        func refused(_ detail: String) -> Reply { .json(400, .object(["detail": .string(detail)])) }
+        let name = trimmed("name")
+        let url = trimmed("url")
+        let command = trimmed("command")
+        let auth = (body["auth"].text ?? "none").trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let hasToken = body["bearer_token"] != .null
+        let args = (body["args"].list ?? []).compactMap(\.text)
+        let env = (body["env"].fields ?? [:]).mapValues { $0.text ?? "" }
+        guard !name.isEmpty else { return refused("Server name is required") }
+        guard url.isEmpty != command.isEmpty else { return refused("Provide exactly one of URL (HTTP/SSE) or command (stdio)") }
+        guard ["none", "header", "oauth"].contains(auth) else { return refused("Unsupported auth mode: \(auth)") }
+        let row: BotJSON
+        if !url.isEmpty {
+            if !args.isEmpty { return refused("Arguments are only supported for stdio MCP servers") }
+            if !env.isEmpty { return refused("Environment variables are only supported for stdio MCP servers") }
+            if auth == "header" {
+                var token = (body["bearer_token"].text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                if token.prefix(7).lowercased() == "bearer " { token = token.dropFirst(7).trimmingCharacters(in: .whitespaces) }
+                if token.isEmpty || token.lowercased() == "bearer" { return refused("Bearer token is required") }
+            } else if hasToken {
+                return refused("Bearer token requires header authentication")
+            }
+            row = serverRow(name, transport: "http", url: url, auth: auth == "none" ? nil : auth)
+        } else {
+            if auth != "none" || hasToken { return refused("HTTP authentication is not supported for stdio MCP servers") }
+            row = serverRow(name, transport: "stdio", command: command, args: args, env: env.mapValues(masked))
+        }
+        if let plugin = servers[name]?["plugin"].text { return pluginConflict(name, plugin) }
+        if servers[name] != nil { return .json(409, .object(["detail": .string("Server '\(name)' already exists")])) }
+        servers[name] = row
+        return .json(200, row)
+    }
+
+    /// `mask_secret`: empty stays empty, shorter than 12 is `***`, else the first and last four.
+    static func masked(_ value: String) -> String {
+        value.isEmpty ? "" : value.count < 12 ? "***" : "\(value.prefix(4))...\(value.suffix(4))"
     }
 
     private static func notFound(_ name: String) -> Reply {

@@ -80,14 +80,22 @@ import XCTest
         // A repository install runs in the background, so its status is polled too.
         await catalog.install(try XCTUnwrap(catalog.entry(named: "blender-mcp")), values: [:], enable: true)
         await catalog.confirmation?.value
+        let add = MCPAddServerViewModel(client: client, servers: servers, authenticate: { _ in .confirmed })
+        add.draft.name = "files"
+        add.draft.mode = .command
+        add.draft.command = "npx"
+        add.draft.env = [MCPServerDraft.EnvEntry(name: "ROOT_DIR", value: "/tmp/fake-root")]
+        await add.submit()
 
         XCTAssertTrue(deleted)
         XCTAssertEqual(catalog.operation?.phase, .succeeded(String(localized: "Installed “blender-mcp” on your Hermes host.")))
+        XCTAssertEqual(servers.server(named: "files")?.command, "npx")
         let requests = Self.recordedRequests()
         let mcp = requests.filter { $0.path.hasPrefix("/api/mcp/") }
         XCTAssertEqual(Set(mcp.map { "\($0.method) \($0.path)" }), [
             "GET /api/mcp/servers", "POST /api/mcp/servers/github/test", "PUT /api/mcp/servers/github/enabled",
-            "DELETE /api/mcp/servers/linear", "GET /api/mcp/catalog", "POST /api/mcp/catalog/install"
+            "DELETE /api/mcp/servers/linear", "GET /api/mcp/catalog", "POST /api/mcp/catalog/install",
+            "POST /api/mcp/servers"
         ])
         for request in mcp {
             XCTAssertEqual(request.values("profile"), [profile], request.call)

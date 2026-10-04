@@ -8,6 +8,8 @@ struct MCPServersView: View {
 
     /// Set once this push has read the list, so coming back from a server doesn't read it again.
     @State private var didOpen = false
+    /// The open add-server sheet's model; dropping it drops the draft.
+    @State private var adding: MCPAddServerViewModel?
 
     var body: some View {
         List {
@@ -43,6 +45,17 @@ struct MCPServersView: View {
         }
         .refreshable { await model.load(force: true) }
         .safeAreaInset(edge: .bottom) { MCPInstallBanner(model: catalog) }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    adding = MCPAddServerViewModel(client: model.client, servers: model)
+                } label: {
+                    Label("Add MCP Server", systemImage: "plus")
+                }
+                .help("Add MCP Server")
+            }
+        }
+        .sheet(item: $adding) { MCPAddServerView(model: $0) }
     }
 
     @ViewBuilder
@@ -153,6 +166,44 @@ struct MCPValueRow: View {
             Text(verbatim: value)
                 .font(monospaced ? .callout.monospaced() : .callout)
                 .textSelection(.enabled)
+        }
+        .accessibilityElement(children: .combine)
+    }
+}
+
+/// A server's transport, endpoint and authentication as the host reports them.
+struct MCPServerConfigurationRows: View {
+    let server: MCPServer
+
+    var body: some View {
+        MCPValueRow(title: "Transport", value: MCPLabels.transport(server.transport), monospaced: false)
+        if let url = server.url {
+            MCPValueRow(title: "URL", value: url)
+        }
+        if let command = server.command {
+            MCPValueRow(title: "Command", value: command)
+        }
+        if !server.args.isEmpty {
+            MCPValueRow(title: "Arguments", value: server.args.joined(separator: "\n"))
+        }
+        if let auth = server.auth {
+            MCPValueRow(title: "Authentication", value: MCPLabels.serverAuth(auth), monospaced: false)
+        }
+    }
+}
+
+/// One env variable with the value the host redacted; Hermex can't reveal it.
+struct MCPRedactedEnvRow: View {
+    let variable: MCPServer.EnvVariable
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(verbatim: variable.name)
+                .font(.callout.monospaced())
+                .textSelection(.enabled)
+            Text(verbatim: variable.redactedValue.isEmpty ? "—" : variable.redactedValue)
+                .font(.caption.monospaced())
+                .foregroundStyle(.secondary)
         }
         .accessibilityElement(children: .combine)
     }

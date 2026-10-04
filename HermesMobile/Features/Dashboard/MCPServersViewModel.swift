@@ -29,8 +29,8 @@ import Observation
     var authenticationProblem: String?
     /// The host profile every request reads and changes.
     let profile: String
-
-    private let client: DashboardClient
+    /// The bundle's signed-in client, which the add-server sheet shares.
+    let client: DashboardClient
     private let authenticate: @MainActor (String) async -> DeviceOwnerAuthentication.Outcome
 
     /// The main-actor default is built here rather than in a default argument, which Swift
@@ -72,6 +72,16 @@ import Observation
         lastLoadedAt = startedAt
         listState = .loaded
         return fresh
+    }
+
+    /// Shows a server the host just confirmed adding, in name order, before the list is read
+    /// again. Anything kept under that name belonged to an older server.
+    func insertAdded(_ server: MCPServer) {
+        servers.removeAll { $0.name == server.name }
+        servers.insert(server, at: servers.firstIndex { $0.name > server.name } ?? servers.endIndex)
+        tests[server.name] = nil
+        toggleProblems[server.name] = nil
+        deleteProblems[server.name] = nil
     }
 
     // MARK: - Test

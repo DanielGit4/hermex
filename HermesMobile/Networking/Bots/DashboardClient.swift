@@ -246,6 +246,18 @@ extension DashboardClient {
         return rows.compactMap(MCPServer.init)
     }
 
+    /// Adds a server by hand (`MCPServerDraft.body`) and returns the host's summary of it, env
+    /// already redacted. Any answer that isn't that server's summary is unreadable. A 400 or 409
+    /// that says why is `DashboardFailure.refused`.
+    func addMCPServer(_ body: BotJSON, profile: String) async throws -> MCPServer {
+        let url = Self.url(BotEndpoint.mcpServers.url(base: address), query: [Self.profileItem(profile)])
+        guard let server = MCPServer(try await post(url, body: body, readsRefusal: true)),
+              server.name == body["name"].text else {
+            throw DashboardFailure.unreadableResponse
+        }
+        return server
+    }
+
     /// Connects to the server on the host and lists its tools. A failed probe is a result,
     /// not an error: the host answers 200 with its reason.
     func testMCPServer(_ name: String, profile: String) async throws -> MCPTestResult {

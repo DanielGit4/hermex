@@ -101,19 +101,7 @@ struct MCPServerDetailView: View {
 
     private var configurationSection: some View {
         Section("Configuration") {
-            MCPValueRow(title: "Transport", value: MCPLabels.transport(current.transport), monospaced: false)
-            if let url = current.url {
-                MCPValueRow(title: "URL", value: url)
-            }
-            if let command = current.command {
-                MCPValueRow(title: "Command", value: command)
-            }
-            if !current.args.isEmpty {
-                MCPValueRow(title: "Arguments", value: current.args.joined(separator: "\n"))
-            }
-            if let auth = current.auth {
-                MCPValueRow(title: "Authentication", value: MCPLabels.serverAuth(auth), monospaced: false)
-            }
+            MCPServerConfigurationRows(server: current)
             MCPValueRow(title: "Tools", value: MCPLabels.toolFilter(current.toolFilter), monospaced: false)
         }
     }
@@ -121,15 +109,7 @@ struct MCPServerDetailView: View {
     private var environmentSection: some View {
         Section {
             ForEach(current.env) { variable in
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(verbatim: variable.name)
-                        .font(.callout.monospaced())
-                        .textSelection(.enabled)
-                    Text(verbatim: variable.redactedValue.isEmpty ? "—" : variable.redactedValue)
-                        .font(.caption.monospaced())
-                        .foregroundStyle(.secondary)
-                }
-                .accessibilityElement(children: .combine)
+                MCPRedactedEnvRow(variable: variable)
             }
         } header: {
             Text("Environment")
