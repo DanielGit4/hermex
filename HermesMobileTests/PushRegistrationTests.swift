@@ -247,6 +247,16 @@ final class PushRegistrationTests: XCTestCase {
         XCTAssertNil(PushEnvironment.current(bundle: TestBundle(values: [:])))
     }
 
+    /// A fork's bundle ID or a missing entitlement mirror leaves no identity, and nothing
+    /// may offer or start push on that build.
+    func testOnlyABuildTheRelayAcceptsSupportsPush() {
+        let harness = Harness()
+        XCTAssertTrue(harness.registrar.buildSupportsPush)
+        let fork = PushRegistrar(store: harness.store, relay: harness.relay,
+            remoteNotifications: harness.remoteNotifications, authorization: harness.authorization, identity: nil)
+        XCTAssertFalse(fork.buildSupportsPush)
+    }
+
     func testBuiltAppDeclaresBothTheEntitlementMirrorAndTheAccessGroup() {
         // Hosted XCTest runs inside the signed app, including contributor builds
         // that use a local bundle identifier instead of the shipping identity.

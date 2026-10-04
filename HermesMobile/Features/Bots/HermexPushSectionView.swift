@@ -2,6 +2,7 @@ import SwiftUI
 
 /// The single notification home under Settings → Interaction. Push choices belong
 /// to this server and device; the caller supplies the existing global alert controls.
+/// A build the relay doesn't accept (`buildSupportsPush`) shows only those controls.
 @MainActor struct HermexPushSectionView<SharedSettings: View>: View {
     let server: URL
     @Environment(\.scenePhase) private var scenePhase
@@ -26,12 +27,14 @@ import SwiftUI
     var body: some View {
         DisclosureGroup(isExpanded: $isExpanded) {
             VStack(alignment: .leading, spacing: 16) {
-                Text("Push · Current server")
-                    .font(AppFont.caption()).foregroundStyle(.secondary)
-                pushSettings
-                Divider()
-                Text("On this iPhone · All servers")
-                    .font(AppFont.caption()).foregroundStyle(.secondary)
+                if provisioner.buildSupportsPush {
+                    Text("Push · Current server")
+                        .font(AppFont.caption()).foregroundStyle(.secondary)
+                    pushSettings
+                    Divider()
+                    Text("On this iPhone · All servers")
+                        .font(AppFont.caption()).foregroundStyle(.secondary)
+                }
                 sharedSettings
             }
             .padding(.top, 12)
@@ -41,11 +44,13 @@ import SwiftUI
                     .frame(width: 24).accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Notifications").font(AppFont.subheadline(weight: .medium))
-                    Text(provisioner.pairing == nil
-                         ? String(localized: "Push off · Current server")
-                         : String(localized: "Push on · Current server"))
-                        .font(AppFont.caption()).foregroundStyle(Color.secondary)
-                    if let card = provisioner.pluginCard { pluginLine(card) }
+                    if provisioner.buildSupportsPush {
+                        Text(provisioner.pairing == nil
+                             ? String(localized: "Push off · Current server")
+                             : String(localized: "Push on · Current server"))
+                            .font(AppFont.caption()).foregroundStyle(Color.secondary)
+                        if let card = provisioner.pluginCard { pluginLine(card) }
+                    }
                 }
             }
             .foregroundStyle(Color.primary)
@@ -53,13 +58,14 @@ import SwiftUI
         }
         .transaction { $0.animation = nil }
         .task {
+            guard provisioner.buildSupportsPush else { return }
             await provisioner.reload()
             await provisioner.checkPlugin()
         }
         // Runs on appear and on every return to the app, so allowing notifications in
         // iOS Settings clears the notice without re-running setup.
         .task(id: scenePhase) {
-            if scenePhase == .active { await provisioner.recheckNotificationPermission() }
+            if provisioner.buildSupportsPush, scenePhase == .active { await provisioner.recheckNotificationPermission() }
         }
         .onDisappear {
             preferenceTask?.cancel()

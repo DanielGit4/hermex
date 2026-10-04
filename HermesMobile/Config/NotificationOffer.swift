@@ -18,10 +18,10 @@ enum NotificationOffer {
 
     /// What to offer, or nil when there is nothing worth asking: already asked, local
     /// alerts already on, iOS permission refused, or the active server already paired.
-    /// `canPair` means this build can push and the active server has a saved Hermes
-    /// connection to set it up with. Both are Keychain reads, so they are evaluated only
-    /// when they can still change the answer: never on a denied install, and `canPair`
-    /// never on a paired server.
+    /// `canPair` means the relay accepts this build (a fork's bundle ID is offered local
+    /// alerts instead) and the active server has a saved Hermes connection to set push up
+    /// with. Both are Keychain reads, so they are evaluated only when they can still change
+    /// the answer: never on a denied install, and `canPair` never on a paired server.
     static func decide(
         hasOffered: Bool,
         localAlertsEnabled: Bool,
@@ -44,7 +44,7 @@ enum NotificationOffer {
         isCurrent: @MainActor () -> Bool = { true },
         isPushPaired: @MainActor (URL) -> Bool = { @MainActor in PushRegistrar.shared?.pairing(for: $0) != nil },
         canPair: @MainActor (URL) -> Bool = { @MainActor in
-            PushRegistrar.shared != nil && (try? BotConnectionStore().load(server: $0)) != nil
+            PushRegistrar.shared?.buildSupportsPush == true && (try? BotConnectionStore().load(server: $0)) != nil
         },
         scheduler: any ResponseCompletionNotificationScheduling = UserNotificationResponseCompletionScheduler()
     ) async -> Offer? {

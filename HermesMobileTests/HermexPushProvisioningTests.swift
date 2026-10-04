@@ -275,6 +275,26 @@ import XCTest
         }
     }
 
+    /// A fork's bundle ID can never register at the relay, so setup refuses before the iOS
+    /// prompt, the sign-in and every host write, rather than at its last step.
+    func testAnUnsupportedBuildRefusesSetupBeforeTouchingTheHost() async throws {
+        let registrar = FakePushRegistrar()
+        registrar.buildSupportsPush = false
+        PushHTTPFixture.handler = { _ in nil }
+        let permission = FakeNotificationPermission(status: .notDetermined)
+        let provisioner = makeProvisioner(server: serverA, registrar: registrar, notifications: permission)
+
+        await provisioner.enable()
+
+        XCTAssertEqual(PushHTTPFixture.calls, [], "No status probe, sign-in, env write, install, enable, restart or pairing read")
+        XCTAssertEqual(registrar.actions, [])
+        XCTAssertEqual(permission.requests, 0, "A build that can never push never asks iOS")
+        XCTAssertEqual(provisioner.failure?.title, HermexPushProvisioner.Step.device.title)
+        XCTAssertEqual(provisioner.failure?.message, HermexPushProvisioner.message(for: PushRegistrarError.unsupportedBuild))
+        XCTAssertFalse(provisioner.showsSteps, "Nothing ran, so there are no steps to show")
+        XCTAssertNil(provisioner.pairing)
+    }
+
     func testAFirstRunAsksForPermissionBeforeAnyHostStep() async throws {
         let registrar = FakePushRegistrar()
         PushHTTPFixture.handler = { _ in nil }
@@ -1048,6 +1068,33 @@ import XCTest
         }
     }
 
+    /// A host whose plugin could be updated and restarted, seen from a build the relay
+    /// refuses: neither action sends anything.
+    func testAnUnsupportedBuildNeverUpdatesOrRestartsThePlugin() async throws {
+        let registrar = try await pairedRegistrar(serverA)
+        PushHTTPFixture.handler = { request in
+            switch request.url?.path {
+            case "/api/plugins/hermex-push/pairing": return (200, PushHTTPFixture.pairingBody(version: "0.4.0"))
+            case "/api/dashboard/plugins/hub": return (200, PushHTTPFixture.hubBody(version: "0.5.0"))
+            default: return nil
+            }
+        }
+        let provisioner = makeProvisioner(server: serverA, registrar: registrar, newest: future)
+        await provisioner.checkPlugin()
+        let restartable = HermexPushProvisioner.PluginCard.status(.restartNeeded(loaded: HermexPushPluginVersion("0.4.0")))
+        XCTAssertEqual(provisioner.pluginCard, restartable)
+        registrar.buildSupportsPush = false
+        PushHTTPFixture.clearCalls()
+
+        await provisioner.updatePlugin()
+        await provisioner.restartHermes()
+
+        XCTAssertEqual(PushHTTPFixture.calls, [], "No sign-in, env write, plugin install or toggle, gateway or plugin restart")
+        XCTAssertEqual(provisioner.phase, .idle)
+        XCTAssertEqual(provisioner.pluginCard, restartable)
+        XCTAssertEqual(registrar.actions, [])
+    }
+
     func testRestartingAsksTheHostThenWaitsForItToComeBackWithTheNewPlugin() async throws {
         // The route answers 202, or the host goes down before its answer arrives: both are the restart.
         for answer in [(202, BotJSON.object(["ok": .bool(true)])), (PushHTTPFixture.dropped, .null)] {
@@ -1312,6 +1359,8 @@ import XCTest
 /// behaviour — permission, device token, relay calls, Keychain group — is covered by
 /// `PushRegistrationTests`.
 @MainActor private final class FakePushRegistrar: PushPairingEnabling {
+    /// True, the maintainer build, unless a test stands in for a fork the relay refuses.
+    var buildSupportsPush = true
     private(set) var actions: [String] = []
     var enableError: (any Error)?
     var disableError: (any Error)?

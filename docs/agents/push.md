@@ -3,8 +3,11 @@
 Push is optional and off until the user enables it for a server from the Hermes
 connection screen. After the first run started from the phone, a one-time offer
 (`NotificationOffer`, #863) only opens Settings → Notifications with the push
-section expanded; setup still waits for its own confirmation there. This page is
-the map. bots.md owns the protocol detail:
+section expanded; setup still waits for its own confirmation there. A build the
+relay doesn't accept (`PushRegistrar.buildSupportsPush` false, e.g. a fork's
+bundle ID) shows only the on-device alert settings under Notifications, the
+chat's offer suggests local alerts, and setup, plugin update and restart refuse
+before any host request. This page is the map. bots.md owns the protocol detail:
 see [Push provisioning](bots.md#push-provisioning) and
 [Push previews and taps](bots.md#push-previews-and-taps).
 
