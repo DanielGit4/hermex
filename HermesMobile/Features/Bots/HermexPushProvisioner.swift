@@ -107,8 +107,8 @@ import UserNotifications
     /// The saved connection this host is reached with. The screen keeps it current so a
     /// password edit made just above this section is the one provisioning signs in with.
     var connection: BotConnection?
-    /// Nil on a build with no Keychain access group to write to, which means push cannot
-    /// work at all; the section then reports the step it could not take.
+    /// Nil on a build with no Keychain access group to write to. That, or a build the relay
+    /// doesn't accept, means push cannot work at all (`buildSupportsPush`).
     private let registrar: (any PushPairingEnabling)?
     private let notifications: any ResponseCompletionNotificationScheduling
     private let dashboard: @MainActor (BotConnection) -> BotDashboardClient
@@ -153,6 +153,11 @@ import UserNotifications
         self.sleep = sleep
         pairing = self.registrar?.pairing(for: server)
     }
+
+    /// Whether this build can push at all: false for a fork the relay doesn't accept, or
+    /// with no registrar. The section then offers no push, and setup, the plugin update and
+    /// the restart refuse before any host request. Constant for the process.
+    var buildSupportsPush: Bool { registrar?.buildSupportsPush == true }
 
     var isWorking: Bool {
         switch phase {
@@ -288,11 +293,18 @@ import UserNotifications
     /// and the plugin loaded, so it is paired as it stands: no install, and no restart
     /// interrupting work. Anything else gets the full sequence, in the order the host
     /// needs it — the relay address before the pairing route will answer, and the plugin
-    /// loaded by a restart before that route exists at all. Denied notification permission
-    /// stops the run before it signs in, so the host is never touched for a phone that
-    /// could not show what it sends.
+    /// loaded by a restart before that route exists at all. A build the relay doesn't accept
+    /// stops before anything else, and denied notification permission stops the run before
+    /// it signs in, so the host is never touched for a phone that could not show what it sends.
     func enable() async {
         guard !isWorking else { return }
+        guard let registrar, registrar.buildSupportsPush else {
+            // Its last step would refuse anyway, after the host had been changed.
+            setupRanLast = false
+            completed = []
+            phase = .failed(Failure(title: Step.device.title, message: Self.message(for: PushRegistrarError.unsupportedBuild)))
+            return
+        }
         setupRanLast = true
         guard let connection else { return fail(Step.relayURL.title, HermexPushFailure.noConnection) }
         completed = []
@@ -336,7 +348,6 @@ import UserNotifications
                 paired = try await pairAfterRestart(client)
             }
             step = advance(from: step, to: .device)
-            guard let registrar else { throw PushRegistrarError.unsupportedBuild }
             // Asks for notification permission, mints a device token and registers it at
             // this install's relay. It stores the keys only once the relay has accepted.
             do { try await registrar.enable(paired, for: server) } catch PushRegistrarError.permissionDenied {
@@ -356,7 +367,7 @@ import UserNotifications
         } catch {
             // Nothing half-paired: the registrar undoes its own registration, and the host
             // keeps the same key pair, so a retry gets it back.
-            pairing = registrar?.pairing(for: server)
+            pairing = registrar.pairing(for: server)
             fail(step.title, error)
         }
     }
@@ -432,6 +443,7 @@ import UserNotifications
     /// 0.4.0 or newer can then restart it from the phone (`restartHermes`).
     func updatePlugin() async {
         guard !isWorking else { return }
+        guard buildSupportsPush else { return }
         pluginCheckGeneration &+= 1
         setupRanLast = false
         guard let connection else {
@@ -488,7 +500,7 @@ import UserNotifications
     /// fails (a new plugin that didn't load leaves its routes unmounted), a failed read; or
     /// silence, "Hermes didn't come back". Like the update, the run outlives Settings.
     func restartHermes() async {
-        guard !isWorking, let connection, case .restartNeeded(let loaded)? = pluginUpdate,
+        guard !isWorking, buildSupportsPush, let connection, case .restartNeeded(let loaded)? = pluginUpdate,
               HermexPushPlugin.canRestart(loaded) else { return }
         pluginCheckGeneration &+= 1
         setupRanLast = false

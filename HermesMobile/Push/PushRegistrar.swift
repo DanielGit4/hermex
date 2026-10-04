@@ -22,6 +22,9 @@ import UIKit
 /// What setting a Hermes host up for push (#557) needs from the registrar. A protocol so
 /// the Hermes connection screen can be exercised without UIKit or a Keychain access group.
 @MainActor protocol PushPairingEnabling {
+    /// False when this build's bundle ID or APNs environment is not one the relay accepts
+    /// (a fork), so nothing may offer or start push.
+    var buildSupportsPush: Bool { get }
     func enable(_ pairing: PushPairing, for server: URL) async throws
     func disable(for server: URL) async throws
     /// Teardown that always leaves nothing behind, even when the relay cannot be
@@ -108,6 +111,8 @@ enum PushRegistrarError: Error, Equatable {
         self.identity = identity
         self.tokenTimeout = tokenTimeout
     }
+
+    var buildSupportsPush: Bool { identity != nil }
 
     // MARK: - Pairing lifecycle
 
