@@ -123,9 +123,10 @@ private struct TranscriptMediaThumbnailView: View {
                     image = nil
                     return
                 }
-                image = ChatImageCaches.transcriptMedia.cachedImage(for: key)
+                image = TranscriptImageCache.shared.cachedImage(forKey: key.cacheKey)
                 guard image == nil else { return }
-                let loadedImage = await ChatImageCaches.transcriptMedia.image(for: key) {
+                let reference = reference
+                let loadedImage = await TranscriptImageCache.shared.image(forKey: key.cacheKey) {
                     await loadMediaImage(reference)
                 }
                 guard !Task.isCancelled else { return }
@@ -620,6 +621,24 @@ private struct TranscriptMediaUnavailableChip: View {
         case .unsupported:
             "doc"
         }
+    }
+}
+
+/// Identifies a linked image in `TranscriptImageCache`, scoped by server and
+/// session so identical `MEDIA:` paths can't bypass the session-aware fetch.
+struct TranscriptMediaImageCacheKey: Hashable {
+    let namespace: String
+    let referenceID: String
+
+    init(namespace: String, reference: TranscriptMediaReference) {
+        self.namespace = namespace
+        referenceID = reference.id
+    }
+
+    /// The shared cache's key. The kind prefix keeps it apart from attachment
+    /// keys; the length prefix keeps the namespace boundary fixed.
+    var cacheKey: String {
+        "media|\(namespace.utf8.count)|\(namespace)|\(referenceID)"
     }
 }
 

@@ -1052,14 +1052,24 @@ struct BottomComposerMaterialFade: View {
     }
 }
 
+/// Transcript chip shown while the active stream is being checked,
+/// reconnected, or waiting for the network. It spins while work is under way,
+/// or shows a static dot under Reduce Motion. Waiting for the network always
+/// shows the dot: nothing happens until the network returns.
 struct StreamRecoveryStatusView: View {
     let state: ActiveStreamRecoveryState
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     var body: some View {
         HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.mini)
-                .accessibilityHidden(true)
+            if reduceMotion || state == .waitingForNetwork {
+                ChatRunStatusDot()
+            } else {
+                ProgressView()
+                    .controlSize(.mini)
+                    .accessibilityHidden(true)
+            }
 
             Text(label)
                 .font(.caption.weight(.semibold))
@@ -1086,6 +1096,8 @@ struct StreamRecoveryStatusView: View {
             return String(localized: "Checking stream")
         case .reconnecting:
             return String(localized: "Reconnecting stream")
+        case .waitingForNetwork:
+            return String(localized: "Waiting for network")
         }
     }
 }

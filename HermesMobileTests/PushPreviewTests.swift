@@ -36,6 +36,24 @@ import XCTest
         XCTAssertNil(PushPreview.open(sealed: "not base64", keys: keys))
     }
 
+    /// Settings' test notification seals on the phone (#874); the extension must open it
+    /// exactly as it opens the plugin's, and only with this install's keys.
+    func testAPhoneSealedPreviewOpensOnlyForItsOwnInstall() throws {
+        let preview = PushPreview(title: "Hermex test notification", body: "Push reached this iPhone.")
+        let sealed = try XCTUnwrap(PushPreview.seal(preview, keys: keys))
+        XCTAssertNotEqual(PushPreview.seal(preview, keys: keys), sealed, "Every seal takes a fresh nonce")
+        XCTAssertEqual(PushPreview.open(sealed: sealed, keys: keys), preview)
+
+        let content = banner(sealed: sealed)
+        PushPreview.rewrite(content, candidates: [keys])
+        XCTAssertEqual(content.title, "Hermex test notification")
+        XCTAssertEqual(content.body, "Push reached this iPhone.")
+
+        let otherInstall = PushPreviewKeys(installKey: String(repeating: "f", count: 64), previewKey: keys.previewKey)
+        XCTAssertNil(PushPreview.open(sealed: sealed, keys: otherInstall))
+        XCTAssertNil(PushPreview.seal(preview, keys: PushPreviewKeys(installKey: keys.installKey, previewKey: "short")))
+    }
+
     func testRewriteShowsThePreviewAndKeepsTheProfileForTheTap() {
         let content = banner(sealed: sealed)
         PushPreview.rewrite(content, candidates: [PushPreviewKeys(installKey: String(repeating: "f", count: 64), previewKey: keys.previewKey), keys])
@@ -169,6 +187,30 @@ import XCTest
         let unrelated = PushPairing(relayURL: other, installKey: String(repeating: "f", count: 64), previewKey: keys.previewKey)
         XCTAssertEqual(PushNotificationRouter.webuiDestination(
             userInfo: info, pairings: [server: pairing, other: unrelated], activeServer: other)?.server, server)
+    }
+
+    // #862: a local run alert opens its chat on its own server with no pairing at all.
+    func testLocalAlertTapOpensItsChatOnItsConfiguredServer() throws {
+        let other = URL(string: "https://other.example")!
+        let alert = ResponseCompletionNotificationRequest(sessionID: "s1", server: server, title: "Chat", outcome: .completed)
+        let info: [AnyHashable: Any] = alert.userInfo
+
+        XCTAssertEqual(ResponseCompletionNotificationRequest.destination(userInfo: info, servers: [other, server]),
+                       WebuiPushDestination(server: server, sessionID: "s1"))
+        // Its server was removed, so the tap only opens the app.
+        XCTAssertNil(ResponseCompletionNotificationRequest.destination(userInfo: info, servers: [other]))
+        var blank = info
+        blank["session_id"] = " "
+        XCTAssertNil(ResponseCompletionNotificationRequest.destination(userInfo: blank, servers: [server]))
+        let noSession = ResponseCompletionNotificationRequest(sessionID: nil, server: server, title: "Chat", outcome: .failed)
+        XCTAssertNil(ResponseCompletionNotificationRequest.destination(userInfo: noSession.userInfo, servers: [server]))
+        // It is never mistaken for a relay push, nor a relay push for it.
+        XCTAssertNil(PushPayload(userInfo: info).installHash)
+        XCTAssertEqual(PushPresence.presentation(userInfo: info, viewer: nil, pairings: [:]), [])
+        var relay = banner(sealed: nil).userInfo
+        relay["source"] = "webui"
+        relay["server_hash"] = info["server_hash"]
+        XCTAssertNil(ResponseCompletionNotificationRequest.destination(userInfo: relay, servers: [server]))
     }
 
     func testForegroundShowsRelayPushesButQuietsTheOpenChatsReplies() {

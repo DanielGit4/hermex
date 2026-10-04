@@ -12,8 +12,8 @@ import XCTest
     func testSignInRunsStatusLoginAndIdentityOnceForRequestsThatStartTogether() async throws {
         let client = DashboardHTTPFixture.client()
 
-        async let skills = client.get(BotEndpoint.skills.url(base: DashboardHTTPFixture.host))
-        async let sources = client.get(BotEndpoint.skillsHubSources.url(base: DashboardHTTPFixture.host))
+        async let skills = client.get(DashboardEndpoint.skills.url(base: DashboardHTTPFixture.host))
+        async let sources = client.get(DashboardEndpoint.skillsHubSources.url(base: DashboardHTTPFixture.host))
         _ = try await (skills, sources)
 
         let calls = DashboardHTTPFixture.calls
@@ -108,7 +108,7 @@ import XCTest
     }
 
     func testQueryValuesAreEncodedSoURLIdentifiersSurviveTheHostsParser() {
-        let url = DashboardClient.url(BotEndpoint.skillsHubPreview.url(base: DashboardHTTPFixture.host), query: [
+        let url = DashboardClient.url(DashboardEndpoint.skillsHubPreview.url(base: DashboardHTTPFixture.host), query: [
             URLQueryItem(name: "identifier", value: "https://x.example/a+b/skill.md?x=1&y=2 z")
         ])
 
@@ -214,6 +214,138 @@ import XCTest
         } catch {
             XCTAssertEqual(error as? BotFailure, .rejected(404))
         }
+    }
+}
+
+/// The Dashboard on the server's shared `HermesConnection`, against upstream's scripted
+/// host: a Bot screen, push provisioning and the Dashboard send concurrently through one
+/// adapter, sign in once, share one cookie jar and recover from one expired session together.
+@MainActor final class DashboardSharedConnectionTests: XCTestCase {
+    private let record = BotConnection(id: UUID(), name: "Host", address: URL(string: "https://hermes.example")!,
+                                       username: "user", password: "secret")
+    private let server = URL(string: "https://webui.example")!
+
+    override func tearDown() {
+        HermesHostFixture.reset()
+        HermesConnections.shared.retire(server: server)
+        super.tearDown()
+    }
+
+    func testABotScreenPushAndTheDashboardShareOneSignInAndOneCookieJar() async throws {
+        let http = HermesConnection(connection: record, configuration: HermesHostFixture.configuration { request in
+            switch request.url?.path {
+            case "/api/skills":
+                return .json(200, .array([.object(["name": .string("notes"), "enabled": .bool(true),
+                                                    "provenance": .string("hub"), "added_later": .number(1)])]))
+            case "/api/dashboard/plugins/hub": return .json(200, .object(["plugins": .array([])]))
+            default: return nil
+            }
+        }, gateway: .init { _ in BotScriptedSocket() })
+        let chat = BotClient(http: http)
+        let provisioning = BotDashboardClient(http: http)
+        let dashboard = DashboardClient(http: http)
+
+        async let connected: Void = chat.connect()
+        async let skills = dashboard.installedSkills(profile: "work")
+        async let plugins = dashboard.pluginsHub()
+        async let provisioned: Void = provisioning.setPlugin("hermex-push", enabled: false)
+        let (_, skillRows, pluginRows, _) = try await (connected, skills, plugins, provisioned)
+        defer { chat.close() }
+
+        XCTAssertEqual(skillRows.map(\.name), ["notes"])
+        XCTAssertTrue(pluginRows.isEmpty)
+        XCTAssertEqual(["/api/status", "/auth/password-login", "/api/auth/me"].map(HermesHostFixture.count), [1, 1, 1],
+                       "Every consumer waits on the same sign-in")
+        XCTAssertEqual(HermesHostFixture.count("/api/auth/ws-ticket"), 1, "Only the Bot screen opens the socket")
+        XCTAssertEqual(HermesHostFixture.count("/api/dashboard/agent-plugins/hermex-push/disable"), 1)
+        let skillsRequest = try XCTUnwrap(HermesHostFixture.requests.first { $0.url?.path == "/api/skills" })
+        XCTAssertEqual(skillsRequest.url?.query, "profile=work", "The profile stays in the query")
+        let jar = try XCTUnwrap(http.session.configuration.httpCookieStorage)
+        XCTAssertTrue(dashboard.session.configuration.httpCookieStorage === jar)
+        XCTAssertTrue(dashboard.longSession.configuration.httpCookieStorage === jar)
+        XCTAssertEqual(dashboard.session.configuration.timeoutIntervalForResource, 90)
+        XCTAssertEqual(dashboard.longSession.configuration.timeoutIntervalForResource, DashboardClient.longRequestTimeout)
+    }
+
+    /// A push write and a Dashboard write reach the host before either 401 is answered, so
+    /// both recover from the same expired session and each is resent once.
+    func testConcurrent401sFromPushAndTheDashboardShareOneRecovery() async throws {
+        let rejected = expectation(description: "both writes in flight")
+        rejected.expectedFulfillmentCount = 2
+        HermesHostFixture.onPark = { rejected.fulfill() }
+        var expired = false
+        let http = HermesConnection(connection: record, configuration: HermesHostFixture.configuration { request in
+            switch request.url?.path {
+            case "/auth/password-login": expired = false; return nil
+            case "/api/dashboard/agent-plugins/hermex-push/enable": return expired ? .park : nil
+            case "/api/mcp/servers/files/enabled":
+                return expired ? .park : .json(200, .object(["ok": .bool(true), "enabled": .bool(false)]))
+            default: return nil
+            }
+        })
+        let provisioning = BotDashboardClient(http: http)
+        let dashboard = DashboardClient(http: http)
+        try await dashboard.signIn()
+        HermesHostFixture.script { expired = true }
+
+        async let push: Void = provisioning.setPlugin("hermex-push", enabled: true)
+        async let saved = dashboard.setMCPServer("files", enabled: false, profile: "work")
+        await fulfillment(of: [rejected], timeout: 2)
+        HermesHostFixture.releaseParked(.json(401, .object(["error": .string("session_expired")])))
+        let (_, enabled) = try await (push, saved)
+
+        XCTAssertFalse(enabled)
+        XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 2, "One recovery for both")
+        XCTAssertEqual(HermesHostFixture.count("/api/dashboard/agent-plugins/hermex-push/enable"), 2)
+        let writes = HermesHostFixture.requests.filter { $0.url?.path == "/api/mcp/servers/files/enabled" }
+        XCTAssertEqual(writes.map(\.url?.query), ["profile=work", "profile=work"], "Resent once, still scoped")
+    }
+
+    /// The production store builds on the registry's connection, the one the server's Bot
+    /// screens get; once the registry retires it, the kept bundle refuses every call without
+    /// sending anything and the next visit builds a fresh one.
+    func testARetiredSharedConnectionRebuildsTheDashboardAndSendsNothingMore() async throws {
+        let store = DashboardModelStore()
+        let first = store.bundle(server: server, connection: record)
+        XCTAssertTrue(first.client.http === HermesConnections.shared.connection(for: record, server: server),
+                      "The Dashboard and the Bot screens share the server's connection")
+        XCTAssertTrue(store.bundle(server: server, connection: record) === first)
+
+        HermesConnections.shared.retire(server: server)
+
+        XCTAssertTrue(first.client.isRetired)
+        do {
+            _ = try await first.client.pluginsHub()
+            XCTFail("A retired connection must refuse")
+        } catch {
+            XCTAssertEqual(error as? BotFailure, .stale)
+            XCTAssertEqual(DashboardProblem(error).message,
+                           String(localized: "The Hermes connection changed. Go back and open the Dashboard again."))
+        }
+        let rebuilt = store.bundle(server: server, connection: record)
+        XCTAssertFalse(rebuilt === first)
+        XCTAssertFalse(rebuilt.client.isRetired)
+        XCTAssertTrue(rebuilt.client.http === HermesConnections.shared.connection(for: record, server: server))
+        store.dropAll()
+    }
+
+    /// The shared sign-in reads the public status first, so an address that isn't a
+    /// dashboard is named as such and no password goes out.
+    func testAnAddressThatIsNotADashboardIsRefusedBeforeThePassword() async throws {
+        let http = HermesConnection(connection: record, configuration: HermesHostFixture.configuration { request in
+            request.url?.path == "/api/status" ? .json(404, .object(["detail": .string("Not Found")])) : nil
+        })
+        let dashboard = DashboardClient(http: http)
+
+        do {
+            _ = try await dashboard.pluginsHub()
+            XCTFail("Expected the address to be refused")
+        } catch {
+            XCTAssertEqual(error as? BotFailure, .notDashboard)
+            XCTAssertEqual(DashboardProblem(error).message, String(localized:
+                "This address doesn’t answer like a Hermes dashboard. Check the address in the Hermes connection in Bots."))
+        }
+        XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 0)
     }
 }
 

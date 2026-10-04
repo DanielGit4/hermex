@@ -69,9 +69,9 @@ import XCTest
 
     func testAServerNameWithASpaceIsOnePercentEncodedPathSegment() async throws {
         let base = DashboardHTTPFixture.host
-        XCTAssertEqual(BotEndpoint.mcpServerURL(base: base, name: "odd one").absoluteString,
+        XCTAssertEqual(DashboardEndpoint.mcpServerURL(base: base, name: "odd one").absoluteString,
                        "\(host)/api/mcp/servers/odd%20one")
-        XCTAssertEqual(BotEndpoint.mcpServerURL(base: base, name: "odd one", action: "test").absoluteString,
+        XCTAssertEqual(DashboardEndpoint.mcpServerURL(base: base, name: "odd one", action: "test").absoluteString,
                        "\(host)/api/mcp/servers/odd%20one/test")
         let client = DashboardHTTPFixture.client()
 

@@ -574,7 +574,8 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: true,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: true
+            isScrolledNearBottom: true,
+            activeRunStartedAt: nil
         ))
     }
 
@@ -584,11 +585,12 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: true,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         )
 
         XCTAssertEqual(presentation?.kind, .active)
-        XCTAssertEqual(presentation?.label, "Hermes is working")
+        XCTAssertEqual(presentation?.label(now: Date()), "Hermes is working")
     }
 
     func testStatusShowsStartingBeforeStreamIDExists() {
@@ -597,7 +599,8 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: false,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         )
 
         XCTAssertEqual(presentation?.kind, .starting)
@@ -609,11 +612,12 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: true,
             activeStreamRecoveryState: .reconnecting,
             isCancellingStream: false,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         )
 
         XCTAssertEqual(presentation?.kind, .reconnecting)
-        XCTAssertEqual(presentation?.accessibilityLabel, "Hermes is reconnecting the response stream")
+        XCTAssertEqual(presentation?.accessibilityLabel(now: Date()), "Hermes is reconnecting the response stream")
     }
 
     func testStatusPrioritizesCancellationOverOtherStates() {
@@ -622,7 +626,8 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: true,
             activeStreamRecoveryState: .checking,
             isCancellingStream: true,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         )
 
         XCTAssertEqual(presentation?.kind, .stopping)
@@ -634,8 +639,73 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             hasActiveStream: false,
             activeStreamRecoveryState: .idle,
             isCancellingStream: false,
-            isScrolledNearBottom: false
+            isScrolledNearBottom: false,
+            activeRunStartedAt: nil
         ))
+    }
+
+    func testActivePresentationShowsElapsedSinceRunStart() {
+        let now = Date(timeIntervalSince1970: 1_700_000_133)
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .idle,
+            isCancellingStream: false,
+            isScrolledNearBottom: false,
+            activeRunStartedAt: now.addingTimeInterval(-133)
+        )
+
+        XCTAssertEqual(presentation?.label(now: now), "Hermes is working · 2m 13s")
+        XCTAssertEqual(
+            presentation?.accessibilityLabel(now: now),
+            "Hermes has been working for 2 minutes, 13 seconds"
+        )
+    }
+
+    func testActivePresentationWithoutStartKeepsPlainLabel() {
+        let now = Date(timeIntervalSince1970: 1_700_000_133)
+        let presentation = ChatActiveRunStatusPresentation(kind: .active)
+
+        XCTAssertEqual(presentation.label(now: now), "Hermes is working")
+        XCTAssertEqual(presentation.accessibilityLabel(now: now), "Hermes is working on the response")
+    }
+
+    func testRecoveryKindsIgnoreRunStart() {
+        let now = Date(timeIntervalSince1970: 1_700_000_133)
+        let expectations: [(ActiveStreamRecoveryState, String)] = [
+            (.checking, "Checking stream"),
+            (.reconnecting, "Reconnecting stream")
+        ]
+
+        for (recoveryState, expectedLabel) in expectations {
+            let presentation = ChatActiveRunStatusPolicy.presentation(
+                isStartingChat: false,
+                hasActiveStream: true,
+                activeStreamRecoveryState: recoveryState,
+                isCancellingStream: false,
+                isScrolledNearBottom: false,
+                activeRunStartedAt: now.addingTimeInterval(-133)
+            )
+
+            XCTAssertEqual(presentation?.label(now: now), expectedLabel)
+            XCTAssertNil(presentation?.startedAt, "\(recoveryState) must not tick an elapsed counter")
+        }
+    }
+
+    func testWaitingForNetworkMapsToItsOwnKind() {
+        let now = Date(timeIntervalSince1970: 1_700_000_133)
+        let presentation = ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .waitingForNetwork,
+            isCancellingStream: false,
+            isScrolledNearBottom: false,
+            activeRunStartedAt: now.addingTimeInterval(-133)
+        )
+
+        XCTAssertEqual(presentation?.kind, .waitingForNetwork)
+        XCTAssertEqual(presentation?.label(now: now), "Waiting for network")
+        XCTAssertNil(presentation?.startedAt)
     }
 }
 

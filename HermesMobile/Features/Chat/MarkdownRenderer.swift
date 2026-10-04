@@ -171,10 +171,22 @@ struct AllowsStreamedTextAnimationKey: EnvironmentKey {
     static let defaultValue = true
 }
 
+/// The background a wide markdown table fades its hidden edges into. Defaults
+/// to the transcript background. Grouped lists set their row colour; a host
+/// on a translucent fill sets nil, which turns the fade off.
+struct MarkdownTableEdgeFadeColorKey: EnvironmentKey {
+    static let defaultValue: SwiftUI.Color? = SwiftUI.Color(.systemBackground)
+}
+
 extension EnvironmentValues {
     var allowsStreamedTextAnimation: Bool {
         get { self[AllowsStreamedTextAnimationKey.self] }
         set { self[AllowsStreamedTextAnimationKey.self] = newValue }
+    }
+
+    var markdownTableEdgeFadeColor: SwiftUI.Color? {
+        get { self[MarkdownTableEdgeFadeColorKey.self] }
+        set { self[MarkdownTableEdgeFadeColorKey.self] = newValue }
     }
 }
 
@@ -408,7 +420,12 @@ private struct ChatMarkdownView: View {
     let isStreaming: Bool
 
     var body: some View {
-        Markdown(content)
+        // Parsed here rather than inside `Markdown(_: String)` so the parse alone is timed.
+        let signpost = performanceSignposter.beginInterval("Markdown Parse")
+        let parsedContent = MarkdownContent(content)
+        performanceSignposter.endInterval("Markdown Parse", signpost, "chars=\(content.count, privacy: .public)")
+
+        return Markdown(parsedContent)
             .markdownTheme(MarkdownUI.Theme.chat(colorScheme: colorScheme, isStreaming: isStreaming))
             .markdownTextStyle {
                 ForegroundColor(.primary)
@@ -1415,8 +1432,13 @@ private struct ChatMarkdownTable: View {
     let label: MarkdownUI.BlockConfiguration.Label
     let colorScheme: ColorScheme
 
+    @Environment(\.markdownTableEdgeFadeColor) private var edgeFadeColor
+
+    /// A table wider than its column fades the edge that hides columns, so a
+    /// cut-off column never reads as the whole table.
+    @ViewBuilder
     var body: some View {
-        ScrollView(.horizontal) {
+        let scroller = ScrollView(.horizontal) {
             label
                 .fixedSize(horizontal: true, vertical: true)
                 .markdownTableBorderStyle(.init(color: borderColor))
@@ -1425,6 +1447,12 @@ private struct ChatMarkdownTable: View {
                 )
         }
         .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+
+        if let edgeFadeColor {
+            scroller.horizontalOverflowFades(.overlay(edgeFadeColor))
+        } else {
+            scroller
+        }
     }
 
     private var backgroundColor: SwiftUI.Color {

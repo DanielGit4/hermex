@@ -12,80 +12,39 @@ final class ChatImageCacheTests: XCTestCase {
 
     nonisolated override func tearDown() async throws {
         await MainActor.run {
-            ChatImageCaches.transcriptMedia.removeAll()
-            ChatImageCaches.attachments.removeAll()
+            TranscriptImageCache.shared.removeAll()
         }
         try await super.tearDown()
     }
 
-    // MARK: - Byte budget
+    // MARK: - One shared cache
 
-    func testCacheStaysWithinItsByteBudgetEvictingTheLeastRecentlyUsed() {
-        let cost = ChatImageCache<String>.cost(of: Self.image(side: 16))
-        let cache = ChatImageCache<String>(costLimit: cost * 3, limiter: ChatImageLoadLimiter(maxConcurrentLoads: 4))
-
-        for index in 0..<3 {
-            cache.insert(Self.image(side: 16), for: "image-\(index)")
-            XCTAssertLessThanOrEqual(cache.totalCost, cache.costLimit)
-        }
-        XCTAssertNotNil(cache.cachedImage(for: "image-0"), "A hit refreshes image-0, leaving image-1 the oldest")
-
-        cache.insert(Self.image(side: 16), for: "image-3")
-        XCTAssertLessThanOrEqual(cache.totalCost, cache.costLimit)
-        XCTAssertNil(cache.cachedImage(for: "image-1"), "The least recently used image goes first")
-        XCTAssertNotNil(cache.cachedImage(for: "image-0"))
-        XCTAssertNotNil(cache.cachedImage(for: "image-2"))
-        XCTAssertNotNil(cache.cachedImage(for: "image-3"))
-
-        for index in 4..<12 {
-            cache.insert(Self.image(side: 16), for: "image-\(index)")
-            XCTAssertLessThanOrEqual(cache.totalCost, cache.costLimit, "Over budget after inserting image-\(index)")
-        }
-        XCTAssertEqual(cache.totalCost, cost * 3)
-        XCTAssertEqual((0..<12).filter { cache.cachedImage(for: "image-\($0)") != nil }, [9, 10, 11])
-    }
-
-    func testImageLargerThanTheBudgetIsReturnedButNotStored() async {
-        let cache = ChatImageCache<String>(
-            costLimit: ChatImageCache<String>.cost(of: Self.image(side: 16)) * 3,
-            limiter: ChatImageLoadLimiter(maxConcurrentLoads: 4)
-        )
-        cache.insert(Self.image(side: 16), for: "small")
-        let costBefore = cache.totalCost
-        let png = Self.pngData(side: 64)
-
-        let loaded = await cache.image(for: "large") { png }
-
-        XCTAssertEqual(loaded?.size, CGSize(width: 64, height: 64))
-        XCTAssertNil(cache.cachedImage(for: "large"))
-        XCTAssertNotNil(cache.cachedImage(for: "small"), "An image that cannot fit evicts nothing")
-        XCTAssertEqual(cache.totalCost, costBefore)
-    }
-
-    func testMemoryWarningEmptiesBothSharedCaches() {
+    /// Attachments and linked images share `TranscriptImageCache` (#923), so one
+    /// warning empties both kinds. Its byte and count budget is NSCache's and is
+    /// pinned in `TranscriptImageCacheTests`.
+    func testMemoryWarningEmptiesBothSharedCaches() async {
         let namespace = "https://memory.example|\(UUID().uuidString)"
         let mediaKey = TranscriptMediaImageCacheKey(
             namespace: namespace,
             reference: TranscriptMediaReference(rawReference: "/fixture/warning.png")
-        )
-        let attachmentKey = AttachmentImageCacheKey(namespace: namespace, path: "/fixture/warning.png")
-        ChatImageCaches.transcriptMedia.insert(Self.image(side: 16), for: mediaKey)
-        ChatImageCaches.attachments.insert(Self.image(side: 16), for: attachmentKey)
-        XCTAssertGreaterThan(ChatImageCaches.transcriptMedia.totalCost, 0)
-        XCTAssertGreaterThan(ChatImageCaches.attachments.totalCost, 0)
+        ).cacheKey
+        let attachmentKey = AttachmentImageCacheKey(namespace: namespace, path: "/fixture/warning.png").cacheKey
+        let png = Self.pngData(side: 16)
+        _ = await TranscriptImageCache.shared.image(forKey: mediaKey) { png }
+        _ = await TranscriptImageCache.shared.image(forKey: attachmentKey) { png }
+        XCTAssertNotNil(TranscriptImageCache.shared.cachedImage(forKey: mediaKey))
+        XCTAssertNotNil(TranscriptImageCache.shared.cachedImage(forKey: attachmentKey))
 
         NotificationCenter.default.post(name: UIApplication.didReceiveMemoryWarningNotification, object: UIApplication.shared)
 
-        XCTAssertEqual(ChatImageCaches.transcriptMedia.totalCost, 0)
-        XCTAssertEqual(ChatImageCaches.attachments.totalCost, 0)
-        XCTAssertNil(ChatImageCaches.transcriptMedia.cachedImage(for: mediaKey))
-        XCTAssertNil(ChatImageCaches.attachments.cachedImage(for: attachmentKey))
+        XCTAssertNil(TranscriptImageCache.shared.cachedImage(forKey: mediaKey))
+        XCTAssertNil(TranscriptImageCache.shared.cachedImage(forKey: attachmentKey))
     }
 
     // MARK: - Shared loads
 
     func testConcurrentRequestsForOneKeyShareOneLoad() async throws {
-        let cache = ChatImageCache<String>(limiter: ChatImageLoadLimiter(maxConcurrentLoads: 4))
+        let cache = Self.cache(limiter: ChatImageLoadLimiter(maxConcurrentLoads: 4))
         let loader = GatedLoader()
         let started = expectation(description: "Both keys started loading")
         started.expectedFulfillmentCount = 2
@@ -93,9 +52,9 @@ final class ChatImageCacheTests: XCTestCase {
         let sharedPNG = Self.pngData(side: 8)
         let otherPNG = Self.pngData(side: 12)
 
-        let first = Task { await cache.image(for: "shared") { await loader.load("shared", returning: sharedPNG) } }
-        let second = Task { await cache.image(for: "shared") { await loader.load("shared", returning: sharedPNG) } }
-        let other = Task { await cache.image(for: "other") { await loader.load("other", returning: otherPNG) } }
+        let first = Task { await cache.image(forKey: "shared") { await loader.load("shared", returning: sharedPNG) } }
+        let second = Task { await cache.image(forKey: "shared") { await loader.load("shared", returning: sharedPNG) } }
+        let other = Task { await cache.image(forKey: "other") { await loader.load("other", returning: otherPNG) } }
         await fulfillment(of: [started], timeout: 5)
         loader.open()
 
@@ -110,14 +69,14 @@ final class ChatImageCacheTests: XCTestCase {
     }
 
     func testSharedLoadContinuesWhileAnotherRequesterWaits() async throws {
-        let cache = ChatImageCache<String>(limiter: ChatImageLoadLimiter(maxConcurrentLoads: 4))
+        let cache = Self.cache(limiter: ChatImageLoadLimiter(maxConcurrentLoads: 4))
         let loader = GatedLoader()
         let started = expectation(description: "Load started")
         loader.onStart = { _ in started.fulfill() }
         let png = Self.pngData()
 
-        let leaving = Task { await cache.image(for: "shared") { await loader.load("shared", returning: png) } }
-        let staying = Task { await cache.image(for: "shared") { await loader.load("shared", returning: png) } }
+        let leaving = Task { await cache.image(forKey: "shared") { await loader.load("shared", returning: png) } }
+        let staying = Task { await cache.image(forKey: "shared") { await loader.load("shared", returning: png) } }
         await fulfillment(of: [started], timeout: 5)
         leaving.cancel()
         let leftWith = await leaving.value
@@ -128,12 +87,12 @@ final class ChatImageCacheTests: XCTestCase {
         XCTAssertNotNil(stayedWith)
         XCTAssertEqual(loader.startedKeys, ["shared"])
         XCTAssertFalse(loader.observedCancellation, "The load keeps running for the requester still waiting")
-        XCTAssertNotNil(cache.cachedImage(for: "shared"))
+        XCTAssertNotNil(cache.cachedImage(forKey: "shared"))
     }
 
     func testLoadIsCancelledWhenItsLastRequesterLeavesAndStoresNothing() async {
         // One slot, so the follow-up load below cannot start before the cancelled one finishes.
-        let cache = ChatImageCache<String>(limiter: ChatImageLoadLimiter(maxConcurrentLoads: 1))
+        let cache = Self.cache(limiter: ChatImageLoadLimiter(maxConcurrentLoads: 1))
         let loader = GatedLoader()
         let started = expectation(description: "Load started")
         let finished = expectation(description: "Loader returned")
@@ -141,8 +100,8 @@ final class ChatImageCacheTests: XCTestCase {
         loader.onFinish = { finished.fulfill() }
         let png = Self.pngData()
 
-        let first = Task { await cache.image(for: "shared") { await loader.load("shared", returning: png) } }
-        let second = Task { await cache.image(for: "shared") { await loader.load("shared", returning: png) } }
+        let first = Task { await cache.image(forKey: "shared") { await loader.load("shared", returning: png) } }
+        let second = Task { await cache.image(forKey: "shared") { await loader.load("shared", returning: png) } }
         await fulfillment(of: [started], timeout: 5)
         first.cancel()
         second.cancel()
@@ -151,17 +110,16 @@ final class ChatImageCacheTests: XCTestCase {
 
         XCTAssertEqual(results.compactMap { $0 }.count, 0)
         XCTAssertTrue(loader.observedCancellation, "The loader sees the cancellation, so its request is cancelled")
-        let followUp = await cache.image(for: "shared") { nil }
+        let followUp = await cache.image(forKey: "shared") { nil }
         XCTAssertNil(followUp)
-        XCTAssertNil(cache.cachedImage(for: "shared"), "A cancelled load stores nothing, even if its loader returned data")
-        XCTAssertEqual(cache.totalCost, 0)
+        XCTAssertNil(cache.cachedImage(forKey: "shared"), "A cancelled load stores nothing, even if its loader returned data")
     }
 
     // MARK: - Load limit
 
     func testAtMostFourLoadsRunAtOnce() async {
         let limiter = ChatImageLoadLimiter(maxConcurrentLoads: 4)
-        let cache = ChatImageCache<String>(limiter: limiter)
+        let cache = Self.cache(limiter: limiter)
         let loader = GatedLoader()
         let started = expectation(description: "The first four loads started")
         started.expectedFulfillmentCount = 4
@@ -170,7 +128,7 @@ final class ChatImageCacheTests: XCTestCase {
         let png = Self.pngData()
 
         let requests = (0..<10).map { index in
-            Task { await cache.image(for: "image-\(index)") { await loader.load("image-\(index)", returning: png) } }
+            Task { await cache.image(forKey: "image-\(index)") { await loader.load("image-\(index)", returning: png) } }
         }
         await fulfillment(of: [started], timeout: 5)
         XCTAssertEqual(limiter.runningCount, 4)
@@ -423,8 +381,9 @@ final class ChatImageCacheTests: XCTestCase {
         }
     }
 
-    private static func image(side: CGFloat) -> UIImage {
-        UIImage(data: pngData(side: side))!
+    /// A cache of its own, so a test's warning, loads and limiter stay its own.
+    private static func cache(limiter: ChatImageLoadLimiter) -> TranscriptImageCache {
+        TranscriptImageCache(notificationCenter: NotificationCenter(), limiter: limiter)
     }
 
     private func loadedTiles(_ ledger: LoadLedger, path: (Int) -> String) -> Set<Int> {

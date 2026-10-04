@@ -192,10 +192,10 @@ import XCTest
     }
 
     func testAToolsetNameIsOnePercentEncodedPathSegment() {
-        XCTAssertEqual(BotEndpoint.toolsetURL(base: DashboardHTTPFixture.host, name: "odd one").absoluteString,
+        XCTAssertEqual(DashboardEndpoint.toolsetURL(base: DashboardHTTPFixture.host, name: "odd one").absoluteString,
                        "\(host)/api/tools/toolsets/odd%20one")
-        XCTAssertEqual(BotEndpoint.toolsets.url(base: DashboardHTTPFixture.host).absoluteString, "\(host)/api/tools/toolsets")
-        XCTAssertEqual(BotEndpoint.profiles.url(base: DashboardHTTPFixture.host).absoluteString, "\(host)/api/profiles")
+        XCTAssertEqual(DashboardEndpoint.toolsets.url(base: DashboardHTTPFixture.host).absoluteString, "\(host)/api/tools/toolsets")
+        XCTAssertEqual(DashboardEndpoint.profiles.url(base: DashboardHTTPFixture.host).absoluteString, "\(host)/api/profiles")
     }
 }
 

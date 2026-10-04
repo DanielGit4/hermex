@@ -46,8 +46,9 @@ developed by Hermes Kanban cards worked by Claude Code. Read this file together 
 
 - **Backend:** new screens talk to the **Hermes dashboard REST API** (hermes-agent
   `hermes_cli/web_routers/*.py`), not hermes-webui. Reuse the saved Bot connection
-  and its HTTP sign-in (`BotDashboardClient.signIn`, `auth/password-login`, cookie
-  session). Do not add hermes-webui routes.
+  and its HTTP sign-in: `DashboardClient` sends through the server's shared
+  `HermesConnection` (`auth/password-login`, cookie session, install-identity check,
+  retirement), the one Bot screens and push provisioning use. Do not add hermes-webui routes.
 - **Placement:** one new utility destination **Dashboard** (`SessionListUtilityDestination.dashboard`)
   next to Skills, visible when a Bot connection exists, with sections Skills Hub, MCP,
   Plugins, Config, Keys, Logs, Gateway. Existing webui-backed Skills/Memory screens stay.

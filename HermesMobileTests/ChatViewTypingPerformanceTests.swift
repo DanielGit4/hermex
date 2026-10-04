@@ -230,7 +230,7 @@ import XCTest
         let fixture = try ChatTypingFixture(messageCount: 4 * turns, repliesShowImages: true)
         defer {
             fixture.tearDown()
-            ChatImageCaches.transcriptMedia.removeAll()
+            TranscriptImageCache.shared.removeAll()
         }
 
         try await withHostedWindow(fixture) { window in
@@ -1633,5 +1633,31 @@ final class ResponseGate: @unchecked Sendable {
 
     @objc private func tick(_ link: CADisplayLink) {
         timestamps.append(link.timestamp)
+    }
+}
+
+/// Drives real display-link frames so a capture happens after layout, never
+/// after a wall-clock sleep. `target` is how many frames to let pass: a view
+/// whose content arrives from a live event needs more than the default.
+/// Upstream's Bot tests settle on main-queue passes instead (#815); the hosted
+/// chat tests here (typing performance, composer bottom row, scroll anchoring,
+/// send) still count frames, because what they measure is per-frame work.
+@MainActor final class BotRenderFrameDriver: NSObject {
+    private let completion: () -> Void
+    private let target: Int
+    private var link: CADisplayLink?
+    private var frames = 0
+    init(target: Int = 3, completion: @escaping () -> Void) {
+        self.target = target
+        self.completion = completion
+    }
+    func start() {
+        link = CADisplayLink(target: self, selector: #selector(tick))
+        link?.add(to: .main, forMode: .common)
+    }
+    func stop() { link?.invalidate(); link = nil }
+    @objc private func tick() {
+        frames += 1
+        if frames == target { stop(); completion() }
     }
 }

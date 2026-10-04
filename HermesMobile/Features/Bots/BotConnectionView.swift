@@ -234,6 +234,8 @@ extension BotHostStatus {
          probe: ((URL) async -> Result<BotHostStatus, BotHostProbeFailure>)? = nil,
          relay: ((URL) -> URL?)? = nil) {
         self.server = server; self.store = store ?? BotConnectionStore()
+        // The candidate is not saved yet, so it signs in on its own cookie jar, never the
+        // server's shared one.
         self.makeWire = makeWire ?? { BotClient(connection: $0) }
         self.probe = probe ?? { await BotHostStatusProbe().check($0) }
         self.relay = relay ?? { PushRegistrar.shared?.pairing(for: $0)?.relayURL }
@@ -316,7 +318,7 @@ extension BotHostStatus {
             let kept = replacingHost ? nil : (sameInstall || sameAccount ? saved : nil)
             let candidate = BotConnection(id: kept?.id ?? UUID(), name: label, address: url, username: account,
                 password: password, hermesVersion: wire.serverVersion, installID: live ?? kept?.installID)
-            let result = try await wire.call("profiles.list", ["include_sessions": .bool(true)])
+            let result = try await wire.call(.profilesList(includeSessions: true))
             guard attempt == id, !Task.isCancelled else { return false }
             guard result["profiles"].list != nil else { throw BotFailure.unsupported }
             let old = saved

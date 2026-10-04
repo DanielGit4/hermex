@@ -49,6 +49,25 @@ import Vision
         model.suspend()
     }
 
+    /// The socket is shared with the inbox and other chats, so it carries other bots'
+    /// sessions and connection-wide events too. None of them changes this chat, not even
+    /// its replay cursor.
+    func testAnotherRuntimesFramesOnTheSharedSocketChangeNothing() async {
+        let wire = BotFixtureWire()
+        let model = make(wire); await model.recover()
+        XCTAssertEqual(model.turn, .idle)
+        wire.onEvent?(.object(["session_id": .string("other-runtime"), "seq": .number(5), "type": .string("message.start")]))
+        wire.onEvent?(.object(["session_id": .string("other-runtime"), "type": .string("session.info")]))
+        wire.onEvent?(.object(["jsonrpc": .string("2.0"), "id": .string("srq-other"), "method": .string("sudo"),
+                               "params": .object(["session_id": .string("other-runtime")])]))
+        wire.onEvent?(.object(["type": .string("sessions.changed")]))
+        XCTAssertEqual(model.turn, .idle)
+        XCTAssertNil(model.pendingRequest)
+        wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(1), "type": .string("message.delta")]))
+        XCTAssertEqual(model.turn, .running, "Its own next frame is still continuous")
+        model.suspend()
+    }
+
     func testEmptyRecentTranscriptDoesNotSuppressLoading() async {
         let cache = BotHistoryCache(), identity = connection, wire = BotFixtureWire()
         wire.history = []
@@ -293,13 +312,13 @@ import Vision
             XCTAssertEqual(model.draft, accepted ? "" : "guide once")
             XCTAssertFalse(model.uncertainSend)
             XCTAssertEqual(model.connectionState, .connected)
-            let calls = wire.calls.filter { $0.0 == mode.method }
+            let calls = wire.calls.filter { $0.0 == mode.call(runtime: "", text: "").method }
             XCTAssertEqual(calls.count, 1)
             XCTAssertEqual(calls.first?.1["session_id"], .string("runtime"))
             XCTAssertEqual(calls.first?.1["text"], .string("guide once"))
             XCTAssertEqual(calls.first?.1["queued"], mode == .queue ? .bool(true) : nil)
             await model.submit(action)
-            XCTAssertEqual(wire.calls.filter { $0.0 == mode.method }.count, 1)
+            XCTAssertEqual(wire.calls.filter { $0.0 == mode.call(runtime: "", text: "").method }.count, 1)
             model.suspend()
         }
     }
@@ -310,7 +329,7 @@ import Vision
             let model = make(wire); await model.recover(); model.editDraft("keep")
             let action = try XCTUnwrap(model.preparePrompt(mode))
             wire.beforeDispatch = { method in
-                guard method == mode.method else { return }
+                guard method == mode.call(runtime: "", text: "").method else { return }
                 wire.running = false
                 wire.onEvent?(self.typed(1, "message.complete"))
             }
@@ -1183,7 +1202,7 @@ import Vision
         window.makeKeyAndVisible()
         defer { model.suspend(); window.isHidden = true; window.rootViewController = nil }
         await model.recover()
-        await renderBotFrames()
+        await settle(window)
         for step in 1...6 {
             wire.inflight = .object(["assistant": .string(
                 (1...(100 + step * 50)).map { "\($0) VISIBLE LIVE OUTPUT" }.joined(separator: "\n")
@@ -1192,7 +1211,7 @@ import Vision
             withObservationTracking { _ = model.liveMessages } onChange: { updated.fulfill() }
             wire.onEvent?(event(step))
             await fulfillment(of: [updated], timeout: 3)
-            await renderBotFrames()
+            await settle(window)
             try assertBotOutputVisible(window)
         }
     }
@@ -1211,20 +1230,12 @@ import Vision
         window.makeKeyAndVisible()
 
         window.rootViewController = UIHostingController(rootView: BotArtifactMessageView(message: reply, model: model, isLive: true))
-        await renderBotFrames()
+        await settle(window)
         XCTAssertFalse(MarkdownMathLayoutCache.hasCachedLayout(for: content))
 
         window.rootViewController = UIHostingController(rootView: BotArtifactMessageView(message: reply, model: model))
-        await renderBotFrames()
+        await settle(window)
         XCTAssertTrue(MarkdownMathLayoutCache.hasCachedLayout(for: content), "the settled row keeps the cached path")
-    }
-
-    private func renderBotFrames() async {
-        let rendered = expectation(description: "Transcript layout committed")
-        let driver = BotRenderFrameDriver { rendered.fulfill() }
-        driver.start()
-        await fulfillment(of: [rendered], timeout: 10)
-        driver.stop()
     }
 
     /// Reads the lower half of the window, where the latest edge of the
@@ -1443,27 +1454,46 @@ import Vision
     }
 }
 
-/// Drives real display-link frames so a capture happens after layout, never
-/// after a wall-clock sleep. `target` is how many frames to let pass: a view
-/// whose content arrives from a live event needs more than the default.
-@MainActor final class BotRenderFrameDriver: NSObject {
-    private let completion: () -> Void
-    private let target: Int
-    private var link: CADisplayLink?
-    private var frames = 0
-    init(target: Int = 3, completion: @escaping () -> Void) {
-        self.target = target
-        self.completion = completion
+extension XCTestCase {
+    /// Lets a hosted SwiftUI window apply pending state before a test reads it.
+    /// Each pass yields one main-queue turn, so queued main-actor work (a view's
+    /// `.task`, an observation callback, a deferred focus change) runs, then
+    /// lays the window out, which is where the hosting view applies that state.
+    /// Display cadence plays no part, so a runner whose display link stalls
+    /// cannot time a test out. Content produced off the main queue needs its own
+    /// signal: await the model first, or read until the content shows.
+    @MainActor func settle(_ window: UIWindow, passes: Int = 3) async {
+        for _ in 0..<passes {
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                DispatchQueue.main.async { continuation.resume() }
+            }
+            window.layoutIfNeeded()
+        }
     }
-    func start() {
-        link = CADisplayLink(target: self, selector: #selector(tick))
-        link?.add(to: .main, forMode: .common)
+
+    /// A freshly cloned CI simulator boots without the keyboard daemon. The first
+    /// focus change after a text view takes focus blocks the main thread inside
+    /// UIKit until `kbd` answers, which took 5–30 s on hosted runners, so no
+    /// wait's ceiling is safe while it starts. Classes that focus text views call
+    /// this from `class setUp()`, where no clock runs; later calls return at once.
+    @MainActor static func warmUpSoftwareKeyboard() {
+        guard !softwareKeyboardIsWarm,
+              let scene = UIApplication.shared.connectedScenes.compactMap({ $0 as? UIWindowScene }).first
+        else { return }
+        softwareKeyboardIsWarm = true
+        let window = UIWindow(windowScene: scene)
+        let field = UITextView(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
+        window.addSubview(field)
+        window.makeKeyAndVisible()
+        let shown = XCTNSNotificationExpectation(name: UIResponder.keyboardWillShowNotification)
+        field.becomeFirstResponder()
+        // The keyboard is requested on focus; giving focus up is what waits for it.
+        _ = XCTWaiter().wait(for: [shown], timeout: 5)
+        field.resignFirstResponder()
+        window.isHidden = true
     }
-    func stop() { link?.invalidate(); link = nil }
-    @objc private func tick() {
-        frames += 1
-        if frames == target { stop(); completion() }
-    }
+
+    @MainActor private static var softwareKeyboardIsWarm = false
 }
 
 actor BotMemoryDrafts: ChatDraftPersisting {
@@ -1539,7 +1569,8 @@ actor BotMemoryDrafts: ChatDraftPersisting {
     var connectCount = 0
     func connect() async throws { connectCount += 1 }
     func close() {}
-    func call(_ method: String, _ params: [String: BotJSON], validateDispatch: (() throws -> Void)?) async throws -> BotJSON {
+    func call(_ call: HermesCall, validateDispatch: (() throws -> Void)?) async throws -> BotJSON {
+        let method = call.method, params = try call.params()
         beforeDispatch?(method)
         try validateDispatch?()
         calls.append((method, params))

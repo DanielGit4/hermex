@@ -79,12 +79,12 @@ import XCTest
 
     func testASlashNamedPluginKeepsItsSlashAndOtherCharactersAreEncoded() async throws {
         let base = DashboardHTTPFixture.host
-        XCTAssertEqual(BotEndpoint.pluginURL(base: base, name: "web/firecrawl", action: "enable").absoluteString,
+        XCTAssertEqual(DashboardEndpoint.pluginURL(base: base, name: "web/firecrawl", action: "enable").absoluteString,
                        "\(plugins)/web/firecrawl/enable")
-        XCTAssertEqual(BotEndpoint.pluginURL(base: base, name: "web/firecrawl").absoluteString, "\(plugins)/web/firecrawl")
-        XCTAssertEqual(BotEndpoint.pluginURL(base: base, name: "my plugin", action: "disable").absoluteString,
+        XCTAssertEqual(DashboardEndpoint.pluginURL(base: base, name: "web/firecrawl").absoluteString, "\(plugins)/web/firecrawl")
+        XCTAssertEqual(DashboardEndpoint.pluginURL(base: base, name: "my plugin", action: "disable").absoluteString,
                        "\(plugins)/my%20plugin/disable")
-        XCTAssertEqual(BotEndpoint.pluginURL(base: base, name: "a?b").absoluteString, "\(plugins)/a%3Fb")
+        XCTAssertEqual(DashboardEndpoint.pluginURL(base: base, name: "a?b").absoluteString, "\(plugins)/a%3Fb")
         let client = DashboardHTTPFixture.client()
 
         _ = try await client.setPlugin("web/firecrawl", enabled: false)
@@ -92,13 +92,21 @@ import XCTest
         XCTAssertEqual(DashboardHTTPFixture.calls.last, "POST \(plugins)/web/firecrawl/disable")
     }
 
-    func testPushProvisioningsPluginURLsAreUnchanged() {
+    /// Push provisioning builds its requests in `HermesREST`; the Dashboard's plugin routes
+    /// address the same paths, and only push's install forces a reinstall.
+    func testPushProvisioningsPluginURLsAreUnchanged() throws {
         let base = DashboardHTTPFixture.host
-        XCTAssertEqual(BotEndpoint.pluginURL(base: base, name: HermexPushPlugin.name, action: "enable").absoluteString,
-                       "\(plugins)/hermex-push/enable")
-        XCTAssertEqual(BotEndpoint.pluginURL(base: base, name: HermexPushPlugin.name, action: "disable").absoluteString,
-                       "\(plugins)/hermex-push/disable")
-        XCTAssertEqual(BotEndpoint.pluginInstall.url(base: base).absoluteString, "\(plugins)/install")
+        let enable = try HermesREST.setPlugin(name: HermexPushPlugin.name, enabled: true).request(base: base)
+        let disable = try HermesREST.setPlugin(name: HermexPushPlugin.name, enabled: false).request(base: base)
+        let install = try HermesREST.installPlugin(identifier: "hermex-push").request(base: base)
+        XCTAssertEqual(enable.url?.absoluteString, "\(plugins)/hermex-push/enable")
+        XCTAssertEqual(disable.url?.absoluteString, "\(plugins)/hermex-push/disable")
+        XCTAssertEqual(install.url?.absoluteString, "\(plugins)/install")
+        XCTAssertEqual(DashboardEndpoint.pluginURL(base: base, name: HermexPushPlugin.name, action: "enable"), enable.url)
+        XCTAssertEqual(DashboardEndpoint.pluginURL(base: base, name: HermexPushPlugin.name, action: "disable"), disable.url)
+        XCTAssertEqual(DashboardEndpoint.pluginInstall.url(base: base), install.url)
+        let pushBody = try JSONDecoder().decode(BotJSON.self, from: try XCTUnwrap(install.httpBody))
+        XCTAssertEqual(pushBody["force"].flag, true, "Push reinstalls over an existing copy")
     }
 
     /// Install and update clone, scan and install dependencies inside one request.

@@ -366,7 +366,9 @@ final class SessionListAllProfilesTests: XCTestCase {
         let created = try XCTUnwrap(createdSession)
         _ = try await makeClient(fake).sessionYolo(sessionID: try XCTUnwrap(created.sessionId))
 
-        XCTAssertEqual(fake.requests, ["GET /api/workspaces", "POST /api/session/new", "GET /api/session/yolo"])
+        // Upstream #822: a known profile needs no workspace lookup; the server
+        // gives the new chat that profile's last workspace.
+        XCTAssertEqual(fake.requests, ["POST /api/session/new", "GET /api/session/yolo"])
         XCTAssertEqual(fake.switchedProfiles, ["opensource", "default"])
         XCTAssertEqual(fake.createdSessionProfiles, ["default"])
         XCTAssertEqual(created.profile, "default")
@@ -411,6 +413,26 @@ final class SessionListAllProfilesTests: XCTestCase {
         ])
         XCTAssertEqual(fake.violations, [])
         XCTAssertEqual(viewModel.activeProfileName, "default")
+    }
+
+    /// The archive toast's Undo (#919) restores a foreign profile's row on that
+    /// profile, as its archive did, and the server goes back to the pick.
+    @MainActor
+    func testUndoingAnArchiveFromAnotherProfileSwitchesFirst() async throws {
+        let fake = AllProfilesServerFake(active: "default", rows: [Self.webui("open-1", profile: "opensource", at: 20)])
+        let viewModel = makeViewModel(fake)
+        await viewModel.load()
+        await viewModel.loadActiveProfile()
+        let session = try row("open-1", in: viewModel)
+        fake.clearRequests()
+
+        let restored = await viewModel.unarchive(session)
+
+        XCTAssertTrue(restored)
+        XCTAssertEqual(fake.violations, [], "The restore must reach the row's own profile")
+        XCTAssertEqual(fake.switchedProfiles, ["opensource", "default"])
+        XCTAssertEqual(viewModel.activeProfileName, "default")
+        XCTAssertEqual(viewModel.serverProfileName, "default")
     }
 
     @MainActor
@@ -1269,10 +1291,12 @@ final class AllProfilesServerFake: @unchecked Sendable {
             case ("POST", "/api/session/new"):
                 let requested = body["profile"] as? String
                 newSessionProfiles.append(requested)
+                // Like the server since #822: without a workspace, the requested
+                // profile's last one.
                 let session: [String: Any] = [
                     "session_id": "new-\(newSessionProfiles.count)",
                     "title": "Untitled",
-                    "workspace": body["workspace"] as? String ?? NSNull(),
+                    "workspace": body["workspace"] as? String ?? "/work/\(requested ?? active)",
                     "profile": requested ?? active,
                     "message_count": 0
                 ]

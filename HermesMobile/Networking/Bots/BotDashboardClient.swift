@@ -1,48 +1,31 @@
 import Foundation
 
 /// The Hermes host's dashboard REST surface, kept apart from `BotClient` because push
-/// provisioning needs no gateway socket: it signs in over HTTP with the saved Bot
-/// connection, mutates the host's plugins and environment, and reads the pairing keys.
-/// Every call here changes the user's server, so only the explicit Enable and Disable
-/// actions build one.
+/// provisioning needs no gateway socket: it mutates the host's plugins and environment
+/// and reads the pairing keys, over the sign-in and cookie jar the server's Bot screens
+/// share. Every call here changes the user's server, so only the explicit Enable and
+/// Disable actions build one.
 @MainActor final class BotDashboardClient {
-    private let connection: BotConnection
-    private let session: URLSession
-    private var isSignedIn = false
+    private let http: HermesConnection
 
-    init(connection: BotConnection, configuration: URLSessionConfiguration = .ephemeral) {
-        self.connection = connection
-        // Provisioning waits on real work: installing clones a repository on the host,
-        // and a restart takes the gateway down and back up. The Bot socket's 15 seconds
-        // would read as a failure while the host was still succeeding.
-        configuration.timeoutIntervalForRequest = 120
-        configuration.timeoutIntervalForResource = 180
-        session = URLSession(configuration: configuration)
+    /// Provisioning for `server`'s saved connection, on the sign-in its Bot screens share.
+    convenience init(saved connection: BotConnection, server: URL) {
+        self.init(http: HermesConnections.shared.connection(for: connection, server: server))
     }
 
-    /// Signs this HTTP session in through the host's password gate. Later calls reuse the
-    /// cookie the first sign-in stored, so a sequence of steps logs in once.
+    init(http: HermesConnection) { self.http = http }
+
+    /// Signs in through the host's password gate unless the connection already is, with
+    /// the provisioning deadline. The install identity is checked before the password
+    /// goes out, so a swapped host is refused before anything on it changes.
     func signIn() async throws {
-        guard !isSignedIn else { return }
-        let status = try await send(request(BotEndpoint.status.url(base: connection.address)))
-        // Provisioning mutates the host, so a swapped host is refused before the password goes out.
-        try connection.requireSameInstall(BotConnection.installID(in: status))
-        guard status["auth_required"].flag == true,
-              status["auth_providers"].list?.contains(.string("basic")) == true else { throw BotFailure.unsupported }
-        _ = try await send(request(BotEndpoint.login.url(base: connection.address), method: "POST", body: .object([
-            "provider": .string("basic"), "username": .string(connection.username),
-            "password": .string(connection.password)
-        ])))
-        let identity = try await send(request(BotEndpoint.identity.url(base: connection.address)))
-        guard identity["provider"].text == "basic" else { throw BotFailure.wrongIdentity }
-        isSignedIn = true
+        try await http.signIn(deadline: .provisioning)
     }
 
     /// Writes one managed environment value at the host root. No `profile` is sent: a
     /// profile without its own value inherits the root one, which is what pairing needs.
     func setEnvironmentValue(_ key: String, _ value: String) async throws {
-        _ = try await send(request(BotEndpoint.environment.url(base: connection.address), method: "PUT",
-                                   body: .object(["key": .string(key), "value": .string(value)])))
+        _ = try await send(.setEnvironment(key: key, value: value))
     }
 
     /// Installs an agent plugin from its identifier, reinstalling over an existing copy.
@@ -52,45 +35,32 @@ import Foundation
     /// device: `hermex-push` keeps its key pair in `plugin-data`, outside the install
     /// directory.
     func installPlugin(identifier: String) async throws {
-        _ = try await send(request(BotEndpoint.pluginInstall.url(base: connection.address), method: "POST",
-                                   body: .object(["identifier": .string(identifier), "enable": .bool(true), "force": .bool(true)])))
+        _ = try await send(.installPlugin(identifier: identifier))
     }
 
     /// Enables or disables an installed agent plugin. Disabling is deliberately never
     /// `DELETE`: the plugin directory is also where the host's key pair used to live.
     func setPlugin(_ name: String, enabled: Bool) async throws {
-        let url = BotEndpoint.pluginURL(base: connection.address, name: name, action: enabled ? "enable" : "disable")
-        _ = try await send(request(url, method: "POST", body: .object([:])))
+        _ = try await send(.setPlugin(name: name, enabled: enabled))
     }
 
     /// Restarts the agent gateway so a newly installed plugin is loaded. This interrupts
     /// the user's running work, so only a confirmed Enable reaches it.
     func restartGateway() async throws {
-        _ = try await send(request(BotEndpoint.gatewayRestart.url(base: connection.address), method: "POST", body: .object([:])))
+        _ = try await send(.restartGateway)
     }
 
     /// Reads the plugin's pairing keys. The route answers 409 until the relay URL is set
     /// and 404 until the restart has mounted it, so the caller retries both.
     func pairing() async throws -> PushPairing {
-        try HermexPushPlugin.pairing(try await send(request(BotEndpoint.pushPairing.url(base: connection.address))))
-    }
-
-    private func request(_ url: URL, method: String = "GET", body: BotJSON? = nil) -> URLRequest {
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        if let body {
-            request.httpBody = try? JSONEncoder().encode(body)
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
-        return request
+        try HermexPushPlugin.pairing(try await send(.pushPairing))
     }
 
     /// Any non-2xx is the step's failure, carrying the status so the pairing route's 404
-    /// and 409 can be retried while the host comes back up.
-    private func send(_ request: URLRequest) async throws -> BotJSON {
-        let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse else { throw BotFailure.transport }
-        guard (200..<300).contains(response.statusCode) else { throw BotFailure.rejected(response.statusCode) }
+    /// and 409 can be retried while the host comes back up. Each step gets the
+    /// provisioning deadline.
+    private func send(_ rest: HermesREST) async throws -> BotJSON {
+        let data = try await http.data(rest, deadline: .provisioning, accepting: 200..<300)
         return (try? JSONDecoder().decode(BotJSON.self, from: data)) ?? .null
     }
 }

@@ -1,43 +1,46 @@
 import Foundation
 
-/// Typed REST over the Hermes host's dashboard API for the Dashboard destination. It signs
-/// in exactly as `BotDashboardClient` does — the saved Bot connection's password gate and a
-/// cookie session — and adds what browsing screens need: every verb, tolerant `BotJSON`
-/// answers, and one fresh sign-in when the host has forgotten the session.
+/// Typed REST over the Hermes host's dashboard API for the Dashboard destination, sent
+/// through the server's shared `HermesConnection`: the same sign-in, cookie jar, origin and
+/// redirect guard, install-identity check and retirement as its Bot screens and push
+/// provisioning, without a gateway socket. It adds what browsing screens need: every verb,
+/// RFC 3986 query values, tolerant `BotJSON` answers, and the host's reason for a refusal
+/// when a call opts in. A 401 signs in again and resends once, sharing that sign-in with
+/// every other consumer of the connection.
 @MainActor final class DashboardClient {
     /// How long a plugin install or update may run. Each clones at a pinned commit, scans it
     /// and installs Python dependencies inside one request, which can outlast the shared
     /// limits while the host keeps working.
     static let longRequestTimeout: TimeInterval = 300
 
-    let connection: BotConnection
-    let session: URLSession
-    /// The same cookie storage (and, in tests, the same protocol classes) with longer limits,
-    /// used only by requests that ask for it.
-    let longSession: URLSession
-    /// The sign-in every request waits on, so requests that start together sign in once.
-    private var signInTask: Task<Void, Error>?
+    let http: HermesConnection
 
-    init(connection: BotConnection, configuration: URLSessionConfiguration = .ephemeral) {
-        self.connection = connection
-        // Hub search fans out to every configured source with a 30-second budget on the host.
-        // Preview and scan also resolve remote bundles, so bound both inactivity and total time.
-        configuration.timeoutIntervalForRequest = 60
-        configuration.timeoutIntervalForResource = 90
-        session = URLSession(configuration: configuration)
-        let long = configuration.copy() as! URLSessionConfiguration
-        long.httpCookieStorage = configuration.httpCookieStorage
-        long.timeoutIntervalForRequest = Self.longRequestTimeout
-        long.timeoutIntervalForResource = Self.longRequestTimeout
-        longSession = URLSession(configuration: long)
+    /// The Dashboard for `server`'s saved connection, on the sign-in its Bot screens share.
+    convenience init(saved connection: BotConnection, server: URL) {
+        self.init(http: HermesConnections.shared.connection(for: connection, server: server))
     }
 
-    var address: URL { connection.address }
+    /// A client with its own connection, cookie jar and sign-in, for tests.
+    convenience init(connection: BotConnection, configuration: URLSessionConfiguration = .ephemeral) {
+        self.init(http: HermesConnection(connection: connection, configuration: configuration))
+    }
 
-    /// `GET api/status` → `POST auth/password-login` → `GET api/auth/me`, the sequence
-    /// `BotDashboardClient.signIn` runs. Later calls reuse the cookie it stored.
+    init(http: HermesConnection) { self.http = http }
+
+    var connection: BotConnection { http.connection }
+    var address: URL { connection.address }
+    /// Whether the shared connection was retired (server switch, credentials changed or
+    /// removed); every call then throws `BotFailure.stale` and the bundle is rebuilt.
+    var isRetired: Bool { http.isRetired }
+    /// The sessions the Dashboard's ordinary and long requests use. Both share the
+    /// connection's cookie jar.
+    var session: URLSession { http.browsingSession }
+    var longSession: URLSession { http.longSession }
+
+    /// `GET api/status` → `POST auth/password-login` → `GET api/auth/me` through the shared
+    /// connection, unless it is already signed in. Later calls reuse the cookie it stored.
     func signIn() async throws {
-        _ = try await signedIn()
+        try await http.signIn(deadline: .browsing)
     }
 
     func get(_ url: URL, query: [URLQueryItem] = []) async throws -> BotJSON {
@@ -62,71 +65,26 @@ import Foundation
         try await send("DELETE", Self.url(url, query: query), body: nil, readsRefusal: readsRefusal)
     }
 
-    /// A 401 means the host dropped this session (a restart or an expired cookie), and the
-    /// auth gate refused the request before any handler ran, so it signs in once more and
-    /// replays the request once. A second 401 is the saved credential's problem and surfaces.
+    /// The connection signs in first unless it already is. A 401 means the host dropped the
+    /// session (a restart or an expired cookie) and the auth gate refused the request before
+    /// any handler ran, so the connection signs in once more and resends it once. A second
+    /// 401 is the saved credential's problem and surfaces.
     private func send(_ method: String, _ url: URL, body: BotJSON?,
                       long: Bool = false, readsRefusal: Bool = false) async throws -> BotJSON {
-        var urlRequest = request(url, method: method, body: body)
-        if long { urlRequest.timeoutInterval = Self.longRequestTimeout }
-        let used = try await signedIn()
-        do {
-            return try await perform(urlRequest, long: long, readsRefusal: readsRefusal)
-        } catch BotFailure.rejected(401) {
-            if signInTask == used { signInTask = nil }
-            _ = try await signedIn()
-            return try await perform(urlRequest, long: long, readsRefusal: readsRefusal)
-        }
-    }
-
-    private func signedIn() async throws -> Task<Void, Error> {
-        let task = signInTask ?? Task { try await self.runSignIn() }
-        signInTask = task
-        do {
-            try await task.value
-        } catch {
-            if signInTask == task { signInTask = nil }
-            throw error
-        }
-        return task
-    }
-
-    private func runSignIn() async throws {
-        let status = try await perform(request(BotEndpoint.status.url(base: address)))
-        guard status["auth_required"].flag == true,
-              status["auth_providers"].list?.contains(.string("basic")) == true else { throw BotFailure.unsupported }
-        _ = try await perform(request(BotEndpoint.login.url(base: address), method: "POST", body: .object([
-            "provider": .string("basic"), "username": .string(connection.username),
-            "password": .string(connection.password)
-        ])))
-        let identity = try await perform(request(BotEndpoint.identity.url(base: address)))
-        guard identity["provider"].text == "basic" else { throw BotFailure.wrongIdentity }
-    }
-
-    private func request(_ url: URL, method: String = "GET", body: BotJSON? = nil) -> URLRequest {
-        var request = URLRequest(url: url)
-        request.httpMethod = method
-        if let body {
-            request.httpBody = try? JSONEncoder().encode(body)
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        }
-        return request
-    }
-
-    private func perform(_ request: URLRequest, long: Bool = false, readsRefusal: Bool = false) async throws -> BotJSON {
-        let (data, response) = try await (long ? longSession : session).data(for: request)
-        guard let response = response as? HTTPURLResponse else { throw BotFailure.transport }
-        guard (200..<300).contains(response.statusCode) else {
+        var request = try HermesREST.dashboard(method: method, url: url, body: body).request(base: address)
+        if long { request.timeoutInterval = Self.longRequestTimeout }
+        let reply = try await http.reply(request, deadline: long ? .long : .browsing)
+        guard (200..<300).contains(reply.status) else {
             // FastAPI's `HTTPException(400 or 409, detail)` carries the host's reason; a 422's
             // `detail` is a validation list, which stays a plain status.
-            if readsRefusal, [400, 409].contains(response.statusCode),
-               let detail = (try? JSONDecoder().decode(BotJSON.self, from: data))?["detail"],
+            if readsRefusal, [400, 409].contains(reply.status),
+               let detail = (try? JSONDecoder().decode(BotJSON.self, from: reply.body))?["detail"],
                DashboardFailure.refusalMessage(detail) != nil {
                 throw DashboardFailure.refused(detail)
             }
-            throw BotFailure.rejected(response.statusCode)
+            throw BotFailure.rejected(reply.status)
         }
-        return (try? JSONDecoder().decode(BotJSON.self, from: data)) ?? .null
+        return (try? JSONDecoder().decode(BotJSON.self, from: reply.body)) ?? .null
     }
 
     /// Hub identifiers can be URLs, so values are encoded down to RFC 3986's unreserved set:
@@ -157,18 +115,91 @@ enum DashboardFailure: Error, Equatable {
     }
 }
 
-/// The Skills Hub routes in `BotEndpoint`, each scoped to one of the host's profiles by name.
+/// The dashboard routes the Dashboard destination uses. `DashboardClient` sends each as a
+/// `HermesREST.dashboard` request on the connection's address; push provisioning's routes
+/// stay typed in `HermesREST`.
+enum DashboardEndpoint: String {
+    /// Skills Hub routes, verified against hermes-agent `hermes_cli/web_routers/skills.py` on
+    /// 2026-09-25. Each takes an optional `profile`, which the Dashboard always sends in the
+    /// query. `GET api/skills` lists `{name, description, category, enabled, usage,
+    /// provenance}`; search, preview and scan take `q` or `identifier`; `sources` carries the
+    /// hub lock (`installed`, keyed by identifier). Install `{identifier}`, uninstall `{name}`
+    /// and update only spawn `hermes skills …` and answer `{ok, pid, name}`: the outcome is
+    /// `actionStatusURL`.
+    case skills = "api/skills"
+    case skillContent = "api/skills/content"
+    case skillsHubSources = "api/skills/hub/sources"
+    case skillsHubSearch = "api/skills/hub/search"
+    case skillsHubPreview = "api/skills/hub/preview"
+    case skillsHubScan = "api/skills/hub/scan"
+    case skillsHubInstall = "api/skills/hub/install"
+    case skillsHubUninstall = "api/skills/hub/uninstall"
+    case skillsHubUpdate = "api/skills/hub/update"
+    /// MCP routes, verified against hermes-agent 0.21.5 `hermes_cli/web_routers/mcp.py` on
+    /// 2026-09-26, each with the optional `profile` in the query. `servers` answers `{servers:
+    /// [summary]}` with env values already redacted; `catalog` answers `{entries, diagnostics}`
+    /// (no `detect_apps`); `catalog/install` takes `{name, env, enable}` and answers `{ok, name,
+    /// background, action?}`, where a background install is followed through `actionStatusURL`.
+    case mcpServers = "api/mcp/servers"
+    case mcpCatalog = "api/mcp/catalog"
+    case mcpCatalogInstall = "api/mcp/catalog/install"
+    /// Plugin routes, verified against hermes-agent 0.21.5 `hermes_cli/web_routers/dashboard_ui.py`
+    /// on 2026-09-26; none takes a `profile`. `hub` answers `{plugins: [row]}` and `catalog` the
+    /// live curated catalog `{entries, removed}`. Catalog installs go through `pluginInstall` with
+    /// `{identifier: "", catalog_name, enable, force: false}`, never push provisioning's
+    /// force-install (`HermesREST.installPlugin`); `pluginURL` addresses enable, disable, update
+    /// and `DELETE`. A refused mutation is a 400 whose `detail` is the host's reason, except an
+    /// update's `consent_required`, which answers 200.
+    case pluginInstall = "api/dashboard/agent-plugins/install"
+    case pluginsHub = "api/dashboard/plugins/hub"
+    case pluginsCatalog = "api/dashboard/plugins/catalog"
+    /// Tools routes, verified against hermes-agent 0.21.5 on 2026-09-30. `profiles`
+    /// (`web_routers/profiles.py`) answers `{profiles: [row]}`, each row named by its slug
+    /// (`default` for the root profile). `toolsets` (`web_routers/tools.py`) takes `profile` and
+    /// answers a bare array of `{name, label, description, platform, platform_label, enabled,
+    /// available, configured, tools}`; an unknown profile is a 404. `toolsetURL` toggles one with
+    /// `PUT {enabled, profile}`, answering `{ok, name, platform, enabled, post_setup_started}`; an
+    /// unknown toolset is a 400 whose `detail` says so.
+    case profiles = "api/profiles"
+    case toolsets = "api/tools/toolsets"
+
+    func url(base: URL) -> URL { base.appendingPathComponent(rawValue) }
+    /// `GET /api/actions/{name}/status` (`actions.py`): `{name, running, exit_code, pid,
+    /// lines}` for a spawned action. `name` is the one the spawning route answered.
+    static func actionStatusURL(base: URL, name: String) -> URL {
+        base.appendingPathComponent("api/actions").appendingPathComponent(name).appendingPathComponent("status")
+    }
+    /// `DELETE /api/mcp/servers/{name}`, or with an action `POST …/{name}/test` and
+    /// `PUT …/{name}/enabled`. `name` is one path segment, percent-encoded.
+    static func mcpServerURL(base: URL, name: String, action: String? = nil) -> URL {
+        let server = DashboardEndpoint.mcpServers.url(base: base).appendingPathComponent(name)
+        return action.map { server.appendingPathComponent($0) } ?? server
+    }
+    /// `POST /api/dashboard/agent-plugins/{name}/{action}` for `enable`, `disable` and
+    /// `update`, or without an action `DELETE …/{name}`. The host reads `{name:path}`, so a
+    /// `/` in a plugin key stays a separator; everything else is percent-encoded.
+    static func pluginURL(base: URL, name: String, action: String? = nil) -> URL {
+        let plugin = base.appendingPathComponent("api/dashboard/agent-plugins").appendingPathComponent(name)
+        return action.map { plugin.appendingPathComponent($0) } ?? plugin
+    }
+    /// `PUT /api/tools/toolsets/{name}`. `name` is one path segment, percent-encoded.
+    static func toolsetURL(base: URL, name: String) -> URL {
+        DashboardEndpoint.toolsets.url(base: base).appendingPathComponent(name)
+    }
+}
+
+/// The Skills Hub routes in `DashboardEndpoint`, each scoped to one of the host's profiles by name.
 /// The profile goes in the query only, never in a body: the host lets a body's `profile`
 /// win over the query's.
 extension DashboardClient {
     func installedSkills(profile: String) async throws -> [DashboardSkill] {
-        let rows = try await get(BotEndpoint.skills.url(base: address), query: [Self.profileItem(profile)])
+        let rows = try await get(DashboardEndpoint.skills.url(base: address), query: [Self.profileItem(profile)])
         guard let list = rows.list else { throw DashboardFailure.unreadableResponse }
         return list.compactMap(DashboardSkill.init)
     }
 
     func installedSkillContent(_ name: String, profile: String) async throws -> DashboardSkillContent {
-        let json = try await get(BotEndpoint.skillContent.url(base: address),
+        let json = try await get(DashboardEndpoint.skillContent.url(base: address),
                                  query: [URLQueryItem(name: "name", value: name), Self.profileItem(profile)])
         guard let content = DashboardSkillContent(json) else { throw DashboardFailure.unreadableResponse }
         return content
@@ -176,12 +207,12 @@ extension DashboardClient {
 
     /// The hub lock: hub-installed skills keyed by the identifier they were installed from.
     func hubLock(profile: String) async throws -> [String: HubLockEntry] {
-        HubLockEntry.entries(try await get(BotEndpoint.skillsHubSources.url(base: address),
+        HubLockEntry.entries(try await get(DashboardEndpoint.skillsHubSources.url(base: address),
                                            query: [Self.profileItem(profile)])["installed"]) ?? [:]
     }
 
     func searchHub(_ query: String, limit: Int = 20, profile: String) async throws -> HubSearchResult {
-        HubSearchResult(try await get(BotEndpoint.skillsHubSearch.url(base: address), query: [
+        HubSearchResult(try await get(DashboardEndpoint.skillsHubSearch.url(base: address), query: [
             URLQueryItem(name: "q", value: query),
             URLQueryItem(name: "source", value: "all"),
             URLQueryItem(name: "limit", value: String(limit)),
@@ -190,14 +221,14 @@ extension DashboardClient {
     }
 
     func previewHubSkill(_ identifier: String, profile: String) async throws -> HubSkillPreview {
-        let json = try await get(BotEndpoint.skillsHubPreview.url(base: address),
+        let json = try await get(DashboardEndpoint.skillsHubPreview.url(base: address),
                                  query: [URLQueryItem(name: "identifier", value: identifier), Self.profileItem(profile)])
         guard let preview = HubSkillPreview(json, identifier: identifier) else { throw DashboardFailure.unreadableResponse }
         return preview
     }
 
     func scanHubSkill(_ identifier: String, profile: String) async throws -> HubSkillScan {
-        let json = try await get(BotEndpoint.skillsHubScan.url(base: address),
+        let json = try await get(DashboardEndpoint.skillsHubScan.url(base: address),
                                  query: [URLQueryItem(name: "identifier", value: identifier), Self.profileItem(profile)])
         guard json.fields != nil else { throw DashboardFailure.unreadableResponse }
         return HubSkillScan(json)
@@ -205,23 +236,23 @@ extension DashboardClient {
 
     /// Each returns the spawned action's name, the one `actionStatus` reports on.
     func installHubSkill(_ identifier: String, profile: String) async throws -> String {
-        let url = Self.url(BotEndpoint.skillsHubInstall.url(base: address), query: [Self.profileItem(profile)])
+        let url = Self.url(DashboardEndpoint.skillsHubInstall.url(base: address), query: [Self.profileItem(profile)])
         return try Self.actionName(try await post(url, body: .object(["identifier": .string(identifier)])))
     }
 
     func uninstallHubSkill(_ name: String, profile: String) async throws -> String {
-        let url = Self.url(BotEndpoint.skillsHubUninstall.url(base: address), query: [Self.profileItem(profile)])
+        let url = Self.url(DashboardEndpoint.skillsHubUninstall.url(base: address), query: [Self.profileItem(profile)])
         return try Self.actionName(try await post(url, body: .object(["name": .string(name)])))
     }
 
     func updateHubSkills(profile: String) async throws -> String {
-        let json = try await post(Self.url(BotEndpoint.skillsHubUpdate.url(base: address), query: [Self.profileItem(profile)]))
+        let json = try await post(Self.url(DashboardEndpoint.skillsHubUpdate.url(base: address), query: [Self.profileItem(profile)]))
         return (try? Self.actionName(json)) ?? "skills-update"
     }
 
     /// Not scoped: the host names an action per skill, not per profile.
     func actionStatus(_ name: String) async throws -> DashboardActionStatus {
-        DashboardActionStatus(try await get(BotEndpoint.actionStatusURL(base: address, name: name)))
+        DashboardActionStatus(try await get(DashboardEndpoint.actionStatusURL(base: address, name: name)))
     }
 
     private static func actionName(_ json: BotJSON) throws -> String {
@@ -235,11 +266,11 @@ extension DashboardClient {
     }
 }
 
-/// The MCP routes in `BotEndpoint`, each scoped to one of the host's profiles by name. The
+/// The MCP routes in `DashboardEndpoint`, each scoped to one of the host's profiles by name. The
 /// profile goes in the query only, never in a body: the host lets a body's `profile` win.
 extension DashboardClient {
     func mcpServers(profile: String) async throws -> [MCPServer] {
-        guard let rows = try await get(BotEndpoint.mcpServers.url(base: address),
+        guard let rows = try await get(DashboardEndpoint.mcpServers.url(base: address),
                                        query: [Self.profileItem(profile)])["servers"].list else {
             throw DashboardFailure.unreadableResponse
         }
@@ -250,7 +281,7 @@ extension DashboardClient {
     /// already redacted. Any answer that isn't that server's summary is unreadable. A 400 or 409
     /// that says why is `DashboardFailure.refused`.
     func addMCPServer(_ body: BotJSON, profile: String) async throws -> MCPServer {
-        let url = Self.url(BotEndpoint.mcpServers.url(base: address), query: [Self.profileItem(profile)])
+        let url = Self.url(DashboardEndpoint.mcpServers.url(base: address), query: [Self.profileItem(profile)])
         guard let server = MCPServer(try await post(url, body: body, readsRefusal: true)),
               server.name == body["name"].text else {
             throw DashboardFailure.unreadableResponse
@@ -261,7 +292,7 @@ extension DashboardClient {
     /// Connects to the server on the host and lists its tools. A failed probe is a result,
     /// not an error: the host answers 200 with its reason.
     func testMCPServer(_ name: String, profile: String) async throws -> MCPTestResult {
-        let json = try await post(Self.url(BotEndpoint.mcpServerURL(base: address, name: name, action: "test"),
+        let json = try await post(Self.url(DashboardEndpoint.mcpServerURL(base: address, name: name, action: "test"),
                                            query: [Self.profileItem(profile)]))
         guard let result = MCPTestResult(json) else { throw DashboardFailure.unreadableResponse }
         return result
@@ -269,7 +300,7 @@ extension DashboardClient {
 
     /// Returns the `enabled` value the host saved. It applies from the next session.
     func setMCPServer(_ name: String, enabled: Bool, profile: String) async throws -> Bool {
-        let json = try await put(Self.url(BotEndpoint.mcpServerURL(base: address, name: name, action: "enabled"),
+        let json = try await put(Self.url(DashboardEndpoint.mcpServerURL(base: address, name: name, action: "enabled"),
                                           query: [Self.profileItem(profile)]),
                                  body: .object(["enabled": .bool(enabled)]))
         guard let saved = json["enabled"].flag else { throw DashboardFailure.unreadableResponse }
@@ -277,11 +308,11 @@ extension DashboardClient {
     }
 
     func deleteMCPServer(_ name: String, profile: String) async throws {
-        _ = try await delete(BotEndpoint.mcpServerURL(base: address, name: name), query: [Self.profileItem(profile)])
+        _ = try await delete(DashboardEndpoint.mcpServerURL(base: address, name: name), query: [Self.profileItem(profile)])
     }
 
     func mcpCatalog(profile: String) async throws -> MCPCatalog {
-        guard let catalog = MCPCatalog(try await get(BotEndpoint.mcpCatalog.url(base: address),
+        guard let catalog = MCPCatalog(try await get(DashboardEndpoint.mcpCatalog.url(base: address),
                                                      query: [Self.profileItem(profile)])) else {
             throw DashboardFailure.unreadableResponse
         }
@@ -292,7 +323,7 @@ extension DashboardClient {
     /// non-empty values and never keep them. A 400 that says why is `DashboardFailure.refused`.
     func installMCPCatalogEntry(_ name: String, env: [String: String], enable: Bool,
                                 profile: String) async throws -> MCPInstallStart {
-        let url = Self.url(BotEndpoint.mcpCatalogInstall.url(base: address), query: [Self.profileItem(profile)])
+        let url = Self.url(DashboardEndpoint.mcpCatalogInstall.url(base: address), query: [Self.profileItem(profile)])
         let json = try await post(url, body: .object([
             "name": .string(name), "env": .object(env.mapValues(BotJSON.string)), "enable": .bool(enable)
         ]), readsRefusal: true)
@@ -301,19 +332,19 @@ extension DashboardClient {
     }
 }
 
-/// The plugin routes in `BotEndpoint`, sent without a `profile`: the host's plugin writes take
+/// The plugin routes in `DashboardEndpoint`, sent without a `profile`: the host's plugin writes take
 /// none, so the reads stay unscoped too and the screen shows what it changes. Every mutation
 /// reads the host's reason from a 400; install and update wait `longRequestTimeout`.
 extension DashboardClient {
     func pluginsHub() async throws -> [AgentPlugin] {
-        guard let rows = try await get(BotEndpoint.pluginsHub.url(base: address))["plugins"].list else {
+        guard let rows = try await get(DashboardEndpoint.pluginsHub.url(base: address))["plugins"].list else {
             throw DashboardFailure.unreadableResponse
         }
         return rows.compactMap(AgentPlugin.init)
     }
 
     func pluginCatalog() async throws -> PluginCatalog {
-        guard let catalog = PluginCatalog(try await get(BotEndpoint.pluginsCatalog.url(base: address))) else {
+        guard let catalog = PluginCatalog(try await get(DashboardEndpoint.pluginsCatalog.url(base: address))) else {
             throw DashboardFailure.unreadableResponse
         }
         return catalog
@@ -322,7 +353,7 @@ extension DashboardClient {
     /// Installs a catalog entry at its pinned commit. `identifier` is required by the host's
     /// body model, so it is sent empty; `force` stays false, so an installed entry is refused.
     func installCatalogPlugin(_ catalogName: String, enable: Bool) async throws -> PluginInstallResult {
-        let json = try await post(BotEndpoint.pluginInstall.url(base: address), body: .object([
+        let json = try await post(DashboardEndpoint.pluginInstall.url(base: address), body: .object([
             "identifier": .string(""), "catalog_name": .string(catalogName), "enable": .bool(enable), "force": .bool(false)
         ]), long: true, readsRefusal: true)
         guard let result = PluginInstallResult(json) else { throw DashboardFailure.unreadableResponse }
@@ -330,7 +361,7 @@ extension DashboardClient {
     }
 
     func setPlugin(_ name: String, enabled: Bool) async throws -> PluginToggleResult {
-        let url = BotEndpoint.pluginURL(base: address, name: name, action: enabled ? "enable" : "disable")
+        let url = DashboardEndpoint.pluginURL(base: address, name: name, action: enabled ? "enable" : "disable")
         guard let result = PluginToggleResult(try await post(url, readsRefusal: true)) else {
             throw DashboardFailure.unreadableResponse
         }
@@ -339,7 +370,7 @@ extension DashboardClient {
 
     /// `acceptCapabilities` is sent only after the user confirmed a `needsConsent` answer.
     func updatePlugin(_ name: String, acceptCapabilities: Bool) async throws -> PluginUpdateAnswer {
-        let json = try await post(BotEndpoint.pluginURL(base: address, name: name, action: "update"),
+        let json = try await post(DashboardEndpoint.pluginURL(base: address, name: name, action: "update"),
                                   body: .object(acceptCapabilities ? ["accept_capabilities": .bool(true)] : [:]),
                                   long: true, readsRefusal: true)
         guard let answer = PluginUpdateAnswer(json) else { throw DashboardFailure.unreadableResponse }
@@ -347,7 +378,7 @@ extension DashboardClient {
     }
 
     func removePlugin(_ name: String) async throws -> PluginRemoveResult {
-        guard let result = PluginRemoveResult(try await delete(BotEndpoint.pluginURL(base: address, name: name),
+        guard let result = PluginRemoveResult(try await delete(DashboardEndpoint.pluginURL(base: address, name: name),
                                                                readsRefusal: true)) else {
             throw DashboardFailure.unreadableResponse
         }
@@ -360,7 +391,7 @@ extension DashboardClient {
 extension DashboardClient {
     /// Every profile's slug once, in the host's order.
     func profileNames() async throws -> [String] {
-        guard let rows = try await get(BotEndpoint.profiles.url(base: address))["profiles"].list else {
+        guard let rows = try await get(DashboardEndpoint.profiles.url(base: address))["profiles"].list else {
             throw DashboardFailure.unreadableResponse
         }
         var seen = Set<String>()
@@ -368,7 +399,7 @@ extension DashboardClient {
     }
 
     func toolsets(profile: String) async throws -> [DashboardToolset] {
-        guard let rows = try await get(BotEndpoint.toolsets.url(base: address),
+        guard let rows = try await get(DashboardEndpoint.toolsets.url(base: address),
                                        query: [URLQueryItem(name: "profile", value: profile)]).list else {
             throw DashboardFailure.unreadableResponse
         }
@@ -377,7 +408,7 @@ extension DashboardClient {
 
     /// Writes the profile's `config.yaml`; its chats use it from their next message.
     func setToolset(_ name: String, enabled: Bool, profile: String) async throws -> ToolsetToggleResult {
-        let json = try await put(BotEndpoint.toolsetURL(base: address, name: name),
+        let json = try await put(DashboardEndpoint.toolsetURL(base: address, name: name),
                                  body: .object(["enabled": .bool(enabled), "profile": .string(profile)]),
                                  readsRefusal: true)
         guard let result = ToolsetToggleResult(json) else { throw DashboardFailure.unreadableResponse }

@@ -102,7 +102,15 @@ extension APIClient {
         )
     }
 
-    func createSession(workspace: String?, model: String?, modelProvider: String?, profile: String?) async throws -> SessionResponse {
+    /// Creates a session. A nil `projectID` leaves `project_id` out of the body, so
+    /// the session starts unassigned; the server stores a given id without checking it.
+    func createSession(
+        workspace: String?,
+        model: String?,
+        modelProvider: String?,
+        profile: String?,
+        projectID: String? = nil
+    ) async throws -> SessionResponse {
         try await send(
             endpoint: .newSession,
             method: "POST",
@@ -110,7 +118,8 @@ extension APIClient {
                 workspace: workspace,
                 model: model,
                 modelProvider: modelProvider,
-                profile: profile
+                profile: profile,
+                projectId: projectID
             )
         )
     }
@@ -300,6 +309,7 @@ private struct NewSessionRequest: Encodable {
     let model: String?
     let modelProvider: String?
     let profile: String?
+    let projectId: String?
 }
 
 private struct RenameSessionRequest: Encodable {

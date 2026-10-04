@@ -1,7 +1,10 @@
 # Push notifications
 
 Push is optional and off until the user enables it for a server from the Hermes
-connection screen. This page is the map. bots.md owns the protocol detail:
+connection screen. After the first run started from the phone, a one-time offer
+(`NotificationOffer`, #863) only opens Settings → Notifications with the push
+section expanded; setup still waits for its own confirmation there. This page is
+the map. bots.md owns the protocol detail:
 see [Push provisioning](bots.md#push-provisioning) and
 [Push previews and taps](bots.md#push-previews-and-taps).
 
@@ -25,6 +28,8 @@ see [Push provisioning](bots.md#push-provisioning) and
   app target carries the Time Sensitive entitlement, so the relay's
   non-reply banners (approval, clarify, turn error) can break through a Focus
   when the user allows it; the extension leaves the interruption level alone.
+  Settings can also send one test `reply` through the paired relay, sealed on
+  the phone, to check relay → APNs → extension (not host → relay).
 - **Notification Service Extension.** `HermesNotificationService` opens the
   sealed preview on device with the preview key and rewrites the banner. On
   any failure the banner stays content-free.
@@ -47,7 +52,9 @@ Pairing is per configured server, and everything derived from a pairing stays
 with that server. The device token registers with each paired relay
 independently, a tap resolves its server through the pairing, and removing a
 server wipes its keys (`PushRegistrar.forget`). Nothing one server's push
-touches may show up under another.
+touches may show up under another. A server without a pairing gets local run
+alerts instead, which route the same way: their `server_hash` must match a
+configured server (`ResponseCompletionNotificationRequest.destination`).
 
 One caveat: two configured servers that reach the same host pair with the
 same install, because the host hands out one key pair. A tap on one of that

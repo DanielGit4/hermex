@@ -203,6 +203,9 @@ enum ActiveStreamRecoveryState: Equatable {
     case idle
     case checking
     case reconnecting
+    /// The phone is offline, so the stream waits for the network path to
+    /// return instead of spending its status probes (#869).
+    case waitingForNetwork
 }
 
 @MainActor
@@ -524,6 +527,13 @@ final class ChatViewModel {
     private(set) var hasOlderMessages = false
     private(set) var contextWindowSnapshot: ContextWindowSnapshot?
     private(set) var responseCompletionHapticTrigger = 0
+    /// Bumps once for every run that ends completed or failed, after `runEndOutcome`
+    /// records which. `ChatView` turns each bump into at most one local alert and
+    /// keeps its background task open until then (#862). A stopped run never bumps.
+    private(set) var runEndTrigger = 0
+    private(set) var runEndOutcome: ResponseCompletionOutcome = .completed
+    /// The coordinator's ending the last bump counted, so no ending counts twice.
+    @ObservationIgnored private var runEndRecordedAt: Date?
     /// Bumps at most once per throttle interval while live (non-replay) assistant
     /// text arrives; the view turns each bump into one streaming pulse haptic.
     private(set) var streamingHapticPulseTrigger = 0
@@ -600,7 +610,17 @@ final class ChatViewModel {
     var uploadAttachmentErrorMessage: String? { attachmentCoordinator.uploadAttachmentErrorMessage }
     var localAttachmentPreviews: [String: [String: Data]] { attachmentCoordinator.localAttachmentPreviews }
     private(set) var pinnedLocalNotices: [String] = []
+    /// The one composer line shown while messages wait behind the run. It is
+    /// derived from the queue, so it goes away when the queue drains or is
+    /// handed over, and it never enters a stream snapshot.
+    var queuedMessagesReceipt: String? {
+        queuedSlashMessages.isEmpty ? nil : String(localized: "Queued, sends when this run finishes")
+    }
     private(set) var steeringConfirmationNotice: String?
+    /// "Couldn't steer", plus the system's reason for a network or HTTP
+    /// failure, after the latest steer didn't reach the run. The composer shows
+    /// it with Retry; `clearSteerFailure()` removes it.
+    private(set) var steerFailureMessage: String?
     var approvalPrompt: ApprovalPromptState? { pendingActionCoordinator.approvalPrompt }
     var isRespondingToApproval: Bool { pendingActionCoordinator.isRespondingToApproval }
     var approvalErrorMessage: String? { pendingActionCoordinator.approvalErrorMessage }
@@ -706,6 +726,9 @@ final class ChatViewModel {
     private var skillSlashSuggestionsLoad: Task<Void, Never>?
     private var queuedSlashMessages: [QueuedSlashMessage] = []
     private var isDrainingQueuedSlashMessage = false
+    /// Counts `takeQueuedMessages()` hand-overs, so an interrupt whose cancel
+    /// was in flight across one knows its message went to the draft.
+    @ObservationIgnored private var queueHandOverCount = 0
     private var activeBtwStreamID: String?
     private var activeBtwMessageID: String?
     private var activeBtwQuestion: String?
@@ -713,7 +736,10 @@ final class ChatViewModel {
     private var backgroundPromptsByTaskID: [String: String] = [:]
     @ObservationIgnored private var backgroundPollTask: Task<Void, Never>?
     private var isRefreshingCompletedResponseTitle = false
-    private var isActiveStreamReplayConnection: Bool { streamCoordinator.isReplayConnection }
+    /// True while a reattached stream replays events the transcript may already
+    /// hold. Clears once replayed text catches up; until then live tool rows
+    /// skip their entrance.
+    var isActiveStreamReplayConnection: Bool { streamCoordinator.isReplayConnection }
     private var activeStreamReplayMatchedPrefixLength = 0
     private var activeStreamReplayMatchedInterimLength = 0
     private var activeStreamReplayMatchedReasoningLength = 0
@@ -993,6 +1019,7 @@ final class ChatViewModel {
     }
 
     func flushPendingStreamingContent() {
+        let signpost = performanceSignposter.beginInterval("Stream Batch Apply")
         cancelPendingStreamingContentFlush()
 
         var didMutate = false
@@ -1006,6 +1033,7 @@ final class ChatViewModel {
         if didMutate {
             scheduleStreamingScrollTrigger()
         }
+        performanceSignposter.endInterval("Stream Batch Apply", signpost, "mutated=\(didMutate ? 1 : 0, privacy: .public)")
     }
 
     private var requestProfileName: String? {
@@ -1639,6 +1667,12 @@ final class ChatViewModel {
         attachmentCoordinator.removePendingAttachment(id: id)
     }
 
+    /// Stages files after the composer's own, such as the files of queued
+    /// messages parked back into the draft.
+    func appendPendingAttachments(_ attachments: [PendingAttachment]) {
+        attachmentCoordinator.appendPendingAttachments(attachments)
+    }
+
     func setUploadAttachmentError(_ message: String?) {
         attachmentCoordinator.setUploadAttachmentError(message)
     }
@@ -1987,6 +2021,11 @@ final class ChatViewModel {
         sessionID: String,
         modelContext: ModelContext
     ) -> [ChatMessage] {
+        let signpost = performanceSignposter.beginInterval("Transcript Apply")
+        defer {
+            performanceSignposter.endInterval("Transcript Apply", signpost, "messages=\(self.messages.count, privacy: .public)")
+        }
+
         let cachedWindow: CacheStore.MessageWindow
         do {
             cachedWindow = try CacheStore.cachedMessageWindow(
@@ -2214,6 +2253,11 @@ final class ChatViewModel {
         previousMessages: [ChatMessage],
         previousMessagesOffset: Int
     ) {
+        let signpost = performanceSignposter.beginInterval("Transcript Apply")
+        defer {
+            performanceSignposter.endInterval("Transcript Apply", signpost, "messages=\(self.messages.count, privacy: .public)")
+        }
+
         let reloadedMessagesOffset = Self.resolvedMessagesOffset(
             from: session,
             loadedMessageCount: reloadedMessages.count
@@ -3179,8 +3223,9 @@ final class ChatViewModel {
             return sent ? .executed(message: nil) : .unsupported(friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the queued message."))
         }
 
-        let position = enqueueQueuedSlashMessage(message, attachments: attachmentCoordinator.consumePendingAttachments())
-        return .executed(message: String(localized: "Queued for next turn (#\(position))."))
+        // `queuedMessagesReceipt` says it's queued.
+        enqueueQueuedSlashMessage(message, attachments: attachmentCoordinator.consumePendingAttachments())
+        return .executed(message: nil)
     }
 
     private func steerResponseFromSlashCommand(_ args: String) async -> SlashCommandExecutionResult {
@@ -3193,25 +3238,82 @@ final class ChatViewModel {
             return .unsupported(friendlyMessage: String(localized: "The server did not provide a session ID."))
         }
 
-        guard activeStreamID != nil else {
+        guard let steeredStreamID = activeStreamID else {
             let sent = await sendMessage(message)
             return sent ? .executed(message: nil) : .unsupported(friendlyMessage: sendErrorMessage ?? String(localized: "Could not send the steering message."))
         }
 
-        do {
-            let response = try await client.steerChat(sessionID: sessionID, text: message)
-            if response.accepted == true {
-                appendLocalSteerEcho(message)
-                showSteeringConfirmation(String(localized: "Steering hint delivered."))
-                return .executed(message: nil)
+        // Staged attachments ride along as an attached-files note. No outcome
+        // stops the run: the server's steer contract leaves Queue and Stop &
+        // send to the user.
+        let steeredAttachments = attachmentCoordinator.pendingAttachments
+        let steerText = PendingAttachment.steerMessageText(draft: message, attachments: steeredAttachments)
+
+        switch await client.steerChat(sessionID: sessionID, text: steerText) {
+        case .delivered:
+            appendLocalSteerEcho(steerText)
+            showSteeringConfirmation(String(localized: "Steering hint delivered."))
+            // Delete the durable copies of the files that rode along, as
+            // `sendMessage` does.
+            takeSteeredAttachments(steeredAttachments)
+            for fileName in steeredAttachments.compactMap(\.draftFileName) {
+                await attachmentCoordinator.deleteDraftCopy(named: fileName)
             }
-        } catch {
-            lastError = error
+            return .executed(message: nil)
+        case .refused(let transportError):
+            if let transportError {
+                lastError = transportError
+            }
+            if activeStreamID == steeredStreamID {
+                let title = String(localized: "Couldn't steer")
+                steerFailureMessage = transportError.map { "\(title)\n\($0.localizedDescription)" } ?? title
+                return .notDelivered
+            }
+            // The run ended while the steer was in flight, so "Couldn't steer"
+            // and its Retry would outlive it. A network failure is now a failed
+            // send; a server refusal goes out as a normal turn, like `.runEnded`.
+            if let transportError {
+                sendErrorMessage = transportError.localizedDescription
+                return .notDelivered
+            }
+            enqueueQueuedSlashMessage(message, attachments: takeSteeredAttachments(steeredAttachments), atFront: true)
+        case .serverQueued:
+            enqueueQueuedSlashMessage(message, attachments: takeSteeredAttachments(steeredAttachments))
+        case .runEnded:
+            // Queue first, then ask the server whether the run is over. When it
+            // is and the transcript has the reply, the coordinator finishes the
+            // run, which drains the queue as a normal send. Otherwise the live
+            // stream still owns the ending, and its own finish drains the queue.
+            enqueueQueuedSlashMessage(message, attachments: takeSteeredAttachments(steeredAttachments), atFront: true)
+            await streamCoordinator.refreshTranscriptIfCompleted(streamID: steeredStreamID)
         }
 
-        _ = enqueueQueuedSlashMessage(message, attachments: attachmentCoordinator.consumePendingAttachments())
-        await cancelActiveStream()
-        return .executed(message: String(localized: "Steer was unavailable, so the message was queued and the current response was stopped."))
+        // The run may have finished while the steer was in flight, after its
+        // own drain found the queue empty. While it runs, `queuedMessagesReceipt`
+        // says the message is queued.
+        drainQueuedSlashMessageIfIdle()
+        return .executed(message: nil)
+    }
+
+    /// Takes the files that rode along on a steer out of the composer and
+    /// returns the ones still staged. Files staged while the steer was in
+    /// flight stay for the next message.
+    @discardableResult
+    private func takeSteeredAttachments(_ steered: [PendingAttachment]) -> [PendingAttachment] {
+        guard !steered.isEmpty else { return [] }
+        let steeredIDs = Set(steered.map(\.id))
+        let staged = attachmentCoordinator.pendingAttachments
+        attachmentCoordinator.replacePendingAttachments(staged.filter { !steeredIDs.contains($0.id) })
+        return staged.filter { steeredIDs.contains($0.id) }
+    }
+
+    /// Clears "Couldn't steer" once the user moves on: the next send, a draft
+    /// edit, or the end of the run.
+    func clearSteerFailure() {
+        // Guarded: draft edits call this on every keystroke, and an
+        // `@Observable` write notifies even when the value is unchanged.
+        guard steerFailureMessage != nil else { return }
+        steerFailureMessage = nil
     }
 
     /// Appends the local echo of an accepted steer immediately, so the hint is
@@ -3240,13 +3342,24 @@ final class ChatViewModel {
         }
 
         enqueueQueuedSlashMessage(message, attachments: attachmentCoordinator.consumePendingAttachments(), atFront: true)
+        let handOverCount = queueHandOverCount
         await cancelActiveStream()
 
+        // The chat was left while the cancel was in flight, so the message is
+        // in the draft now (#857) and nothing is queued to report.
+        guard queueHandOverCount == handOverCount else { return .executed(message: nil) }
+
         if activeStreamID != nil {
-            return .executed(message: String(localized: "Could not stop the current response yet, so the interrupt message was queued for the next turn."))
+            return .executed(message: Self.interruptQueuedFallbackNotice)
         }
 
         return .executed(message: String(localized: "Interrupted the current response and queued your message to send next."))
+    }
+
+    /// Pinned when an interrupt couldn't stop the run. It describes the queue,
+    /// so `takeQueuedMessages()` unpins it.
+    private static var interruptQueuedFallbackNotice: String {
+        String(localized: "Could not stop the current response yet, so the interrupt message was queued for the next turn.")
     }
 
     private func statusMessageFromSlashCommand() -> String {
@@ -4423,6 +4536,39 @@ final class ChatViewModel {
         }
     }
 
+    /// Fetches a fork's parent from the active server so the "Forked from" row
+    /// can open it when the session list never cached it. A parent the server
+    /// no longer shows this profile (deleted: 404; owned by another profile:
+    /// 409 `session_profile_mismatch`) reports that through the message-action
+    /// error; any other failure reports its own message.
+    func loadForkParent(id parentSessionID: String) async -> SessionSummary? {
+        messageActionErrorMessage = nil
+        lastError = nil
+        let missingMessage = String(localized: "The original chat is no longer on this server.")
+
+        do {
+            let response = try await client.session(id: parentSessionID, includeMessages: false, messageLimit: nil)
+            guard let parentDetail = response.session else {
+                messageActionErrorMessage = missingMessage
+                return nil
+            }
+            return SessionSummary(from: parentDetail)
+        } catch {
+            if let apiError = error as? APIError, Self.isMissingForkParent(apiError) {
+                messageActionErrorMessage = missingMessage
+            } else {
+                lastError = error
+                messageActionErrorMessage = error.localizedDescription
+            }
+            return nil
+        }
+    }
+
+    private static func isMissingForkParent(_ error: APIError) -> Bool {
+        guard case .http(let statusCode, _) = error else { return false }
+        return statusCode == 404 || (statusCode == 409 && error.serverCode == "session_profile_mismatch")
+    }
+
     /// Edit a user message: truncate to just before the selected message, then send the edited text.
     func editMessage(_ context: MessageActionContext, newText: String, modelContext: ModelContext? = nil) async -> Bool {
         guard context.role == .user else {
@@ -4809,6 +4955,12 @@ final class ChatViewModel {
 
     func reconnectStreamIfNeeded(modelContext: ModelContext? = nil) async {
         await streamCoordinator.reconnectIfNeeded(modelContext: modelContext)
+    }
+
+    /// Retries a suspended stream, or clears a stale "Waiting for network",
+    /// when the device's network path changes (#869).
+    func networkPathDidChange(modelContext: ModelContext? = nil) async {
+        await streamCoordinator.networkPathDidChange(modelContext: modelContext)
     }
 
     func refreshTranscriptIfActiveStreamCompleted(
@@ -5737,19 +5889,32 @@ final class ChatViewModel {
         }
     }
 
-    @discardableResult
     private func enqueueQueuedSlashMessage(
         _ text: String,
         attachments: [PendingAttachment],
         atFront: Bool = false
-    ) -> Int {
+    ) {
         let message = QueuedSlashMessage(text: text, attachments: attachments)
         if atFront {
             queuedSlashMessages.insert(message, at: 0)
         } else {
             queuedSlashMessages.append(message)
         }
-        return queuedSlashMessages.count
+    }
+
+    /// Hands the messages waiting behind the run to the caller, in queue order,
+    /// and forgets them, so the run's end sends nothing. ChatView parks them in
+    /// the chat's draft when the user leaves mid-run (#857). A message the drain
+    /// already took is in flight and stays with it.
+    func takeQueuedMessages() -> [QueuedSlashMessage] {
+        // Called on every leave: skip the observable writes when there is
+        // nothing to hand over.
+        guard !queuedSlashMessages.isEmpty else { return [] }
+        let queued = queuedSlashMessages
+        queuedSlashMessages.removeAll()
+        queueHandOverCount &+= 1
+        pinnedLocalNotices.removeAll { $0 == Self.interruptQueuedFallbackNotice }
+        return queued
     }
 
     private func drainQueuedSlashMessageIfIdle() {
@@ -5769,7 +5934,14 @@ final class ChatViewModel {
             if !sent {
                 queuedSlashMessages.insert(next, at: 0)
             }
-            attachmentCoordinator.replacePendingAttachments(savedAttachments)
+            // Keep files staged while the send was in flight, such as a parked
+            // queue's (#857); a failed send put `next`'s back, and they are
+            // queued again.
+            let nextAttachmentIDs = Set(next.attachments.map(\.id))
+            let stagedDuringSend = attachmentCoordinator.pendingAttachments.filter {
+                !nextAttachmentIDs.contains($0.id)
+            }
+            attachmentCoordinator.replacePendingAttachments(savedAttachments + stagedDuringSend)
             isDrainingQueuedSlashMessage = false
             // Only chain-drain after a *successful* send. A failed send requeues the message and
             // waits for the next natural trigger (a queue append, stream completion, or an explicit
@@ -6217,6 +6389,7 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
     func streamCoordinatorDidCompleteCurrentResponse(needsTranscriptRefresh: Bool) {
         responseCompletionNeedsTranscriptRefresh = needsTranscriptRefresh
         responseCompletionHapticTrigger += 1
+        recordRunEnd(.completed)
         beginWorkingRowSettleIfWatched()
     }
 
@@ -6254,8 +6427,15 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
     func streamCoordinatorDidFinishStream() {
         flushPendingStreamingContent()
         dismissSteeringConfirmation()
+        clearSteerFailure()
         responseCompletionNeedsTranscriptRefresh = false
         if let ending = streamCoordinator.latestRunEnding {
+            // A `done` completion already counted when it completed, and a late
+            // teardown can find an ending still on record, so each ending counts once.
+            // This catches failures and a `stream_end` that arrives without `done`.
+            if ending.endedAt != runEndRecordedAt, let outcome = ResponseCompletionOutcome(ending: ending.ending) {
+                recordRunEnd(outcome)
+            }
             latestRunOutcome = TranscriptTurnRunOutcome(
                 turnKey: TranscriptTurnClassifier.latestTurnKey(in: messages, messageOffset: messagesOffset),
                 startedAt: ending.startedAt,
@@ -6267,6 +6447,12 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
 
     func streamCoordinatorDidReceiveErrorMessage(_ message: String) {
         sendErrorMessage = message
+    }
+
+    private func recordRunEnd(_ outcome: ResponseCompletionOutcome) {
+        runEndRecordedAt = streamCoordinator.latestRunEnding?.endedAt
+        runEndOutcome = outcome
+        runEndTrigger += 1
     }
 
     func streamCoordinatorDidReceiveRecoveryError(_ error: Error) {
@@ -6406,7 +6592,7 @@ extension ChatViewModel: ChatStreamCoordinatorDelegate {
         let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !message.isEmpty else { return false }
 
-        _ = enqueueQueuedSlashMessage(message, attachments: [])
+        enqueueQueuedSlashMessage(message, attachments: [])
         appendLocalNoticeMessage(String(localized: "Steering hint was not consumed before the response ended, so it was queued for the next turn."))
         return true
     }
@@ -6481,7 +6667,8 @@ private final class ActiveChatStreamSnapshotStore {
     }
 }
 
-private struct QueuedSlashMessage {
+/// A message waiting behind the run, with the files staged for it.
+struct QueuedSlashMessage {
     let text: String
     let attachments: [PendingAttachment]
 }

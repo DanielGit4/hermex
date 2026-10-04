@@ -28,6 +28,13 @@ struct DashboardProblem: Equatable {
             self.init(message: String(localized: "Your Hermes host’s dashboard doesn’t use password sign-in, so Hermex can’t open it."))
         case BotFailure.wrongIdentity:
             self.init(message: String(localized: "Your Hermes host signed in a different way than expected. Check the Hermes connection in Bots."))
+        case BotFailure.differentHost:
+            self.init(message: BotFailure.differentHost.localizedDescription)
+        case BotFailure.notDashboard:
+            self.init(message: String(localized: "This address doesn’t answer like a Hermes dashboard. Check the address in the Hermes connection in Bots."))
+        case BotFailure.stale:
+            // The shared connection was retired: the server or its Hermes connection changed.
+            self.init(message: String(localized: "The Hermes connection changed. Go back and open the Dashboard again."))
         case DashboardFailure.unreadableResponse:
             self.init(message: String(localized: "Your Hermes host answered in a way this version of Hermex can’t read."))
         case DashboardFailure.refused(let detail):

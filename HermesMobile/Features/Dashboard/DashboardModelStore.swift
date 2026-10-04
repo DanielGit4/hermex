@@ -8,7 +8,8 @@ import Foundation
 /// One bundle at a time, keyed by the active server and the whole saved Bot
 /// connection: another server, another connection, or a changed address or password
 /// builds a new bundle and drops the old one. Server switch, sign-out, server removal
-/// and Bot connection removal drop it explicitly too. Inside a bundle, each host profile
+/// and Bot connection removal drop it explicitly too, and a bundle whose shared
+/// `HermesConnection` was retired is rebuilt on next use. Inside a bundle, each host profile
 /// has its own Skills Hub and MCP models, so one profile's rows never show under another.
 @MainActor final class DashboardModelStore {
     static let shared = DashboardModelStore()
@@ -87,18 +88,26 @@ import Foundation
     }
 
     private var current: (key: Key, bundle: Bundle)?
-    private let makeClient: (BotConnection) -> DashboardClient
+    private let makeClient: (BotConnection, URL) -> DashboardClient
 
+    /// Production clients sign in through the server's shared `HermesConnection`; tests
+    /// pass their own.
     init(makeClient: ((BotConnection) -> DashboardClient)? = nil) {
-        self.makeClient = makeClient ?? { DashboardClient(connection: $0) }
+        if let makeClient {
+            self.makeClient = { connection, _ in makeClient(connection) }
+        } else {
+            self.makeClient = { DashboardClient(saved: $0, server: $1) }
+        }
     }
 
-    /// The kept bundle for this server and connection, or a new one that replaces it.
+    /// The kept bundle for this server and connection, or a new one that replaces it. A
+    /// bundle whose connection was retired (a server switch, or its credentials saved again
+    /// or removed) is replaced too, since every call on it now throws `.stale`.
     func bundle(server: URL, connection: BotConnection) -> Bundle {
         let key = Key(server: server.absoluteString, connection: connection)
-        if let current, current.key == key { return current.bundle }
+        if let current, current.key == key, !current.bundle.client.isRetired { return current.bundle }
         dropAll()
-        let bundle = Bundle(client: makeClient(connection))
+        let bundle = Bundle(client: makeClient(connection, server))
         current = (key, bundle)
         return bundle
     }

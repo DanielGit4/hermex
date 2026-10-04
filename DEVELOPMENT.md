@@ -62,8 +62,8 @@ launchctl kickstart -k gui/$(id -u)/com.hermes.webui
 ## Local XCTest
 
 Use the repository runner for local tests, including when XcodeBuildMCP is
-available. It builds a signed Debug app and runs XCTest once, serially on the
-assigned simulator. Separate worktrees can test concurrently on separate devices.
+available. It builds a signed Debug app once and runs XCTest serially on the
+assigned simulator (once, or up to N times with `--repeat N`). Separate worktrees can test concurrently on separate devices.
 
 Choose the session's simulator once (`hermex-flow` owns its device pool). The
 main checkout normally uses **iPhone 17**. Resolve its UDID with
@@ -74,6 +74,10 @@ creates one, and refuses to boot a fifth simulator.
 ```zsh
 # Focused tests; repeat --only for multiple classes or individual test methods.
 scripts/test-sim <simulator-udid> --only HermesMobileTests/BotLiveActivityTests
+
+# Stress a flaky test: up to 20 iterations in one build and launch, stopping at
+# the first failure. Use this rather than calling the runner in a loop.
+scripts/test-sim <simulator-udid> --only HermesMobileTests/BotLiveActivityTests --repeat 20
 
 # Full suite (also builds): use the same assigned UDID throughout the session.
 scripts/test-sim <simulator-udid>
@@ -93,10 +97,13 @@ owner immediately; different checkout/device pairs run independently. These
 locks coordinate this runner only: keep other build/install tools on their
 session's assigned device, and do not run them during its test run.
 
-Build products and timestamped logs live under
-`~/Library/Developer/Xcode/DerivedData/hermex-tests-<checkout-path-hash>/`.
-The full absolute checkout path determines the hash, so identically named
-worktrees do not share build files. The command prints the log directory at
+Build products live in the checkout's gitignored `.build/DerivedData/`, which
+XcodeBuildMCP also uses (`.xcodebuildmcp/config.yaml`), so launching the app
+after a test run reuses that build instead of compiling a second copy, and
+removing a worktree removes its build. Timestamped logs live under
+`~/Library/Developer/Xcode/DerivedData/hermex-tests-<checkout-path-hash>/runs/`;
+the full absolute checkout path determines the hash, so identically named
+worktrees do not share them. The command prints the log directory at
 startup and test counts/failures at completion; `command.json`, `test.log`,
 `summary.json`, and `Tests.xcresult` retain the evidence.
 
@@ -110,8 +117,8 @@ It retries in one case only. Xcode sometimes fails with `The test runner hung
 before establishing connection` before any test runs: the app launches, but
 XCTest inside it never hears that the simulator's `testmanagerd` is ready, and
 xcodebuild gives up after 300 seconds. On that failure, and only when no test
-passed, the runner stops the app and reruns once within the same test time
-limit, printing `RETRY:`. The retry
+passed, the runner reboots that simulator (its own UDID only), stops the app,
+and reruns once within the same test time limit, printing `RETRY:`. The retry
 writes `test-retry.log`, `summary-retry.json`, and `Tests-retry.xcresult` next
 to the first attempt's files. Every other failure is reported without a retry.
 
@@ -134,7 +141,19 @@ a missing pin fails setup rather than selecting another toolchain or runtime.
 CI resolves the device UDID and runs the complete suite with one test worker.
 Xcode owns that worker's simulator clone and boot. Explicit preboot plus fully
 serial execution did not improve the hosted trial, so retain the one-worker
-configuration unless new measurements justify changing it.
+configuration unless new measurements justify changing it. Two more hosted
+experiments were measured and rejected (details in the closed PRs):
+
+- Booting the base device during the build and testing on it serially (#845):
+  the fresh device's first boot competed with the compiler on the 3-core
+  runner, tripling the build while saving less in test preparation, and a
+  keyboard test behaved differently on the base device.
+- Caching Swift packages and Xcode compilation results (#838): each compile
+  job's cache key covers its whole module's sources, so one edited app file
+  missed every compile job of the app target, the build's longest step, and a
+  typical PR built no faster; only reruns and test-only PRs gained. Package
+  caching saved about 3 s net.
+
 The test step has a 30-minute timeout covering worker preparation and the full
 suite, so a stalled worker does not consume the 90-minute job budget and prevent
 failure diagnostics from running. This is a combined limit, not a separate
@@ -146,6 +165,11 @@ bundle. A missing bundle does not establish an infrastructure flake; inspect the
 failed phase before rerunning. The reporter cannot turn a failed build or test
 green. Validate workflow changes with `actionlint .github/workflows/pr-ci.yml`
 and `python3 -m unittest discover -s ci -p 'test_*.py'`.
+
+A separate Linux job, Tooling Tests, runs the `scripts/tests` and `ci/` Python
+suites and the TestFlight build-number selector test on every PR and master
+push, including docs- and scripts-only PRs that skip the macOS runner. CI Gate
+fails when it fails.
 
 ## Build and Launch With XcodeBuildMCP
 
@@ -177,6 +201,46 @@ security add-generic-password -s hermex-bot -a <bot-username> -j <bot-address> -
 ```
 
 `hermex-bot` is optional; with it the script also saves the Bot connection and turns Bot Mode on.
+
+## Launch arguments and profiling
+
+Debug builds read these launch arguments; Release builds compile none of them in.
+
+| Argument | What it does |
+|---|---|
+| `--streaming-lab` | Opens the Streaming Lab as the root screen: a canned markdown reply replayed through the real streaming renderer, with the fade knobs exposed (#234). No server needed. |
+| `--rating-prompt-eligible` | Makes this launch eligible for the App Store rating prompt, so its real navigation and stream guards can be exercised. It rewrites the stored rating and tip-jar counters. |
+| `--hitch-meter` | Shows a frame-hitch readout in the top-leading corner, such as `12.4 ms/s · 3 hitches · 60 Hz`: late-frame milliseconds per second, hitch count, and the refresh rate the display link reports, over the last second. It takes no touches, VoiceOver skips it, and it updates at most twice a second. |
+
+```zsh
+xcrun simctl launch <simulator-udid> com.uzairansar.hermesmobile --hitch-meter
+```
+
+The `HERMEX_DEV_*` environment variables (`HERMEX_DEV_SERVER_URL`, `HERMEX_DEV_PASSWORD`, and `HERMEX_DEV_BOT_ADDRESS`/`_USERNAME`/`_PASSWORD`) sign a Debug build in; `scripts/sim-login` sets them from the macOS Keychain (§ Signing a simulator in).
+
+### Recording signposts
+
+`HermesMobile/Config/PerformanceSignposts.swift` marks six intervals in every build, under the bundle ID as subsystem (`com.uzairansar.hermesmobile`, or `com.uzairansar.hermesmobile.branch` for Hermex Branch) and category `Performance`. Metadata is counts only; never add text, titles, paths, URLs, or IDs.
+
+| Interval | Measures | Metadata |
+|---|---|---|
+| `Session Open` | A session-list open (tap or keyboard) to the first transcript frame, or to the empty state when the transcript is empty | `messages` |
+| `Transcript Apply` | Painting the cached transcript, or applying a reloaded one | `messages` |
+| `Markdown Parse` | Parsing one markdown block | `chars` |
+| `Stream Batch Apply` | Applying one batch of streamed tokens | `mutated` (0 or 1) |
+| `Cache Read` | A SwiftData read of cached sessions or messages | `rows` |
+| `Cache Write` | A SwiftData write of cached sessions or messages | `rows` |
+
+In Xcode: Product → Profile (a Release build), choose the Animation Hitches or Time Profiler template, add the `os_signpost` instrument from the library, and filter it by the subsystem and category `Performance`.
+
+From the command line, with the app running on a simulator (`--attach` takes the app's display name, `Hermex`), then print the recorded intervals as XML:
+
+```zsh
+xcrun xctrace record --template 'Time Profiler' --instrument os_signpost \
+  --device <simulator-udid> --attach Hermex --time-limit 30s --output /tmp/hermex.trace
+xcrun xctrace export --input /tmp/hermex.trace \
+  --xpath '/trace-toc/run[@number="1"]/data/table[@schema="OSSignpostIntervals"][1]'
+```
 
 ## Swift File-Size Policy
 

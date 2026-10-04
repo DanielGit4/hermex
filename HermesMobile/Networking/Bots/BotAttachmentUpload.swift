@@ -3,19 +3,26 @@ import Foundation
 /// Uploading stores bytes only. The returned reference travels in one prompt;
 /// no RPC adds an image to the gateway's shared next-prompt queue.
 enum BotAttachmentUpload {
-    static func image(session: URLSession, base: URL, data: Data, filename: String, profile: String) async throws -> String {
+    /// Stores one image over `http`'s signed-in session. Being nonisolated and async, it
+    /// builds the base64 body off the main actor. `validateDispatch` is as in
+    /// `HermesConnection.authorized`.
+    static func image(data: Data, filename: String, profile: String, via http: HermesConnection,
+                      validateDispatch: (@MainActor () throws -> Void)? = nil) async throws -> String {
+        let request = try Self.request(data: data, filename: filename, profile: profile, base: await http.connection.address)
+        return try await http.authorized(request, validateDispatch: validateDispatch) { request, session in
+            try await Self.send(request, on: session)
+        }
+    }
+
+    static func request(data: Data, filename: String, profile: String, base: URL) throws -> URLRequest {
         guard !data.isEmpty, data.count <= BotAttachmentDraft.maximumFileBytes else { throw BotAttachmentFailure.limit }
-        guard var parts = URLComponents(url: BotEndpoint.imageUpload.url(base: base), resolvingAgainstBaseURL: false),
-              !profile.isEmpty else { throw BotFailure.invalidAddress }
-        parts.queryItems = [URLQueryItem(name: "profile", value: profile)]
-        guard let url = parts.url else { throw BotFailure.invalidAddress }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let mime = URL(fileURLWithPath: filename).pathExtension.lowercased() == "png" ? "image/png" : "image/jpeg"
-        request.httpBody = try JSONEncoder().encode(BotJSON.object([
-            "filename": .string(filename), "data_url": .string("data:\(mime);base64," + data.base64EncodedString())
-        ]))
+        return try HermesREST.uploadImage(profile: profile, filename: filename,
+                                          dataURL: "data:\(mime);base64," + data.base64EncodedString()).request(base: base)
+    }
+
+    /// Sends one upload and returns the verified stored path. Redirects are refused.
+    static func send(_ request: URLRequest, on session: URLSession) async throws -> String {
         let (bytes, response) = try await session.bytes(for: request, delegate: BotArtifactRedirectGuard())
         defer { bytes.task.cancel() }
         guard let response = response as? HTTPURLResponse else { throw BotFailure.transport }
@@ -30,9 +37,10 @@ enum BotAttachmentUpload {
         return try verifiedPath(reply["path"].text)
     }
 
-    static func fileParams(data: Data, runtime: String, filename: String, mime: String) async -> [String: BotJSON] {
-        ["session_id": .string(runtime), "name": .string(UUID().uuidString + "-" + filename),
-         "data_url": .string("data:" + mime + ";base64," + data.base64EncodedString())]
+    /// Builds `file.attach` off the main actor: base64 of a large file is slow.
+    static func fileAttach(data: Data, runtime: String, filename: String, mime: String) async -> HermesCall {
+        .fileAttach(sessionID: runtime, name: UUID().uuidString + "-" + filename,
+                    dataURL: "data:" + mime + ";base64," + data.base64EncodedString())
     }
 
     static func verifiedPath(_ value: String?) throws -> String {

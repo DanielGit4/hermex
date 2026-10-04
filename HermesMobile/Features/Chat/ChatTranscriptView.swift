@@ -1,6 +1,25 @@
 import SwiftUI
 import UIKit
 
+/// The readable column for chat screens (Sessions chat, Bot Chat, Bot rooms).
+/// A phone fills it edge to edge less its padding; iPad and iPhone landscape
+/// stop at `maximum` and centre it, so lines stay short enough to read. The
+/// composer caps at the same column so their edges line up.
+enum ChatReadingWidth {
+    static let maximum: CGFloat = 768
+
+    /// Width of the transcript column inside `horizontalPadding` on each side.
+    static func contentWidth(viewportWidth: CGFloat, horizontalPadding: CGFloat) -> CGFloat {
+        min(max(0, viewportWidth - 2 * horizontalPadding), maximum)
+    }
+
+    /// `maxWidth` for a view that carries `horizontalPadding` on each side of
+    /// its own, so what sits inside that padding lines up with the column.
+    static func maximumWidth(horizontalPadding: CGFloat) -> CGFloat {
+        maximum + 2 * horizontalPadding
+    }
+}
+
 struct ChatTranscriptView: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityVoiceOverEnabled) private var isVoiceOverRunning
@@ -18,6 +37,8 @@ struct ChatTranscriptView: View {
     let liveReasoningText: String
     let reasoningAnchorMessageID: String?
     let liveToolCalls: [ToolCall]
+    /// True while a reattached stream replays; live tool rows draw in place.
+    let isReplayingLiveToolCalls: Bool
     let toolCallAnchorMessageID: String?
     let streamingAssistantMessageID: String?
     let liveTokensPerSecond: Double?
@@ -99,6 +120,9 @@ struct ChatTranscriptView: View {
     var turnChangesSummary: TurnFileChangeSummary? = nil
     var onOpenTurnDiff: () -> Void = {}
     var onOpenTurnFileDiff: (GitFile) -> Void = { _ in }
+    /// Non-nil draws the "Forked from" row above everything else (#873).
+    var forkOrigin: ForkOrigin? = nil
+    var onOpenForkParent: () -> Void = {}
 
     var body: some View {
         let _ = ViewBodyProbe.hit(.transcript)
@@ -124,6 +148,16 @@ struct ChatTranscriptView: View {
             .contentShape(Rectangle())
             .onTapGesture {
                 onDismissKeyboard()
+            }
+            // A fork can be empty (upstream allows `keep_count: 0`, and an edit of
+            // the first message truncates to nothing); it still links to its parent.
+            .overlay(alignment: .top) {
+                if let forkOrigin {
+                    ForkOriginRowView(origin: forkOrigin, onOpen: onOpenForkParent)
+                        .frame(maxWidth: ChatReadingWidth.maximum)
+                        .padding(.horizontal, transcriptHorizontalPadding)
+                        .padding(.top, 16)
+                }
             }
         } else {
             transcriptScrollView
@@ -263,6 +297,10 @@ struct ChatTranscriptView: View {
         )
 
         return VStack(spacing: transcriptSpacing) {
+            if let forkOrigin {
+                ForkOriginRowView(origin: forkOrigin, onOpen: onOpenForkParent)
+            }
+
             olderMessagesButton(proxy: proxy)
 
             if let compressionReferenceCard, compressionReferenceCard.afterRenderID == nil {
@@ -301,6 +339,7 @@ struct ChatTranscriptView: View {
                     reasoningAnchorMessageID: isReasoningAnchor ? reasoningAnchorMessageID : nil,
                     liveReasoningStreamID: isReasoningAnchor ? activeStreamID : nil,
                     liveToolCalls: isToolCallAnchor ? liveToolCalls : [],
+                    isReplayingLiveToolCalls: isToolCallAnchor && isReplayingLiveToolCalls,
                     toolCallAnchorMessageID: isToolCallAnchor ? toolCallAnchorMessageID : nil,
                     streamingAssistantMessageID: isStreamingRow ? streamingAssistantMessageID : nil,
                     liveTokensPerSecond: isStreamingRow ? liveTokensPerSecond : nil,
@@ -360,7 +399,9 @@ struct ChatTranscriptView: View {
         .padding(.top, 16)
         .frame(width: contentWidth, alignment: .leading)
         .padding(.horizontal, transcriptHorizontalPadding)
-        .frame(width: viewportWidth, alignment: .leading)
+        // The scroll view stays full width, so its indicator stays at the
+        // screen edge and swipes in the margins still scroll.
+        .frame(width: viewportWidth, alignment: .center)
         .clipped()
         .chatDisclosureToggled {
             pinReader(proxy: proxy)
@@ -404,7 +445,7 @@ struct ChatTranscriptView: View {
     }
 
     private func transcriptContentWidth(for viewportWidth: CGFloat) -> CGFloat {
-        max(0, viewportWidth - (transcriptHorizontalPadding * 2))
+        ChatReadingWidth.contentWidth(viewportWidth: viewportWidth, horizontalPadding: transcriptHorizontalPadding)
     }
 
     @ViewBuilder
@@ -461,7 +502,8 @@ struct ChatTranscriptView: View {
                             anchorMessageID: toolCallAnchorMessageID,
                             toolCalls: liveToolCalls
                         ),
-                        isLive: true
+                        isLive: true,
+                        isReplaying: isReplayingLiveToolCalls
                     )
                 }
             }
@@ -572,6 +614,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
     let reasoningAnchorMessageID: String?
     let liveReasoningStreamID: String?
     let liveToolCalls: [ToolCall]
+    let isReplayingLiveToolCalls: Bool
     let toolCallAnchorMessageID: String?
     let streamingAssistantMessageID: String?
     let liveTokensPerSecond: Double?
@@ -615,6 +658,7 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
             lhs.reasoningAnchorMessageID == rhs.reasoningAnchorMessageID &&
             lhs.liveReasoningStreamID == rhs.liveReasoningStreamID &&
             lhs.liveToolCalls == rhs.liveToolCalls &&
+            lhs.isReplayingLiveToolCalls == rhs.isReplayingLiveToolCalls &&
             lhs.toolCallAnchorMessageID == rhs.toolCallAnchorMessageID &&
             lhs.streamingAssistantMessageID == rhs.streamingAssistantMessageID &&
             lhs.liveTokensPerSecond == rhs.liveTokensPerSecond &&
@@ -757,7 +801,8 @@ private struct ChatTranscriptMessageBlock: View, Equatable {
                     anchorMessageID: toolCallAnchorMessageID,
                     toolCalls: liveToolCalls
                 ),
-                isLive: true
+                isLive: true,
+                isReplaying: isReplayingLiveToolCalls
             )
         }
     }

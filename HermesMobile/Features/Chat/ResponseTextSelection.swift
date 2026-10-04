@@ -73,6 +73,7 @@ struct ResponseSelectionFingerprint: Equatable {
     let reduceMotion: Bool
     let chatWorkspaceRoot: String?
     let chatDisclosureToggled: ObjectIdentifier
+    let markdownTableEdgeFadeColor: Color?
 
     init(identity: String, environment: EnvironmentValues) {
         self.identity = identity
@@ -90,6 +91,7 @@ struct ResponseSelectionFingerprint: Equatable {
         reduceMotion = environment.accessibilityReduceMotion
         chatWorkspaceRoot = environment.chatWorkspaceRoot
         chatDisclosureToggled = ObjectIdentifier(environment.chatDisclosureToggled)
+        markdownTableEdgeFadeColor = environment.markdownTableEdgeFadeColor
     }
 }
 

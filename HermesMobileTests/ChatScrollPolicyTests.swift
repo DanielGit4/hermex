@@ -240,6 +240,36 @@ final class ChatScrollPolicyTests: XCTestCase {
             ChatScrollPolicy.sizeChangeAnchor(shouldFollowLatestMessage: false, isDisclosureSettling: false)
         )
     }
+
+    // MARK: - Transcript links
+
+    func testTheScreensOwnResultWinsEvenForAWebLink() {
+        let decision = TranscriptLinkRouter.decision(for: URL(string: "https://example.com")!, hostResult: .handled)
+        guard case .host = decision else { return XCTFail("Expected the screen's result, got \(decision)") }
+    }
+
+    func testAWebLinkTheScreenLeavesOpensInApp() {
+        let decision = TranscriptLinkRouter.decision(for: URL(string: "https://example.com")!, hostResult: nil)
+        guard case .inAppBrowser = decision else { return XCTFail("Expected the in-app browser, got \(decision)") }
+    }
+
+    func testAnotherLinkTheScreenLeavesGoesToTheSystem() {
+        let decision = TranscriptLinkRouter.decision(for: URL(string: "mailto:someone@example.com")!, hostResult: nil)
+        guard case .system = decision else { return XCTFail("Expected the system, got \(decision)") }
+    }
+
+    @MainActor
+    func testTappingAWebLinkTheScreenLeavesOpensItInTheInAppBrowser() {
+        let router = TranscriptLinkRouter()
+        let link = URL(string: "https://example.com/docs")!
+        var opened: URL?
+        router.handler = { _ in nil }
+        router.openInAppBrowser = { opened = $0 }
+
+        router.openURL(link)
+
+        XCTAssertEqual(opened, link)
+    }
 }
 
 /// The transcript's disclosure and link actions reach every row through the
@@ -249,6 +279,11 @@ final class ChatScrollPolicyTests: XCTestCase {
 /// still runs the latest closure.
 @MainActor
 final class ChatTranscriptEnvironmentStabilityTests: XCTestCase {
+    override class func setUp() {
+        super.setUp()
+        MainActor.assumeIsolated { warmUpSoftwareKeyboard() }
+    }
+
     func testDisclosureReadersSkipOwnerPassesAndRunTheLatestHandler() throws {
         let probe = EnvironmentStabilityProbe()
         let window = host(DisclosureOwner(probe: probe))
@@ -277,6 +312,21 @@ final class ChatTranscriptEnvironmentStabilityTests: XCTestCase {
         XCTAssertEqual(probe.handledTick, 3)
     }
 
+    /// Typing while a reply streams. On iOS 26 with the keyboard up, an `openURL`
+    /// re-written by a modifier whose body re-runs each pass re-ran every link reader.
+    func testLinkReadersSkipOwnerPassesWhileTheKeyboardIsUp() throws {
+        let keyboard = try showKeyboard()
+        defer { keyboard.endEditing(true); keyboard.isHidden = true }
+        let probe = EnvironmentStabilityProbe()
+        let window = host(LinkOwner(probe: probe))
+        defer { window.isHidden = true; window.rootViewController = nil }
+
+        advance(probe, window: window, passes: 3)
+
+        XCTAssertEqual(probe.ownerPasses, 4, "The owner must re-run on each tick for this to test anything")
+        XCTAssertLessThanOrEqual(probe.readerPasses, 2)
+    }
+
     /// The owners pass method references, which capture the view and so its
     /// state. Holding them must not keep that state alive after the screen goes.
     func testHandlersThatCaptureTheOwnerDoNotOutliveIt() {
@@ -287,6 +337,19 @@ final class ChatTranscriptEnvironmentStabilityTests: XCTestCase {
             window.rootViewController = nil
         }
         wait(for: [released], timeout: 2)
+    }
+
+    /// A focused text view in its own window, returned once the keyboard is up.
+    private func showKeyboard() throws -> UIWindow {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        let field = UITextView(frame: CGRect(x: 0, y: 0, width: 320, height: 44))
+        window.addSubview(field)
+        window.makeKeyAndVisible()
+        let shown = XCTNSNotificationExpectation(name: UIResponder.keyboardDidShowNotification)
+        field.becomeFirstResponder()
+        wait(for: [shown], timeout: 10)
+        return window
     }
 
     private func host(_ view: some View) -> UIWindow {
@@ -399,9 +462,9 @@ private struct SelfCapturingOwner: View {
 
     private func toggled() { toggles += 1 }
 
-    private func open(_ url: URL) -> OpenURLAction.Result {
+    private func open(_ url: URL) -> OpenURLAction.Result? {
         toggles += 1
-        return .handled
+        return nil
     }
 }
 

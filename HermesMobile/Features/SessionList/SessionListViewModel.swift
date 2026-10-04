@@ -219,6 +219,11 @@ final class SessionListViewModel {
     /// Set when a chat closes: its own profile picker may have moved the
     /// server since the list lent it, so the return reads the profile first.
     @ObservationIgnored private var chatMayHaveMovedProfile = false
+    /// The external session the live `sessionForOpening` is still importing, so
+    /// Next and Previous Chat step past it before navigation lands. Nil once
+    /// that open finishes or a newer open or navigation invalidates it.
+    private(set) var openingSessionID: String?
+    private var activeProfileGeneration = 0
 
     private let client: APIClient
     private let sessionMutator: SessionMutator
@@ -356,6 +361,8 @@ final class SessionListViewModel {
         profileFilter: String?
     ) -> [SessionSummary] {
         let query = Self.normalizedSearchQuery(rawSearchText)
+        // Every word must appear somewhere in the row, in any order and field.
+        let searchTerms = query.split(whereSeparator: \.isWhitespace)
         let projectFilteredSessions = filteredSessions(
             among: candidates,
             selectedProjectID: selectedProjectID,
@@ -363,8 +370,9 @@ final class SessionListViewModel {
             profileFilter: profileFilter
         )
         let localMatches = projectFilteredSessions.filter { session in
-            guard !query.isEmpty else { return true }
-            return Self.searchableText(for: session).contains(query)
+            guard !searchTerms.isEmpty else { return true }
+            let searchableText = Self.searchableText(for: session)
+            return searchTerms.allSatisfy { searchableText.contains($0) }
         }
         let sortedLocalMatches = Self.sortedSessions(localMatches)
 
@@ -676,21 +684,43 @@ final class SessionListViewModel {
 
         isLoadingActiveProfile = true
         activeProfileErrorMessage = nil
+        let generation = activeProfileGeneration
         defer { isLoadingActiveProfile = false }
 
         // Queued behind the list's switches: a read that overtook a return
-        // would take the profile lent to a chat for the user's pick.
+        // would take the profile lent to a chat for the user's pick. A newer
+        // selection (Settings' confirmed switch) fences out this older read.
         let failure: Error? = await afterProfileWork { [self] in
             do {
-                applyActiveProfile(try await client.profiles())
+                let response = try await client.profiles()
+                guard generation == activeProfileGeneration else { return nil }
+                applyActiveProfile(response)
                 return nil
             } catch {
                 return error
             }
         }
-        if let failure, !isCancellationError(failure) {
+        if let failure, !Task.isCancelled, !isCancellationError(failure),
+           generation == activeProfileGeneration {
             activeProfileErrorMessage = failure.localizedDescription
         }
+    }
+
+    /// Adopts Settings' confirmed switch synchronously, before New Chat can run.
+    /// Earlier profile reads must not replace this newer server-confirmed selection.
+    func adoptDefaultProfileSelection(_ selection: DefaultProfileSelection) {
+        activeProfileGeneration += 1
+        // The server confirmed the switch, so it is on the new pick: no loan
+        // is outstanding and no return needs to move it.
+        serverProfileName = selection.name
+        serverProfileIsUncertain = false
+        profileMovedForRow = nil
+        let profile = profileOptions.first { $0.normalizedName == selection.name }
+        activeProfileName = selection.name
+        activeProfileDisplayName = selection.displayName
+        activeProfileModel = Self.nonEmpty(selection.defaultModel) ?? Self.nonEmpty(profile?.model)
+        activeProfileProvider = Self.nonEmpty(profile?.provider)
+        activeProfileErrorMessage = nil
     }
 
     func switchActiveProfile(_ profile: ProfileSummary) async -> Bool {
@@ -1243,6 +1273,7 @@ final class SessionListViewModel {
     ) async -> SessionSummary? {
         sessionOpenGeneration &+= 1
         let generation = sessionOpenGeneration
+        openingSessionID = nil
         actionErrorMessage = nil
         lastError = nil
 
@@ -1256,6 +1287,11 @@ final class SessionListViewModel {
         guard let sessionID = Self.nonEmpty(session.sessionId) else {
             actionErrorMessage = String(localized: "The server did not provide a session ID.")
             return nil
+        }
+
+        openingSessionID = session.sessionId
+        defer {
+            if generation == sessionOpenGeneration { openingSessionID = nil }
         }
 
         do {
@@ -1548,6 +1584,7 @@ final class SessionListViewModel {
 
     func invalidateSessionOpening() {
         sessionOpenGeneration &+= 1
+        openingSessionID = nil
     }
 
     func setPinned(
@@ -1584,6 +1621,29 @@ final class SessionListViewModel {
 
         return await mutate(on: Self.nonEmpty(session.profile), modelContext: modelContext, animation: animation) {
             try await sessionMutator.archive(sessionID: sessionId)
+        }
+    }
+
+    /// Undoes an archive from the list: restores the session, then reloads so
+    /// its row returns to its old place (the server keeps `updated_at`). A second
+    /// call while one is in flight for the same session sends nothing.
+    func unarchive(
+        _ session: SessionSummary,
+        modelContext: ModelContext? = nil,
+        animation: Animation? = nil
+    ) async -> Bool {
+        guard let sessionId = Self.nonEmpty(session.sessionId) else {
+            actionErrorMessage = String(localized: "The server did not provide a session ID.")
+            return false
+        }
+
+        guard beginSessionMutation(sessionId) else { return false }
+        defer { endSessionMutation(sessionId) }
+
+        // On the row's own profile, as its archive was: a foreign profile's
+        // session is refused on any other.
+        return await mutate(on: Self.nonEmpty(session.profile), modelContext: modelContext, animation: animation) {
+            try await sessionMutator.unarchive(sessionID: sessionId)
         }
     }
 
@@ -1981,15 +2041,18 @@ final class SessionListViewModel {
         }
     }
 
-    /// Creates a new session on `profile` (the "New Chat in <Profile>" App Intent, #339),
-    /// or on the list's active profile for the "+" button / plain New Chat. The profile is
-    /// sent explicitly so the session never depends on the client's active-profile cookie,
-    /// which an opened chat may have moved; only a list that never loaded its profile
-    /// leaves the choice to the server. Plain New Chat also waits for the server to be
-    /// back on the list's profile, moving it there if a chat or row still has it: the
-    /// new chat's own requests would otherwise be refused, and its workspace comes
-    /// from the server's profile.
-    func createSession(modelContext: ModelContext? = nil, profile: String? = nil) async -> SessionSummary? {
+    /// Creates a session in the explicit App Intent profile or the sidebar's selected
+    /// profile. The server supplies that profile's model and last workspace. With
+    /// neither profile known, preserve the cookie-scoped workspace lookup. In-app New
+    /// Chat passes the project filter the user tapped under as `projectID` (#875).
+    /// Plain New Chat also waits for the server to be back on the list's profile,
+    /// moving it there if a chat or row still has it: the new chat's own requests
+    /// would otherwise be refused.
+    func createSession(
+        modelContext: ModelContext? = nil,
+        profile: String? = nil,
+        projectID: String? = nil
+    ) async -> SessionSummary? {
         isCreatingSession = true
         actionErrorMessage = nil
         lastError = nil
@@ -2000,13 +2063,18 @@ final class SessionListViewModel {
         }
 
         do {
-            let workspaces = try await client.workspaces()
-            let workspace = workspaces.last ?? workspaces.workspaces?.compactMap(\.path).first
+            let requestedProfile = Self.nonEmpty(profile) ?? Self.nonEmpty(activeProfileName)
+            var workspace: String?
+            if requestedProfile == nil {
+                let workspaces = try await client.workspaces()
+                workspace = workspaces.last ?? workspaces.workspaces?.compactMap(\.path).first
+            }
             let response = try await client.createSession(
                 workspace: workspace,
                 model: nil,
                 modelProvider: nil,
-                profile: Self.nonEmpty(profile) ?? activeProfileName
+                profile: requestedProfile,
+                projectID: Self.nonEmpty(projectID)
             )
 
             guard let sessionDetail = response.session else {
@@ -2091,6 +2159,8 @@ final class SessionListViewModel {
         session.lastMessageAt ?? session.updatedAt ?? session.createdAt ?? 0
     }
 
+    /// Lowercased fields joined by spaces. Search terms hold no spaces, so a
+    /// term found here always sits inside a single field.
     private static func searchableText(for session: SessionSummary) -> String {
         [
             session.title,
@@ -2195,6 +2265,7 @@ final class SessionListViewModel {
         fallbackProfile: ProfileSummary? = nil,
         fallbackDefaultModel: String? = nil
     ) {
+        activeProfileGeneration += 1
         profileOptions = response.profiles ?? profileOptions
 
         // Tolerant: only a present field moves the flag, so an older server

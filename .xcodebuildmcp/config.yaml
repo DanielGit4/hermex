@@ -9,4 +9,6 @@ sessionDefaults:
   # Fork (DanielGit4/hermex): lane simulator and the fork's own bundle ID. See FORK.md.
   simulatorName: "iPhone 17 Pro"
   bundleId: "com.danielgit4.hermexdev"
+  # Shared with scripts/test-sim, so a launch after tests reuses their build.
+  derivedDataPath: "./.build/DerivedData"
 sentryDisabled: true
