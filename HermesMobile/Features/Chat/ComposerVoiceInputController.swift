@@ -16,7 +16,15 @@ final class ComposerVoiceInputController {
         case transcribing
     }
 
-    private(set) var state: State = .idle
+    private(set) var state: State = .idle {
+        didSet {
+            if state == .listening || state == .serverListening {
+                recordingLease.acquire()
+            } else {
+                recordingLease.release()
+            }
+        }
+    }
     private(set) var errorMessage: String?
     private(set) var liveTranscript = ""
 
@@ -26,15 +34,26 @@ final class ComposerVoiceInputController {
     private var audioEngine: AVAudioEngine?
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
-    private var audioRecorder: AVAudioRecorder?
+    private let serverRecorder: any ComposerServerRecording
     private var recordingURL: URL?
     private var draftUpdateSession = ComposerVoiceDraftUpdateSession()
     private var updateDraft: ((String) -> Void)?
     private var suppressNextRecognitionError = false
     private var activatedAudioSessionForRecording = false
     private var audioTapInstalled = false
+    private var ownsAudioCapture = false
     @ObservationIgnored private var transcriptionTask: Task<Void, Never>?
+    @ObservationIgnored private var toggleTask: Task<Void, Never>?
     private var activeTranscriptionID: UUID?
+    @ObservationIgnored private let recordingLease = ComposerDictationLease.live()
+    private static weak var captureOwner: ComposerVoiceInputController?
+    private var startID: UUID?
+    private var recognitionID: UUID?
+    private var isSuspended = false
+    @ObservationIgnored private var interruptionObserver: NSObjectProtocol?
+    private var resumeWaiter: CheckedContinuation<Void, Never>?
+    private let microphonePermission: () async -> Bool
+    private let mayRecord: @MainActor () -> Bool
     private let logger = Logger.hermesVoiceInput
 
     @ObservationIgnored var apiClient: APIClient?
@@ -42,10 +61,35 @@ final class ComposerVoiceInputController {
 
     init(
         speechRecognizerFactory: @escaping (Locale) -> SFSpeechRecognizer? = { SFSpeechRecognizer(locale: $0) },
-        audioEngineFactory: @escaping () -> AVAudioEngine = { AVAudioEngine() }
+        audioEngineFactory: @escaping () -> AVAudioEngine = { AVAudioEngine() },
+        microphonePermission: @escaping () async -> Bool = { await ComposerVoiceMicrophonePermissionRequester.request() },
+        serverRecorder: (any ComposerServerRecording)? = nil,
+        mayRecord: @escaping @MainActor () -> Bool = {
+            ComposerVoiceInputStartPolicy.canStart(
+                appIsActive: UIApplication.shared.applicationState == .active,
+                appIsLocked: AppLock.shared.isLocked)
+        }
     ) {
         self.speechRecognizerFactory = speechRecognizerFactory
         self.audioEngineFactory = audioEngineFactory
+        self.microphonePermission = microphonePermission
+        self.mayRecord = mayRecord
+        self.serverRecorder = serverRecorder ?? ComposerServerAudioRecorder()
+        interruptionObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.interruptionNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            let type = (notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt)
+                .flatMap(AVAudioSession.InterruptionType.init(rawValue:))
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if type == .began { self.suspend() }
+                else if type == .ended { self.resume() }
+            }
+        }
+    }
+
+    deinit {
+        if let interruptionObserver { NotificationCenter.default.removeObserver(interruptionObserver) }
     }
 
     var isListening: Bool {
@@ -56,7 +100,21 @@ final class ComposerVoiceInputController {
         state == .requestingPermission
     }
 
+    /// Queue UI input under the same ownership as capture, so teardown can cancel
+    /// even a microphone tap whose task has not started executing yet.
+    @discardableResult
+    func scheduleToggle(currentDraft: String, updateDraft: @escaping (String) -> Void) -> Task<Void, Never> {
+        toggleTask?.cancel()
+        let task = Task { [weak self] in
+            guard let self, !Task.isCancelled else { return }
+            await self.toggle(currentDraft: currentDraft, updateDraft: updateDraft)
+        }
+        toggleTask = task
+        return task
+    }
+
     func toggle(currentDraft: String, updateDraft: @escaping (String) -> Void) async {
+        guard !Task.isCancelled else { return }
         if isListening {
             stopKeepingTranscript()
         } else {
@@ -64,7 +122,44 @@ final class ComposerVoiceInputController {
         }
     }
 
+    /// Scene inactivity stops capture immediately. A server clip remains owned by this
+    /// composer until it returns unlocked, or explicit teardown discards it.
+    func suspend() {
+        toggleTask?.cancel()
+        toggleTask = nil
+        guard !isSuspended else { return }
+        isSuspended = true
+        startID = nil
+        switch state {
+        case .serverListening:
+            stopAudio(cancelTask: true)
+            state = .transcribing
+        case .listening, .requestingPermission:
+            stopKeepingTranscript()
+        case .idle, .transcribing:
+            break
+        }
+    }
+
+    func resume() {
+        guard mayRecord() else { return }
+        isSuspended = false
+        resumeWaiter?.resume()
+        resumeWaiter = nil
+        if state == .transcribing, transcriptionTask == nil, let recordingURL {
+            beginTranscription(recordingURL: recordingURL)
+        }
+    }
+
+    private func waitUntilResumed() async {
+        if !mayRecord() { isSuspended = true }
+        if isSuspended, !Task.isCancelled {
+            await withCheckedContinuation { resumeWaiter = $0 }
+        }
+    }
+
     func stopKeepingTranscript() {
+        startID = nil
         suppressNextRecognitionError = true
         switch state {
         case .serverListening:
@@ -82,6 +177,9 @@ final class ComposerVoiceInputController {
     }
 
     func stopBeforeSubmittingDraft() {
+        toggleTask?.cancel()
+        toggleTask = nil
+        startID = nil
         suppressNextRecognitionError = true
         cancelServerTranscription()
         stopAcceptingDraftUpdates()
@@ -91,7 +189,12 @@ final class ComposerVoiceInputController {
     }
 
     private func start(currentDraft: String, updateDraft: @escaping (String) -> Void) async {
-        guard state == .idle else { return }
+        guard state == .idle, mayRecord(), !Task.isCancelled else { return }
+        if let owner = Self.captureOwner, owner !== self { owner.stopBeforeSubmittingDraft() }
+        Self.captureOwner = self
+        isSuspended = false
+        let id = UUID()
+        startID = id
 
         logger.info("Voice input start requested")
         errorMessage = nil
@@ -122,22 +225,23 @@ final class ComposerVoiceInputController {
             return
         }
 
-        await start(provider: provider)
+        await start(provider: provider, startID: id)
+        if Task.isCancelled, startID == id { stopBeforeSubmittingDraft() }
     }
 
-    private func start(provider: ComposerSTTProvider) async {
+    private func start(provider: ComposerSTTProvider, startID: UUID) async {
         switch provider {
         case .server:
-            await startServerProvider()
+            await startServerProvider(startID: startID)
         case .onDevice:
-            await startOnDeviceProvider()
+            await startOnDeviceProvider(startID: startID)
         }
     }
 
-    private func startServerProvider() async {
+    private func startServerProvider(startID: UUID) async {
         let isMicrophonePermissionGranted = await requestMicrophonePermission()
         logger.info("Server voice input microphone permission completed granted=\(isMicrophonePermissionGranted, privacy: .public)")
-        guard state == .requestingPermission else { return }
+        guard self.startID == startID, state == .requestingPermission, !Task.isCancelled else { return }
         guard isMicrophonePermissionGranted else {
             fail(
                 String(localized: "Microphone access is disabled. Enable it in Settings to use voice input."),
@@ -146,7 +250,7 @@ final class ComposerVoiceInputController {
             return
         }
 
-        guard ComposerVoiceInputStartPolicy.canStart(appIsActive: UIApplication.shared.applicationState == .active) else {
+        guard mayRecord() else {
             fail(
                 ComposerVoiceInputError.appNotActive.localizedDescription,
                 logCategory: .appNotActive
@@ -166,7 +270,7 @@ final class ComposerVoiceInputController {
         }
     }
 
-    private func startOnDeviceProvider() async {
+    private func startOnDeviceProvider(startID: UUID) async {
         guard let speechRecognizer = onDeviceSpeechRecognizerForRecording() else {
             await fallbackOrFail(
                 from: .onDevice,
@@ -178,7 +282,7 @@ final class ComposerVoiceInputController {
 
         let speechStatus = await requestSpeechAuthorization()
         logger.info("Voice input speech authorization completed status=\(Self.logDescription(for: speechStatus), privacy: .public)")
-        guard state == .requestingPermission else { return }
+        guard self.startID == startID, state == .requestingPermission, !Task.isCancelled else { return }
         guard speechStatus == .authorized else {
             await fallbackOrFail(
                 from: .onDevice,
@@ -190,7 +294,7 @@ final class ComposerVoiceInputController {
 
         let isMicrophonePermissionGranted = await requestMicrophonePermission()
         logger.info("Voice input microphone permission completed granted=\(isMicrophonePermissionGranted, privacy: .public)")
-        guard state == .requestingPermission else { return }
+        guard self.startID == startID, state == .requestingPermission, !Task.isCancelled else { return }
         guard isMicrophonePermissionGranted else {
             fail(
                 String(localized: "Microphone access is disabled. Enable it in Settings to use voice input."),
@@ -199,7 +303,7 @@ final class ComposerVoiceInputController {
             return
         }
 
-        guard ComposerVoiceInputStartPolicy.canStart(appIsActive: UIApplication.shared.applicationState == .active) else {
+        guard mayRecord() else {
             fail(
                 ComposerVoiceInputError.appNotActive.localizedDescription,
                 logCategory: .appNotActive
@@ -224,6 +328,7 @@ final class ComposerVoiceInputController {
         message: String,
         logCategory: VoiceInputFailureLogCategory
     ) async {
+        guard let id = startID, !Task.isCancelled, !isSuspended else { return }
         let fallback = ComposerSTTProviderPolicy.fallbackProvider(
             after: failedProvider,
             preference: providerPreference,
@@ -238,7 +343,7 @@ final class ComposerVoiceInputController {
 
         logger.info("Voice input falling back after \(String(describing: failedProvider), privacy: .public)")
         state = .requestingPermission
-        await start(provider: fallback)
+        await start(provider: fallback, startID: id)
     }
 
     private func unavailableMessage(serverConfigured: Bool, onDeviceSupported: Bool) -> String {
@@ -296,64 +401,32 @@ final class ComposerVoiceInputController {
 
     private func startServerRecording() throws {
         stopAudio(cancelTask: true)
-        logger.info("Server voice input audio startup preparing")
-
-        let audioSession = AVAudioSession.sharedInstance()
-        try audioSession.setCategory(
-            ComposerVoiceAudioSessionConfiguration.category,
-            mode: ComposerVoiceAudioSessionConfiguration.mode,
-            options: ComposerVoiceAudioSessionConfiguration.options
-        )
-        try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
-        activatedAudioSessionForRecording = true
-
-        try ComposerVoiceInputStartPolicy.validateAudioSessionInput(
-            isInputAvailable: audioSession.isInputAvailable,
-            sampleRate: audioSession.sampleRate,
-            inputNumberOfChannels: audioSession.inputNumberOfChannels
-        )
-
-        let recordingURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("hermex-composer-stt-\(UUID().uuidString)")
-            .appendingPathExtension(Self.serverRecordingFileExtension)
-        let recorder = try AVAudioRecorder(url: recordingURL, settings: Self.serverRecordingSettings)
-        recorder.prepareToRecord()
-        guard recorder.record() else {
-            try? FileManager.default.removeItem(at: recordingURL)
-            throw ComposerVoiceInputError.audioRecorderStartFailed
+        let id = startID
+        serverRecorder.onFinish = { [weak self] in
+            guard let self, self.startID == id, self.state == .serverListening else { return }
+            if self.mayRecord() { self.stopKeepingTranscript() }
+            else { self.suspend() }
         }
-
-        self.recordingURL = recordingURL
-        audioRecorder = recorder
+        recordingURL = try serverRecorder.start()
+        ownsAudioCapture = true
         ComposerAudioCaptureState.shared.setCapturing(true)
         logger.info("Server voice input recording started")
     }
 
     private func stopServerRecordingAndTranscribe() {
-        guard state == .serverListening,
-              let recorder = audioRecorder,
-              let recordingURL
-        else {
+        guard state == .serverListening, let recordingURL else {
             discardServerRecording()
             stopAudio(cancelTask: true)
             state = .idle
             return
         }
-
-        if recorder.isRecording {
-            recorder.stop()
-        }
-        audioRecorder = nil
-        ComposerAudioCaptureState.shared.setCapturing(false)
-
-        if activatedAudioSessionForRecording {
-            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
-            activatedAudioSessionForRecording = false
-        }
-
+        stopAudio(cancelTask: true)
         state = .transcribing
         liveTranscript = ""
+        beginTranscription(recordingURL: recordingURL)
+    }
 
+    private func beginTranscription(recordingURL: URL) {
         let transcriptionID = UUID()
         activeTranscriptionID = transcriptionID
         transcriptionTask = Task { [weak self] in
@@ -365,6 +438,7 @@ final class ComposerVoiceInputController {
     }
 
     private func finishServerRecording(recordingURL: URL, transcriptionID: UUID) async {
+        await waitUntilResumed()
         guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
             cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
             return
@@ -420,6 +494,7 @@ final class ComposerVoiceInputController {
                 filename: recordingURL.lastPathComponent
             )
 
+            await waitUntilResumed()
             guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
                 cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
                 return
@@ -445,6 +520,7 @@ final class ComposerVoiceInputController {
                 message: serverMessage
             )
         } catch {
+            await waitUntilResumed()
             guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
                 cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
                 return
@@ -476,6 +552,8 @@ final class ComposerVoiceInputController {
             return
         }
 
+        await waitUntilResumed()
+        guard isActiveTranscription(transcriptionID), !Task.isCancelled else { return }
         let speechStatus = await requestSpeechAuthorization()
         guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
             cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
@@ -492,6 +570,7 @@ final class ComposerVoiceInputController {
                 recordingURL,
                 speechRecognizer: speechRecognizer
             )
+            await waitUntilResumed()
             guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
                 cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
                 return
@@ -514,6 +593,7 @@ final class ComposerVoiceInputController {
             state = .idle
             suppressNextRecognitionError = false
         } catch {
+            await waitUntilResumed()
             guard isActiveTranscription(transcriptionID), !Task.isCancelled else {
                 cleanupRecordingFile(recordingURL, transcriptionID: transcriptionID)
                 return
@@ -580,7 +660,7 @@ final class ComposerVoiceInputController {
         stopAudio(cancelTask: true)
         logger.info("Voice input audio startup preparing")
 
-        guard ComposerVoiceInputStartPolicy.canStart(appIsActive: UIApplication.shared.applicationState == .active) else {
+        guard mayRecord() else {
             throw ComposerVoiceInputError.appNotActive
         }
 
@@ -624,13 +704,17 @@ final class ComposerVoiceInputController {
 
         audioEngine.prepare()
 
+        let id = UUID()
+        recognitionID = id
         recognitionTask = speechRecognizer.recognitionTask(with: request) { [weak self] result, error in
             Task { @MainActor in
-                self?.handleRecognition(result: result, error: error)
+                guard let self, self.recognitionID == id else { return }
+                self.handleRecognition(result: result, error: error)
             }
         }
 
         try audioEngine.start()
+        ownsAudioCapture = true
         ComposerAudioCaptureState.shared.setCapturing(true)
         logger.info("Voice input audio engine started")
     }
@@ -666,12 +750,15 @@ final class ComposerVoiceInputController {
     }
 
     private func stopAudio(cancelTask: Bool) {
-        ComposerAudioCaptureState.shared.setCapturing(false)
-
-        if let recorder = audioRecorder, recorder.isRecording {
-            recorder.stop()
+        recognitionID = nil
+        recordingLease.release()
+        if ownsAudioCapture {
+            ownsAudioCapture = false
+            ComposerAudioCaptureState.shared.setCapturing(false)
         }
-        audioRecorder = nil
+
+        serverRecorder.onFinish = nil
+        serverRecorder.stop()
 
         if let audioEngine {
             if audioEngine.isRunning {
@@ -706,10 +793,8 @@ final class ComposerVoiceInputController {
     }
 
     private func discardServerRecording() {
-        if let recorder = audioRecorder, recorder.isRecording {
-            recorder.stop()
-        }
-        audioRecorder = nil
+        serverRecorder.onFinish = nil
+        serverRecorder.stop()
 
         if let recordingURL {
             try? FileManager.default.removeItem(at: recordingURL)
@@ -721,6 +806,8 @@ final class ComposerVoiceInputController {
         transcriptionTask?.cancel()
         transcriptionTask = nil
         activeTranscriptionID = nil
+        resumeWaiter?.resume()
+        resumeWaiter = nil
         if let recordingURL {
             try? FileManager.default.removeItem(at: recordingURL)
             self.recordingURL = nil
@@ -771,7 +858,7 @@ final class ComposerVoiceInputController {
     }
 
     private func requestMicrophonePermission() async -> Bool {
-        await ComposerVoiceMicrophonePermissionRequester.request()
+        await microphonePermission()
     }
 
     private static func speechAuthorizationMessage(for status: SFSpeechRecognizerAuthorizationStatus) -> String {
@@ -947,8 +1034,8 @@ enum ComposerSpeechLocalePolicy {
 }
 
 enum ComposerVoiceInputStartPolicy {
-    static func canStart(appIsActive: Bool) -> Bool {
-        appIsActive
+    static func canStart(appIsActive: Bool, appIsLocked: Bool = false) -> Bool {
+        appIsActive && !appIsLocked
     }
 
     static func validateAudioSessionInput(
@@ -1040,4 +1127,150 @@ private extension Logger {
         subsystem: Bundle.main.bundleIdentifier ?? "HermesMobile",
         category: "VoiceInput"
     )
+}
+
+/// A recording-only lease. Permission prompts, deferred clips and transcription never
+/// hold it. The UIKit adapter below is separate so restoration can be tested without
+/// changing the test host's orientation or idle timer.
+@MainActor
+final class ComposerDictationLease {
+    private let readIdle: () -> Bool
+    private let writeIdle: (Bool) -> Void
+    private let writeOrientation: (UIInterfaceOrientationMask?) -> Void
+    private var previousIdle: Bool?
+    private weak var scene: UIWindowScene?
+    private static var lockedSceneID: String?
+    private static var lockedOrientation: UIInterfaceOrientationMask?
+
+    init(readIdle: @escaping () -> Bool, writeIdle: @escaping (Bool) -> Void,
+         writeOrientation: @escaping (UIInterfaceOrientationMask?) -> Void) {
+        self.readIdle = readIdle
+        self.writeIdle = writeIdle
+        self.writeOrientation = writeOrientation
+    }
+
+    static func live() -> ComposerDictationLease {
+        ComposerDictationLease(
+            readIdle: { UIApplication.shared.isIdleTimerDisabled },
+            writeIdle: { UIApplication.shared.isIdleTimerDisabled = $0 },
+            writeOrientation: { mask in lockedOrientation = mask }
+        )
+    }
+
+    func acquire() {
+        guard previousIdle == nil else { return }
+        scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        guard let scene else { return }
+        Self.lockedSceneID = scene.session.persistentIdentifier
+        acquire(isPhone: scene.traitCollection.userInterfaceIdiom == .phone,
+                orientation: scene.interfaceOrientation)
+        invalidateOrientation()
+    }
+
+    func acquire(isPhone: Bool, orientation: UIInterfaceOrientation) {
+        guard isPhone, previousIdle == nil else { return }
+        previousIdle = readIdle()
+        writeIdle(true)
+        let mask: UIInterfaceOrientationMask
+        switch orientation {
+        case .landscapeLeft: mask = .landscapeLeft
+        case .landscapeRight: mask = .landscapeRight
+        case .portraitUpsideDown: mask = .portraitUpsideDown
+        default: mask = .portrait
+        }
+        writeOrientation(mask)
+    }
+
+    func release() {
+        guard let previousIdle else { return }
+        self.previousIdle = nil
+        writeIdle(previousIdle)
+        writeOrientation(nil)
+        invalidateOrientation()
+        scene = nil
+    }
+
+    static func supportedOrientations(for window: UIWindow?) -> UIInterfaceOrientationMask {
+        if let scene = window?.windowScene,
+           scene.session.persistentIdentifier == lockedSceneID, let lockedOrientation {
+            return lockedOrientation
+        }
+        // Matches Info.plist's normal iPhone/iPad policy. UIKit still intersects
+        // this with the presented controller's supported orientations.
+        return window?.traitCollection.userInterfaceIdiom == .pad ? .all : .allButUpsideDown
+    }
+
+    private func invalidateOrientation() {
+        for window in scene?.windows ?? [] {
+            window.rootViewController?.setNeedsUpdateOfSupportedInterfaceOrientations()
+        }
+    }
+}
+
+/// Owns the physical server-STT recorder and its audio session. The controller owns
+/// the returned file, including retention across inactivity and eventual deletion.
+@MainActor
+protocol ComposerServerRecording: AnyObject {
+    var onFinish: (() -> Void)? { get set }
+    func start() throws -> URL
+    func stop()
+}
+
+@MainActor
+private final class ComposerServerAudioRecorder: NSObject, ComposerServerRecording, AVAudioRecorderDelegate {
+    var onFinish: (() -> Void)?
+    private var recorder: AVAudioRecorder?
+    private var ownsAudioSession = false
+
+    func start() throws -> URL {
+        let session = AVAudioSession.sharedInstance()
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hermex-composer-stt-\(UUID().uuidString)")
+            .appendingPathExtension(ComposerVoiceInputController.serverRecordingFileExtension)
+        do {
+            try session.setCategory(ComposerVoiceAudioSessionConfiguration.category,
+                                    mode: ComposerVoiceAudioSessionConfiguration.mode,
+                                    options: ComposerVoiceAudioSessionConfiguration.options)
+            try session.setActive(true, options: .notifyOthersOnDeactivation)
+            ownsAudioSession = true
+            try ComposerVoiceInputStartPolicy.validateAudioSessionInput(
+                isInputAvailable: session.isInputAvailable, sampleRate: session.sampleRate,
+                inputNumberOfChannels: session.inputNumberOfChannels)
+            let recorder = try AVAudioRecorder(url: url, settings: ComposerVoiceInputController.serverRecordingSettings)
+            self.recorder = recorder
+            recorder.delegate = self
+            recorder.prepareToRecord()
+            guard recorder.record() else { throw ComposerVoiceInputError.audioRecorderStartFailed }
+            return url
+        } catch {
+            stop()
+            try? FileManager.default.removeItem(at: url)
+            throw error
+        }
+    }
+
+    nonisolated func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+        Task { @MainActor [weak self] in
+            guard let self, self.recorder === recorder else { return }
+            self.onFinish?()
+        }
+    }
+
+    nonisolated func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+        Task { @MainActor [weak self] in
+            guard let self, self.recorder === recorder else { return }
+            self.onFinish?()
+        }
+    }
+
+    func stop() {
+        recorder?.delegate = nil
+        recorder?.stop()
+        recorder = nil
+        if ownsAudioSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+            ownsAudioSession = false
+        }
+    }
 }

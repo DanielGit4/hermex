@@ -68,6 +68,8 @@ Self-hosting the server, securing it, and keeping it reachable are your responsi
 
 - **HTTPS via a tunnel or reverse proxy (recommended).** Expose the server through Cloudflare Tunnel or any reverse proxy that terminates real TLS at a hostname you own. Real HTTPS keeps iOS App Transport Security happy with no exceptions. On a publicly reachable hostname the password is your only app-level defense — set a strong one.
 - **Private HTTPS with Tailscale Serve.** Keep the server password-protected and bound to `127.0.0.1:8787`, inspect existing Serve/Funnel routes, then add `tailscale serve --bg 8787` only when HTTPS port 443 at the root path is free. Install Tailscale on the iPhone and connect with the exact `https://…ts.net` URL reported by `tailscale serve status`. Direct binding to `0.0.0.0` over plain HTTP remains a manual fallback, not the default.
+- **Another private network, such as NetBird.** Install its app on the iPhone, keep it connected, and use the server's name or IP on that network.
+- **Same Wi-Fi.** On a home network you trust, use the machine's local address and port, such as `http://192.168.1.5:8787`. The server must listen on that address rather than only `127.0.0.1`, which exposes it to every device on the network, so keep the password strong.
 - **Simulator-only local testing** can use `http://localhost:8787` when the server runs on the same Mac.
 
 ### Troubleshooting the connection
@@ -107,7 +109,7 @@ Local validation defaults for XcodeBuildMCP users live in `.xcodebuildmcp/config
 
 The app is developed and tested against the `hermes-webui` commit pinned in [`UPSTREAM_TESTED_SHA`](UPSTREAM_TESTED_SHA). Upstream does not yet guarantee API stability (its README declares version skew unsupported pending their stable-API work), so newer or older server versions may break individual features — please include your server version in bug reports. The app decodes tolerantly (unknown fields never crash it) and endpoint shapes are verified against upstream source, never invented.
 
-Bot Mode's direct-Hermes connection has its own pin, [`HERMES_AGENT_TESTED_SHA`](HERMES_AGENT_TESTED_SHA): line 1 is the tested `hermes-agent` commit and line 2 the release string its `/api/status` reports. When a host reports a different release, the Bot connection screen shows a one-line "Untested Hermes version" note. It never blocks signing in.
+Bot Mode's direct-Hermes connection has its own pin, [`HERMES_AGENT_TESTED_SHA`](HERMES_AGENT_TESTED_SHA): line 1 is the tested `hermes-agent` commit and line 2 the release string its `/api/status` reports. Hermex refuses a host older than Hermes 0.21.3, the first release with the gateway contract it is built on, and asks you to update Hermes; 0.21.3 and later connect without a warning.
 
 ## Documentation map
 
@@ -144,6 +146,8 @@ Hermex is free and built in the open. If it's useful to you:
 Hermex is funded by its members. Thank you.
 
 **Patrons:** Robin Edwards
+
+**Members:** Aaron Kaufer
 
 **Founding members:** James Cross · Alexey
 

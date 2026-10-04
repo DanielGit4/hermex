@@ -59,6 +59,17 @@ launchctl unload ~/Library/LaunchAgents/com.hermes.webui.plist
 launchctl kickstart -k gui/$(id -u)/com.hermes.webui
 ```
 
+## Xcode version
+
+Local work, PR CI, and release builds all use **Xcode 27.0 (27A266a)**, so a
+change that compiles on this Mac compiles on CI. CI and release builds run on
+GitHub's `xcode-27` runner image with `DEVELOPER_DIR` pinned in
+`.github/workflows/pr-ci.yml` and `.github/workflows/release-candidate-testflight.yml`.
+Check yours with `xcodebuild -version`. With several Xcodes installed, select
+27.0 for one shell with `export DEVELOPER_DIR=<path to Xcode 27.0>.app/Contents/Developer`,
+or for the whole Mac with `sudo xcode-select -s <path to Xcode 27.0>.app`.
+Move the local Xcode and both workflow pins together.
+
 ## Local XCTest
 
 Use the repository runner for local tests, including when XcodeBuildMCP is
@@ -96,6 +107,13 @@ and checkout until testing finishes. A competing runner reports the current
 owner immediately; different checkout/device pairs run independently. These
 locks coordinate this runner only: keep other build/install tools on their
 session's assigned device, and do not run them during its test run.
+
+Before each test attempt, a bounded `get_app_container` check skips termination
+if Hermex is not installed (terminating an absent app can hang on iOS 27).
+Both the check and termination have a 25-second limit, or `--boot-timeout` or
+the remaining test budget if shorter. Only a missing-bundle result skips
+termination; other lookup errors stop the run. A not-running exit status is
+ignored; a timeout still stops the run.
 
 Build products live in the checkout's gitignored `.build/DerivedData/`, which
 XcodeBuildMCP also uses (`.xcodebuildmcp/config.yaml`), so launching the app
@@ -138,6 +156,10 @@ Runner checks: `python3 -m unittest discover -s scripts/tests -v`.
 `.github/workflows/pr-ci.yml` pins the hosted Xcode path, iOS runtime, and phone
 model. Update these together after checking the runner's installed software;
 a missing pin fails setup rather than selecting another toolchain or runtime.
+CI tests on the iOS 27 simulator only. The `xcode-27` image ships no iOS 26
+runtime, and downloading one would add minutes to every run, so iOS 26 is
+deliberately not covered on CI to keep it fast. Run the affected tests on a
+local iOS 26 simulator when a change depends on OS behavior.
 CI resolves the device UDID and runs the complete suite with one test worker.
 Xcode owns that worker's simulator clone and boot. Explicit preboot plus fully
 serial execution did not improve the hosted trial, so retain the one-worker
@@ -161,7 +183,9 @@ five-minute boot deadline.
 
 The Actions summary records phase timings, the failed phase, assertion messages,
 and slow tests. Failure artifacts include setup/build/test logs and any result
-bundle. A missing bundle does not establish an infrastructure flake; inspect the
+bundle. Tests run with `-collect-test-diagnostics never`, as locally: on the
+`xcode-27` image a failure otherwise spends 10 minutes timing out a
+simulator sysdiagnose. A missing bundle does not establish an infrastructure flake; inspect the
 failed phase before rerunning. The reporter cannot turn a failed build or test
 green. Validate workflow changes with `actionlint .github/workflows/pr-ci.yml`
 and `python3 -m unittest discover -s ci -p 'test_*.py'`.
@@ -202,6 +226,27 @@ security add-generic-password -s hermex-bot -a <bot-username> -j <bot-address> -
 
 `hermex-bot` is optional; with it the script also saves the Bot connection and turns Bot Mode on.
 
+`scripts/sim-login <simulator-udid> --hermes` also adds a Hermes server at the `hermex-bot` address, signed in with the same username and password, and opens it once per launch; switching away afterwards sticks until the next run. It needs `hermex-bot`, or all three of `HERMEX_BOT_ADDRESS`, `HERMEX_BOT_USERNAME` and `HERMEX_BOT_PASSWORD` in the environment, which replace the Keychain item for that run. Without `--hermes` the script behaves as before.
+
+### Local Hermes test server
+
+For tool and approval turns without a real model or the real host, run the pinned hermes-agent on this Mac:
+
+```zsh
+scripts/local-hermes
+```
+
+The first run clones the commit in `HERMES_AGENT_TESTED_SHA` into `~/Library/Caches/hermex-local-hermes/` and installs it with `uv` (network needed); later runs start in seconds. It serves `http://127.0.0.1:9199` with the credentials it prints (`hermex` / `hermex-local`), backed by a scripted stub model: every turn says "Let me run a quick check.", asks to run `python3 -c "print(1)"` behind a manual approval, then replies "The command returned: …" with the result or the denial. **Approving really runs that command on this Mac.** Each run uses a temporary Hermes home, deleted on exit, with a fixed install id, so a saved connection keeps working across restarts. Ctrl-C stops only the process group the script started.
+
+It listens on loopback, so only the simulator can reach it. To open it as a Hermes server, run:
+
+```zsh
+HERMEX_BOT_ADDRESS=http://127.0.0.1:9199 HERMEX_BOT_USERNAME=hermex HERMEX_BOT_PASSWORD=hermex-local \
+  scripts/sim-login <simulator-udid> --hermes
+```
+
+That also saves it as your webui server's own Hermes connection if that server has none yet. To point an existing webui server's connection at it instead, open Settings → your server → **Hermes connection**, enter `http://127.0.0.1:9199` and the printed credentials, and save. This replaces that server's saved Hermes connection until you enter the real one again. `scripts/sim-login` never replaces an existing connection, so it won't switch back for you.
+
 ## Launch arguments and profiling
 
 Debug builds read these launch arguments; Release builds compile none of them in.
@@ -210,13 +255,14 @@ Debug builds read these launch arguments; Release builds compile none of them in
 |---|---|
 | `--streaming-lab` | Opens the Streaming Lab as the root screen: a canned markdown reply replayed through the real streaming renderer, with the fade knobs exposed (#234). No server needed. |
 | `--rating-prompt-eligible` | Makes this launch eligible for the App Store rating prompt, so its real navigation and stream guards can be exercised. It rewrites the stored rating and tip-jar counters. |
+| `--stale-runtime-send` | Fails the first chat send of this launch with hermes-webui's `agent_runtime_stale` 409 instead of sending it, so the composer's restart banner and **Copy fix prompt** can be checked without updating Hermes on a server (#955). Later sends go to the server as usual. |
 | `--hitch-meter` | Shows a frame-hitch readout in the top-leading corner, such as `12.4 ms/s · 3 hitches · 60 Hz`: late-frame milliseconds per second, hitch count, and the refresh rate the display link reports, over the last second. It takes no touches, VoiceOver skips it, and it updates at most twice a second. |
 
 ```zsh
 xcrun simctl launch <simulator-udid> com.uzairansar.hermesmobile --hitch-meter
 ```
 
-The `HERMEX_DEV_*` environment variables (`HERMEX_DEV_SERVER_URL`, `HERMEX_DEV_PASSWORD`, and `HERMEX_DEV_BOT_ADDRESS`/`_USERNAME`/`_PASSWORD`) sign a Debug build in; `scripts/sim-login` sets them from the macOS Keychain (§ Signing a simulator in).
+The `HERMEX_DEV_*` environment variables (`HERMEX_DEV_SERVER_URL`, `HERMEX_DEV_PASSWORD`, `HERMEX_DEV_BOT_ADDRESS`/`_USERNAME`/`_PASSWORD`, and `HERMEX_DEV_HERMES_SERVER=1` for a Hermes server) sign a Debug build in; `scripts/sim-login` sets them from the macOS Keychain (§ Signing a simulator in).
 
 ### Recording signposts
 
@@ -241,6 +287,10 @@ xcrun xctrace record --template 'Time Profiler' --instrument os_signpost \
 xcrun xctrace export --input /tmp/hermex.trace \
   --xpath '/trace-toc/run[@number="1"]/data/table[@schema="OSSignpostIntervals"][1]'
 ```
+
+### Watching the Bot connection log
+
+`HermesConnection` logs Bot sign-ins and the gateway socket's lifecycle under the bundle ID as subsystem and the category `HermesConnection` (`docs/agents/bots.md`). In Console.app, select a cabled iPhone, start streaming, and filter `subsystem:com.uzairansar.hermesmobile category:HermesConnection` (`com.uzairansar.hermesmobile.branch` for Hermex Branch). Check it on a device: the simulator's `log show` doesn't show these lines.
 
 ## Swift File-Size Policy
 

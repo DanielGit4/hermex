@@ -7,6 +7,41 @@ import XCTest
 /// neither (#403). Busy flags always disable; attachment-only sends synthesize
 /// their message text in `PendingAttachment.chatMessageText`.
 final class ChatComposerSendGateTests: XCTestCase {
+    func testSessionPresentationPreferencesPersistWithExistingBehaviorAsDefaults() throws {
+        let suite = "SessionPreferencesTests-\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        XCTAssertFalse(defaults.bool(forKey: SessionChatPreferences.dismissKeyboardKey))
+        XCTAssertEqual(SessionChatPreferences.CompletionPosition.storedValue(
+            defaults.string(forKey: SessionChatPreferences.completionPositionKey) ?? ""
+        ), .latest)
+        defaults.set(true, forKey: SessionChatPreferences.dismissKeyboardKey)
+        defaults.set("beginning", forKey: SessionChatPreferences.completionPositionKey)
+        let reopened = try XCTUnwrap(UserDefaults(suiteName: suite))
+        XCTAssertTrue(reopened.bool(forKey: SessionChatPreferences.dismissKeyboardKey))
+        XCTAssertEqual(SessionChatPreferences.CompletionPosition.storedValue(
+            reopened.string(forKey: SessionChatPreferences.completionPositionKey) ?? ""
+        ), .beginning)
+        XCTAssertEqual(SessionChatPreferences.CompletionPosition.storedValue("future-value"), .latest)
+    }
+
+    func testSendFocusPreservesFailureNewEditingAndNewDraft() {
+        XCTAssertEqual(ChatSendFocusPolicy.focusAfterSubmission(
+            succeeded: true, dismissKeyboard: true, wasFocused: true,
+            submittedRevision: 1, currentRevision: 1, hasNewDraft: false
+        ), false)
+        XCTAssertEqual(ChatSendFocusPolicy.focusAfterSubmission(
+            succeeded: true, dismissKeyboard: false, wasFocused: true,
+            submittedRevision: 1, currentRevision: 1, hasNewDraft: false
+        ), true)
+        for (success, revision, draft) in [(false, 1, false), (true, 2, false), (true, 1, true)] {
+            XCTAssertNil(ChatSendFocusPolicy.focusAfterSubmission(
+                succeeded: success, dismissKeyboard: true, wasFocused: true,
+                submittedRevision: 1, currentRevision: revision, hasNewDraft: draft
+            ))
+        }
+    }
+
     func testQuoteOnlyDraftShowsSendWhileStreamIsActive() {
         XCTAssertFalse(ChatComposerSendGate.showsStopButton(
             isWaitingForStream: true,

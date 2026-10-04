@@ -1,3 +1,4 @@
+import ActivityKit
 import XCTest
 @testable import HermesMobile
 
@@ -195,6 +196,91 @@ final class LiveActivityTests: XCTestCase {
         XCTAssertEqual(updated.startedAt, startedAt)
         XCTAssertEqual(updated.updatedAt, Date(timeIntervalSince1970: 130))
         XCTAssertTrue(updated.isStale)
+    }
+
+    func testWidgetTapRoutesWebuiSessionThroughItsOwningServer() throws {
+        let owner = URL(string: "https://other.example:8787")!
+        let sessionID = "session & /?=✓"
+        let attributes = AgentRunActivityAttributes(
+            sessionID: "original-session", sessionTitle: "Run", startedAt: .now, server: owner
+        )
+        let url = try XCTUnwrap(AgentRunTapTarget.url(attributes: attributes, sessionID: sessionID, activityID: "activity-970"))
+        XCTAssertEqual(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+            .first(where: { $0.name == "activity" })?.value, "activity-970",
+            "Widget taps must identify the exact activity to dismiss")
+        XCTAssertEqual(url.host, "webui-push")
+        XCTAssertNil(HermesDeepLink.sessionID(from: url), "An owned activity must never use the active-server route")
+        let destination = try XCTUnwrap(WebuiPushDestination(url: url))
+        XCTAssertEqual(destination.server, owner)
+        XCTAssertEqual(destination.sessionID, sessionID)
+        let account = ServerAccount(id: owner.absoluteString, urlString: owner.absoluteString,
+                                    displayName: "", initials: "", headerLogoColorHex: "",
+                                    createdAt: .now, updatedAt: .now)
+        XCTAssertEqual(destination.route(state: .loggedIn(server: server), servers: [account]), .switchServer(account))
+        XCTAssertEqual(destination.route(state: .loggedOut(server: server), servers: [account]), .switchServer(account))
+        XCTAssertEqual(destination.route(state: .loggedOut(server: owner), servers: [account]), .waitForSignIn)
+        XCTAssertEqual(destination.route(state: .loggedIn(server: owner), servers: [account]), .open)
+        XCTAssertEqual(destination.route(state: .loggedIn(server: server), servers: []), .ignore)
+    }
+
+    func testWidgetTapKeepsLegacyActivitySessionLink() throws {
+        let data = Data(#"{"sessionID":"legacy","sessionTitle":"Run","startedAt":0}"#.utf8)
+        let attributes = try JSONDecoder().decode(AgentRunActivityAttributes.self, from: data)
+        XCTAssertNil(attributes.server)
+        let url = try XCTUnwrap(AgentRunTapTarget.url(attributes: attributes, sessionID: "legacy", activityID: "legacy-activity"))
+        XCTAssertEqual(url.absoluteString, "\(HermesDeepLink.scheme)://session?id=legacy&activity=legacy-activity")
+        XCTAssertEqual(HermesDeepLink.sessionID(from: url), "legacy")
+        XCTAssertNil(WebuiPushDestination(url: url))
+    }
+
+    func testWidgetTapKeepsBotDestinationAheadOfWebuiSession() throws {
+        let destination = BotDestination(server: server, connectionID: UUID(), profile: "Research & review")
+        let botURL = try XCTUnwrap(HermesDeepLink.botURL(for: destination))
+        let bot = AgentRunActivityBot(key: "bot-key", destinationURL: botURL)
+        let attributes = AgentRunActivityAttributes(
+            sessionID: "bot-session", sessionTitle: "Bot", startedAt: .now, bot: bot,
+            server: URL(string: "https://other.example")!
+        )
+        let url = try XCTUnwrap(AgentRunTapTarget.url(attributes: attributes, sessionID: "bot-session", activityID: "bot-activity"))
+        XCTAssertEqual(AgentRunTapTarget.activityID(from: url), "bot-activity")
+        XCTAssertEqual(HermesDeepLink.botDestination(from: url), destination)
+    }
+
+    func testTapDismissalRequiresExactActivityIdentityAndFinishedState() {
+        for status: AgentRunActivityStatus in [.complete, .failed, .cancelled] {
+            let state = AgentRunActivityStateReducer.final(
+                status: status, activity: "Finished",
+                state: AgentRunActivityStateReducer.initialState(sessionID: "session", sessionTitle: "Run")
+            )
+            XCTAssertTrue(AgentLiveActivityTapPolicy.shouldDismiss(
+                requestedID: "tapped", activityID: "tapped", isFinal: state.isFinal, activityState: .active
+            ), "Finished \(status) should dismiss")
+        }
+        for status: AgentRunActivityStatus in [.responding, .waiting, .waitingForApproval, .waitingForClarification] {
+            var state = AgentRunActivityStateReducer.initialState(sessionID: "session", sessionTitle: "Run")
+            state.status = status
+            for systemState: ActivityState in [.active, .stale] {
+                XCTAssertFalse(AgentLiveActivityTapPolicy.shouldDismiss(
+                    requestedID: "tapped", activityID: "tapped", isFinal: state.isFinal, activityState: systemState
+                ), "Unfinished \(status) must stay, even when stale")
+            }
+        }
+        XCTAssertTrue(AgentLiveActivityTapPolicy.shouldDismiss(
+            requestedID: "tapped", activityID: "tapped", isFinal: false, activityState: .ended
+        ), "A relay-ended card can still carry non-final content")
+        for requestedID: String? in [nil, "", "unknown"] {
+            XCTAssertFalse(AgentLiveActivityTapPolicy.shouldDismiss(
+                requestedID: requestedID, activityID: "tapped", isFinal: true, activityState: .ended
+            ))
+        }
+    }
+
+    func testOldOrUnrelatedLinksDoNotIdentifyAnActivity() throws {
+        let oldURL = try XCTUnwrap(HermesDeepLink.sessionURL(sessionID: "session"))
+        XCTAssertNil(AgentRunTapTarget.activityID(from: oldURL))
+        XCTAssertNil(AgentRunTapTarget.activityID(from: URL(string: "https://session?id=session&activity=other")!))
+        XCTAssertNil(AgentRunTapTarget.activityID(from: URL(string: "\(HermesDeepLink.scheme)://new-chat?activity=other")!))
+        XCTAssertNil(AgentRunTapTarget.activityID(from: URL(string: "\(HermesDeepLink.scheme)://session?id=session&activity=")!))
     }
 
     func testBuildsAndParsesSessionDeepLink() throws {

@@ -545,7 +545,7 @@ private struct ComposerRowFixture: View {
             MessageComposerView(
                 draft: draft, quotes: $quotes, isFocused: $focus.isFocused,
                 isSending: false, isCompressingSession: false, isWaitingForStream: false,
-                isCancellingStream: false, readOnlyMessage: nil, errorMessage: nil,
+                isCancellingStream: false, readOnlyMessage: nil, errorMessage: nil, errorFixPrompt: nil,
                 configurationErrorMessage: nil, contextWindowSnapshot: snapshot, gitViewModel: git,
                 modelGroups: Self.groups, selectedModelID: "claude-opus-5-5", selectedModelProviderID: "anthropic",
                 selectedModelTitle: "Claude Opus 5 5",

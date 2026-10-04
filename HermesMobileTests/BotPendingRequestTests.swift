@@ -58,6 +58,25 @@ import XCTest
         XCTAssertNil(BotApprovalRequest(.null))
     }
 
+    /// `pattern_keys` wins over `pattern_key`; both, and `tool_name`, are optional.
+    func testApprovalReadsPatternKeysAndToolName() {
+        let mixed = BotApprovalRequest(.object([
+            "request_id": .string("a"), "pattern_key": .string("tirith:shortened_url"),
+            "pattern_keys": .array([.string("tirith:shortened_url"), .string("recursive delete")]),
+            "tool_name": .string("terminal")
+        ]))
+        XCTAssertEqual(mixed?.patternKeys, ["tirith:shortened_url", "recursive delete"])
+        XCTAssertEqual(mixed?.toolName, "terminal")
+
+        let single = BotApprovalRequest(.object([
+            "request_id": .string("b"), "pattern_key": .string("recursive delete"), "pattern_keys": .array([])
+        ]))
+        XCTAssertEqual(single?.patternKeys, ["recursive delete"])
+        XCTAssertNil(single?.toolName)
+
+        XCTAssertEqual(BotApprovalRequest(.object(["request_id": .string("c")]))?.patternKeys, [])
+    }
+
     func testSingleQuestionCarriesNoQuestionIDAndStripsTheRecommendationLabel() {
         let request = BotQuestionRequest(BotFixtureWire.clarify())
         XCTAssertEqual(request?.requestID, "clr-1")
@@ -146,8 +165,7 @@ import XCTest
     func testDesktopTaskKindsMapFromTheirServerRequests() {
         let expected: [String: BotDesktopTaskRequest.Kind] = [
             "terminal.read": .terminalRead, "window.read": .windowRead, "preview.read": .previewRead,
-            "preview.act": .previewAct, "tour": .tour, "vault.unlock_prompt": .vaultUnlock,
-            "vault.save_login": .vaultSaveLogin, "vault.code": .vaultCode
+            "preview.act": .previewAct, "tour": .tour
         ]
         XCTAssertEqual(Set(expected.values), Set(BotDesktopTaskRequest.Kind.allCases))
         for (method, kind) in expected {
@@ -156,10 +174,44 @@ import XCTest
             XCTAssertFalse(kind.title.isEmpty)
             XCTAssertFalse(kind.detail.isEmpty)
         }
-        // Only the password-manager prompts wait for someone at the Mac, and
-        // they are the only ones there is anything to skip.
-        XCTAssertEqual(Set(BotDesktopTaskRequest.Kind.allCases.filter(\.needsSomeoneAtTheMac)),
-                       [.vaultUnlock, .vaultSaveLogin, .vaultCode])
+    }
+
+    /// The password-vault prompts are answered here like sudo and secret, and
+    /// carry what their card names: the password manager, the site and the
+    /// origin a login is saved for, and the host's hint when it sent one.
+    func testVaultPromptsAreAnswerableCredentialsWithTheirParams() {
+        let unlock = BotServerRequest(frame("vault.unlock_prompt", params: [
+            "backend": .string("onepassword"), "display_name": .string("1Password")
+        ]))?.pending
+        XCTAssertEqual(unlock, .credential(BotCredentialRequest(
+            kind: .vaultUnlock, requestID: "srq-1", envVar: nil, prompt: nil, displayName: "1Password"
+        )))
+        let save = BotServerRequest(frame("vault.save_login", params: [
+            "origin": .string("https://github.com"), "site": .string("github.com")
+        ]))?.pending
+        XCTAssertEqual(save, .credential(BotCredentialRequest(
+            kind: .vaultSaveLogin, requestID: "srq-1", envVar: nil, prompt: nil,
+            origin: "https://github.com", site: "github.com"
+        )))
+        // At the pin the host always sends an empty hint; blank reads as absent.
+        let code = BotServerRequest(frame("vault.code", params: ["site": .string("github.com"), "hint": .string("")]))?.pending
+        XCTAssertEqual(code, .credential(BotCredentialRequest(
+            kind: .vaultCode, requestID: "srq-1", envVar: nil, prompt: nil, site: "github.com"
+        )))
+        for pending in [unlock, save, code] { XCTAssertEqual(pending?.isAnswerable, true) }
+
+        guard case .credential(let unlockRequest)? = unlock, case .credential(let saveRequest)? = save,
+              case .credential(let codeRequest)? = code else { return XCTFail("Expected three credential requests") }
+        XCTAssertTrue(unlockRequest.title.contains("1Password"), unlockRequest.title)
+        XCTAssertTrue(unlockRequest.handling.contains("1Password"), unlockRequest.handling)
+        XCTAssertTrue(saveRequest.title.contains("github.com"), saveRequest.title)
+        XCTAssertTrue(codeRequest.title.contains("github.com"), codeRequest.title)
+        // The host's hint, when it sends one, is the card's own words for the code.
+        guard case .credential(let hinted)? = BotServerRequest(frame("vault.code", params: [
+            "hint": .string("Check your authenticator app")
+        ]))?.pending else { return XCTFail("Expected a code request") }
+        XCTAssertEqual(hinted.detail, "Check your authenticator app")
+        XCTAssertNotEqual(codeRequest.detail, hinted.detail)
     }
 
     /// `mcp.setup` no longer exists at the pin; it and any future method still
@@ -592,6 +644,96 @@ import XCTest
         model.suspend()
     }
 
+    // MARK: password-vault prompts
+
+    /// The master password is answered here like sudo, as the prompt's `value`.
+    func testAVaultUnlockSendsTheMasterPasswordAsItsValue() async {
+        let wire = BotFixtureWire()
+        let model = await blocked(on: wire)
+        wire.onEvent?(serverRequest("vault.unlock_prompt", id: "unlock-1", params: [
+            "backend": .string("onepassword"), "display_name": .string("1Password")
+        ]))
+        XCTAssertTrue(model.mayAnswer)
+        await model.answerCredential(action(model), value: "correct horse")
+        XCTAssertEqual(wire.calls.last { $0.0 == "request.answer" }?.1,
+                       ["id": .string("unlock-1"), "result": .object(["value": .string("correct horse")])])
+        XCTAssertEqual(model.requestResolution, BotRequestResolution(requestID: "unlock-1", outcome: .answered))
+        XCTAssertNil(model.pendingRequest)
+        model.suspend()
+    }
+
+    /// A login goes as one JSON-encoded string holding both fields, built by an
+    /// encoder so a quote or backslash in the password cannot break it. A login
+    /// missing either field has no value to send at all.
+    func testASaveLoginSendsIdentifierAndPasswordAsOneJSONString() async throws {
+        XCTAssertNil(BotCredentialRequest.saveLoginValue(identifier: "", password: "hunter2"))
+        XCTAssertNil(BotCredentialRequest.saveLoginValue(identifier: "  ", password: "hunter2"))
+        XCTAssertNil(BotCredentialRequest.saveLoginValue(identifier: "tomsmith", password: ""))
+
+        let wire = BotFixtureWire()
+        let model = await blocked(on: wire)
+        wire.onEvent?(serverRequest("vault.save_login", id: "save-1", params: [
+            "origin": .string("https://github.com"), "site": .string("github.com")
+        ]))
+        let password = #"Super "Secret" \Password!"#
+        let value = try XCTUnwrap(BotCredentialRequest.saveLoginValue(identifier: " tomsmith ", password: password))
+        await model.answerCredential(action(model), value: value)
+
+        let sent = try XCTUnwrap(wire.calls.last { $0.0 == "request.answer" }?.1)
+        XCTAssertEqual(sent["id"], .string("save-1"))
+        let json = try XCTUnwrap(sent["result"]?["value"].text, "The value is a string, not an object")
+        let login = try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: String]
+        XCTAssertEqual(login, ["identifier": "tomsmith", "password": password])
+        XCTAssertEqual(model.requestResolution?.outcome, .answered)
+        model.suspend()
+    }
+
+    /// The host strips spaces and dashes itself, so the phone sends the code untouched.
+    func testAVaultCodeIsSentAsTyped() async {
+        let wire = BotFixtureWire()
+        let model = await blocked(on: wire)
+        wire.onEvent?(serverRequest("vault.code", id: "code-1", params: [
+            "site": .string("github.com"), "hint": .string("")
+        ]))
+        await model.answerCredential(action(model), value: "123 456")
+        XCTAssertEqual(wire.calls.last { $0.0 == "request.answer" }?.1,
+                       ["id": .string("code-1"), "result": .object(["value": .string("123 456")])])
+        XCTAssertEqual(model.requestResolution?.outcome, .answered)
+        model.suspend()
+    }
+
+    /// Skip is the host's own decline for every vault prompt: an empty value
+    /// releases the bot now instead of parking it until the prompt times out.
+    func testSkippingAVaultPromptSendsAnEmptyValue() async {
+        for method in ["vault.unlock_prompt", "vault.save_login", "vault.code"] {
+            let wire = BotFixtureWire()
+            let model = await blocked(on: wire)
+            wire.onEvent?(serverRequest(method, id: "vault-1", params: ["site": .string("example.com")]))
+            XCTAssertTrue(model.mayAnswer, method)
+            await model.skipCredential(action(model))
+            XCTAssertEqual(wire.calls.last { $0.0 == "request.answer" }?.1,
+                           ["id": .string("vault-1"), "result": .object(["value": .string("")])], method)
+            XCTAssertEqual(model.requestResolution?.outcome, .answered, method)
+            XCTAssertNil(model.pendingRequest, method)
+            model.suspend()
+        }
+    }
+
+    /// A prompt the host already timed out answers `expired`: the card goes
+    /// inert, the connection stays up, and the code is sent once, never again.
+    func testAnExpiredVaultPromptReportsAlreadyResolved() async {
+        let wire = BotFixtureWire(); wire.answerStatus = "expired"
+        let model = await blocked(on: wire)
+        wire.onEvent?(serverRequest("vault.code", id: "code-2", params: ["site": .string("github.com")]))
+        await model.answerCredential(action(model), value: "123456")
+        XCTAssertEqual(wire.calls.filter { $0.0 == "request.answer" }.count, 1)
+        XCTAssertEqual(model.requestResolution, BotRequestResolution(requestID: "code-2", outcome: .alreadyResolved))
+        XCTAssertEqual(model.connectionState, .connected)
+        XCTAssertNil(model.errorMessage)
+        XCTAssertFalse(model.mayAnswer)
+        model.suspend()
+    }
+
     // MARK: Desktop-task kinds
 
     func testADesktopTaskBlocksTheTurnAndIsNeverAnswerable() async {
@@ -622,38 +764,16 @@ import XCTest
         model.suspend()
     }
 
-    /// A password-manager prompt waits for someone at the Mac. The phone cannot
-    /// answer it, but Skip releases the bot now with the host's empty value.
-    func testAVaultPromptIsSkippedFromThePhone() async {
-        for method in ["vault.unlock_prompt", "vault.save_login", "vault.code"] {
-            let wire = BotFixtureWire()
-            let model = await blocked(on: wire)
-            wire.onEvent?(serverRequest(method, id: "vault-1", params: ["site": .string("example.com")]))
-            // Skipping is not answering: the password or code only goes in at the Mac.
-            XCTAssertFalse(model.pendingRequest?.isAnswerable ?? true)
-            XCTAssertFalse(model.mayAnswer)
-            XCTAssertTrue(model.mayDecline)
-
-            await model.declineDesktopTask(action(model))
-            XCTAssertEqual(wire.calls.last { $0.0 == "request.answer" }?.1,
-                           ["id": .string("vault-1"), "result": .object(["value": .string("")])])
-            XCTAssertEqual(model.requestResolution?.outcome, .answered)
-            XCTAssertNil(model.pendingRequest)
-            model.suspend()
-        }
-    }
-
-    /// Every other Desktop task has nothing to decline, and a decline aimed at
-    /// one must never reach the wire.
-    func testADesktopTaskThatCannotBeDeclinedNeverDispatches() async {
+    /// A Desktop task has no answer from here: an answer aimed at one, even the
+    /// empty value Skip sends, never reaches the wire.
+    func testADesktopTaskIsNeverAnswered() async {
         let wire = BotFixtureWire()
         let model = await blocked(on: wire)
         wire.onEvent?(serverRequest("preview.read", id: "prev-1"))
-        XCTAssertFalse(model.mayDecline)
         XCTAssertNil(model.prepareAnswer())
-        await model.declineDesktopTask(
-            BotConversation.AnswerAction(generation: 0, runtime: "runtime", requestID: "prev-1")
-        )
+        let forged = BotConversation.AnswerAction(generation: 0, runtime: "runtime", requestID: "prev-1")
+        await model.skipCredential(forged)
+        await model.answerCredential(forged, value: "never sent")
         XCTAssertFalse(wire.calls.contains { $0.0 == "request.answer" })
         XCTAssertNil(model.requestResolution)
         model.suspend()
@@ -828,7 +948,7 @@ extension BotAnsweringTests {
         let wire = BotFixtureWire()
         wire.openRequests = .array([serverRequest("vault.code")])
         let model = await blocked(on: wire)
-        await model.declineDesktopTask(action(model))
+        await model.skipCredential(action(model))
         XCTAssertEqual(wire.calls.last { $0.0 == "request.answer" }?.1["result"],
                        .object(["value": .string("")]))
         model.suspend()
@@ -917,6 +1037,38 @@ extension BotAnsweringTests {
         XCTAssertEqual(model.pendingRequest?.requestID, "srq-1")
         XCTAssertEqual(model.turn, .needsAttention)
         model.suspend()
+    }
+
+    /// A reattach holds this runtime's frames until the snapshot is in (#901). A
+    /// `request.cancel` the host wrote while that snapshot was on its way withdraws
+    /// the card the replay restored, with its note, whether the snapshot was read
+    /// before the cancel (still listing the request) or after it.
+    func testAHeldCancelWithdrawsTheReattachedCardWithItsNote() async {
+        for snapshotListsIt in [true, false] {
+            let wire = BotFixtureWire()
+            let open = serverRequest("sudo")
+            var replay = BotFixtureWire.replay().fields!
+            replay["open_requests"] = .array([open])
+            wire.replay = .object(replay)
+            wire.openRequests = .array([open])
+            let model = await blocked(on: wire)
+            XCTAssertEqual(model.pendingRequest?.requestID, "srq-1")
+            wire.transformResume = { snapshot in
+                guard wire.calls.suffix(2).map(\.0) == ["session.events.since", "session.resume"] else { return snapshot }
+                wire.transformResume = nil
+                wire.openRequests = .array([])
+                wire.onEvent?(.object(["session_id": .string("runtime"), "seq": .number(1), "type": .string("request.cancel"),
+                                       "payload": .object(["id": .string("srq-1"), "method": .string("sudo"), "reason": .string("timeout")])]))
+                guard !snapshotListsIt, var fields = snapshot.fields else { return snapshot }
+                fields["open_requests"] = .array([])
+                return .object(fields)
+            }
+            await model.recover()
+            XCTAssertEqual(model.connectionState, .connected, "\(snapshotListsIt)")
+            XCTAssertNil(model.pendingRequest, "\(snapshotListsIt)")
+            XCTAssertEqual(model.withdrawnRequest, BotRequestWithdrawal(family: .other, reason: .timeout), "\(snapshotListsIt)")
+            model.suspend()
+        }
     }
 
     func testSnapshotCannotOverwriteANewerLiveRequestOrCancellation() async {
@@ -1404,6 +1556,491 @@ extension BotAnsweringTests {
         XCTAssertEqual(wire.calls.filter { $0.0 == "connection.respond" }.count, 1)
         XCTAssertEqual(model.draft, "check the inbox")
         XCTAssertFalse(model.uncertainSend)
+        model.suspend()
+    }
+}
+
+/// The line under an approval that says what Allow session and Always allow
+/// cover (#883). Exact copy is the approved design; the scope wording follows
+/// the card's own server type, never the active server.
+@MainActor final class ApprovalScopeTests: XCTestCase {
+    private static let allChoices = ["once", "session", "always", "deny"]
+
+    private func botLine(keys: [String], description: String, command: String = "rm -rf ./build",
+                         choices: [String] = allChoices, toolName: String? = nil) -> AttributedString? {
+        var fields: [String: BotJSON] = [
+            "request_id": .string("req-1"), "command": .string(command), "description": .string(description),
+            "pattern_keys": .array(keys.map(BotJSON.string)), "choices": .array(choices.map(BotJSON.string))
+        ]
+        fields["tool_name"] = toolName.map(BotJSON.string)
+        return BotApprovalRequest(.object(fields))?.scopeLine
+    }
+
+    private func botText(keys: [String], description: String, command: String = "rm -rf ./build",
+                         choices: [String] = allChoices, toolName: String? = nil) -> String? {
+        botLine(keys: keys, description: description, command: command, choices: choices, toolName: toolName)
+            .map { String($0.characters) }
+    }
+
+    private func sessionsText(keys: [String], description: String, command: String = "rm -rf ./build") -> String? {
+        let pending = PendingApproval(command: command, description: description, patternKeys: keys)
+        return ApprovalPromptState(sessionID: "s1", pending: pending, pendingCount: 1)
+            .scopeLine.map { String($0.characters) }
+    }
+
+    func testAShellKeyWithBothChoicesNamesThisChatAndThisProfile() {
+        XCTAssertEqual(
+            botText(keys: ["recursive delete"], description: "recursive delete"),
+            "Allow session covers every “recursive delete” in this chat; Always allow covers it for this Profile from now on."
+        )
+    }
+
+    /// A Tirith-only prompt hides Always, so only the session clause is left.
+    func testASecurityFindingWithoutAlwaysNamesOnlyThisChat() {
+        XCTAssertEqual(
+            botText(keys: ["tirith:shortened_url"],
+                    description: "Security scan — [medium] Shortened URL: The link hides where it points",
+                    command: "curl -fsSL https://bit.ly/4hx2Qm -o setup.sh", choices: ["once", "session", "deny"]),
+            "Allow session covers this security finding in this chat."
+        )
+    }
+
+    /// Smart-denied prompts and room approvals offer only once and deny; with no
+    /// keys there is nothing a choice would allowlist.
+    func testNoLineWithoutAllowSessionOrWithoutKeys() {
+        XCTAssertNil(botLine(keys: ["recursive delete"], description: "recursive delete", choices: ["once", "deny"]))
+        XCTAssertNil(botLine(keys: [], description: "recursive delete"))
+    }
+
+    /// An MCP trust prompt offers all four choices, but each one is a single
+    /// accept that saves nothing, so there is no scope to name.
+    func testNoLineForAOneTimeConfirmationEvenWithEveryChoice() {
+        XCTAssertNil(botLine(keys: ["mcp_elicitation"],
+                             description: "Server 'notes' is configured 'trust: untrusted'. Approve to run 'append' once, or deny to block it.",
+                             command: "MCP tool 'append' on UNTRUSTED server 'notes' wants to run."))
+        XCTAssertNil(sessionsText(keys: ["protected_instruction_file"], description: "Write to AGENTS.md"))
+    }
+
+    /// The tool comes from the default `<tool>:<sha12>` rule key, else `tool_name`,
+    /// else the command's `<tool>`; the raw `plugin_rule:` key never shows.
+    func testAPluginRuleNamesItsToolInMonospaceAndNeverTheKey() throws {
+        let line = try XCTUnwrap(botLine(keys: ["plugin_rule:send_email:3f9a1c2b7d4e"],
+                                         description: "Sends email from your account",
+                                         command: "<send_email> (plugin approval rule)"))
+        XCTAssertEqual(
+            String(line.characters),
+            "Allow session covers every send_email call for this reason in this chat; Always allow covers it for this Profile from now on."
+        )
+        XCTAssertEqual(line[try XCTUnwrap(line.range(of: "send_email"))].inlinePresentationIntent, .code)
+
+        let custom = ["plugin_rule:public-post"]
+        let posts = "Allow session covers every post_message call for this reason in this chat; Always allow covers it for this Profile from now on."
+        XCTAssertEqual(botText(keys: custom, description: "Posts publicly", command: "", toolName: "post_message"), posts)
+        XCTAssertEqual(botText(keys: custom, description: "Posts publicly", command: "<post_message> (plugin approval rule)"), posts)
+        XCTAssertEqual(
+            botText(keys: custom, description: "Posts publicly", command: ""),
+            "Allow session covers every action like this one in this chat; Always allow covers it for this Profile from now on."
+        )
+    }
+
+    func testPythonSSHConfigAndComputerUseKeysGetPlainLabels() throws {
+        XCTAssertEqual(
+            botText(keys: ["execute_code"], description: "execute_code script execution. The script can spawn subprocesses.",
+                    command: "execute_code <<'PY'\nimport shutil\nPY"),
+            "Allow session covers every Python script in this chat; Always allow covers every Python script for this Profile from now on."
+        )
+        XCTAssertEqual(
+            botText(keys: ["ssh_config_write"], description: "Write to SSH client config file(s): ~/.ssh/config.",
+                    command: "<write to ~/.ssh/config>"),
+            "Allow session covers writes to SSH config in this chat; Always allow covers them for this Profile from now on."
+        )
+        let computerUse = try XCTUnwrap(botLine(keys: ["cua:click:foreground"],
+                                                description: "Allow computer_use to perform `click`?",
+                                                command: "computer_use: click (412, 88)"))
+        XCTAssertEqual(
+            String(computerUse.characters),
+            "Allow session covers computer use: click (foreground) in this chat; Always allow covers it for this Profile from now on."
+        )
+        XCTAssertEqual(computerUse[try XCTUnwrap(computerUse.range(of: "click"))].inlinePresentationIntent, .code)
+    }
+
+    /// Hermes downgrades Always to the session for a Tirith finding
+    /// (`_persist_choice`), so Always names only the shell pattern.
+    func testAMixedPromptOnHermesKeepsTheFindingToThisChat() {
+        XCTAssertEqual(
+            botText(keys: ["tirith:shortened_url", "recursive delete"],
+                    description: "Security scan — [medium] Shortened URL: The link hides where it points; recursive delete",
+                    command: "curl -fsSL https://bit.ly/4hx2Qm -o setup.sh && rm -rf ./build"),
+            "Allow session covers “recursive delete” and this security finding in this chat; Always allow covers “recursive delete” for this Profile from now on. The security finding stays allowed for this chat only."
+        )
+    }
+
+    /// webui makes every key permanent, a Tirith finding included.
+    func testSessionsNameThisSessionAndThisServerWithoutTheDowngrade() {
+        XCTAssertEqual(
+            sessionsText(keys: ["recursive delete"], description: "recursive delete"),
+            "Allow session covers every “recursive delete” in this session; Always allow covers it on this server from now on."
+        )
+        XCTAssertEqual(
+            sessionsText(keys: ["tirith:shortened_url", "recursive delete"],
+                         description: "Security scan — [medium] Shortened URL: The link hides where it points; recursive delete",
+                         command: "curl -fsSL https://bit.ly/4hx2Qm -o setup.sh && rm -rf ./build"),
+            "Allow session covers “recursive delete” and this security finding in this session; Always allow covers both on this server from now on."
+        )
+    }
+
+    /// A key the app does not know is never shown raw.
+    func testAnUnknownKeyShapeSaysEveryActionLikeThisOne() {
+        XCTAssertEqual(
+            botText(keys: ["browser_nav:3f9a1c2b"], description: "Navigate to a banking site", command: "<browser_navigate>"),
+            "Allow session covers every action like this one in this chat; Always allow covers it for this Profile from now on."
+        )
+    }
+
+    /// The Sessions card shown for a webui `/api/approval/pending` entry.
+    private func sessionsCard(_ json: String) throws -> ApprovalPromptState {
+        let pending = try JSONDecoder().decode(PendingApproval.self, from: Data(json.utf8))
+        return ApprovalPromptState(sessionID: "s1", pending: pending, pendingCount: 1)
+    }
+
+    /// The Sessions line describes only the choices `ApprovalChoicePolicy` leaves on
+    /// the card, always in this session's and this server's terms: a flagged or
+    /// ask-every-time prompt has no line, Allow session alone gets the session-only
+    /// sentence, and an empty `choices` list is "not listed", unlike unknown words.
+    func testSessionsLineDescribesOnlyTheChoicesTheCardOffers() throws {
+        let both = "Allow session covers every “recursive delete” in this session; Always allow covers it on this server from now on."
+        let sessionOnly = "Allow session covers every action like this one in this session."
+        let keys = #""pattern_keys":["recursive delete"],"description":"recursive delete","command":"rm -rf ./build""#
+        let rows: [(name: String, json: String, choices: [ApprovalChoice], line: String?, note: ApprovalChoiceNote?)] = [
+            ("normal", "{\(keys)}", [.once, .session, .always, .deny], both, nil),
+            ("flagged", #"{\#(keys),"allow_permanent":false,"allow_session":false,"smart_denied":true}"#,
+             [.once, .deny], nil, .safetyCheckFlagged),
+            ("asks every time", #"{\#(keys),"allow_permanent":false,"allow_session":false}"#,
+             [.once, .deny], nil, .asksEveryTime),
+            ("permanent refused", #"{\#(keys),"allow_permanent":false}"#, [.once, .session, .deny], sessionOnly, nil),
+            ("session listed", #"{\#(keys),"choices":["once","session","deny"]}"#, [.once, .session, .deny], sessionOnly, nil),
+            ("empty list", #"{\#(keys),"choices":[]}"#, [.once, .session, .always, .deny], both, nil),
+            ("empty list, permanent refused", #"{\#(keys),"choices":[],"allow_permanent":false}"#,
+             [.once, .session, .deny], sessionOnly, nil),
+            ("unknown words", #"{\#(keys),"choices":["teleport"]}"#, [.deny], nil, nil)
+        ]
+
+        for row in rows {
+            let card = try sessionsCard(row.json)
+            XCTAssertEqual(ApprovalChoicePolicy.choices(for: card.pending), row.choices, row.name)
+            XCTAssertEqual(ApprovalChoicePolicy.note(for: card.pending), row.note, row.name)
+            let line = card.scopeLine.map { String($0.characters) }
+            XCTAssertEqual(line, row.line, row.name)
+            XCTAssertFalse(line?.contains("Profile") == true || line?.contains("this chat") == true,
+                           "\(row.name): a webui server's allowlist is server-wide, never a Profile's")
+        }
+
+        let finding = try sessionsCard(#"{"pattern_keys":["tirith:shortened_url"],"description":"Security scan","allow_permanent":false}"#)
+        XCTAssertEqual(finding.scopeLine.map { String($0.characters) },
+                       "Allow session covers this security finding in this session.")
+        // A list offering Always without Allow session gets no line rather than one
+        // that describes a session choice the card doesn't show.
+        let alwaysOnly = try sessionsCard(#"{\#(keys),"choices":["once","always","deny"]}"#)
+        XCTAssertEqual(ApprovalChoicePolicy.choices(for: alwaysOnly.pending), [.once, .always, .deny])
+        XCTAssertNil(alwaysOnly.scopeLine)
+    }
+
+    /// The same request reads in each card's own terms: Bot Chat and rooms name this
+    /// chat and this Profile, the Sessions overlay this session and this server, and a
+    /// room's once-and-deny approval has no line on either side.
+    func testBotAndRoomWordingNeverCrossesIntoSessionsWording() throws {
+        let keys = #""pattern_keys":["recursive delete"],"description":"recursive delete","command":"rm -rf ./build""#
+        XCTAssertEqual(
+            botText(keys: ["recursive delete"], description: "recursive delete"),
+            "Allow session covers every “recursive delete” in this chat; Always allow covers it for this Profile from now on."
+        )
+        XCTAssertEqual(
+            try sessionsCard("{\(keys)}").scopeLine.map { String($0.characters) },
+            "Allow session covers every “recursive delete” in this session; Always allow covers it on this server from now on."
+        )
+        XCTAssertEqual(
+            botText(keys: ["recursive delete"], description: "recursive delete", choices: ["once", "session", "deny"]),
+            "Allow session covers every action like this one in this chat."
+        )
+        XCTAssertEqual(
+            try sessionsCard(#"{\#(keys),"choices":["once","session","deny"]}"#).scopeLine.map { String($0.characters) },
+            "Allow session covers every action like this one in this session."
+        )
+        XCTAssertNil(botLine(keys: ["recursive delete"], description: "recursive delete", choices: ["once", "deny"]))
+        XCTAssertNil(try sessionsCard(#"{\#(keys),"choices":["once","deny"]}"#).scopeLine)
+    }
+}
+
+// MARK: withdrawn requests (#892)
+
+extension BotPendingRequestParsingTests {
+    /// Every family and reason is one whole sentence. An answer given elsewhere,
+    /// a cancel that gives no reason, and the renderer's own tasks stay silent.
+    func testAWithdrawalReadsAsOneSentencePerFamilyAndReason() {
+        let table: [(method: String, reason: String?, message: String?)] = [
+            ("approval", "timeout", "Approval timed out, so it didn't run."),
+            ("approval", "interrupted", "Approval withdrawn because the work stopped."),
+            ("approval", "session_closed", "Approval withdrawn because the work stopped."),
+            ("approval", "shutdown", "Approval withdrawn because Hermes shut down."),
+            ("approval", "denied by policy", "Approval withdrawn."),
+            ("approval", "resolved", nil),
+            ("clarify", "timeout", "Question timed out. The bot carried on without an answer."),
+            ("clarify", "interrupted", "Question withdrawn because the work stopped."),
+            ("clarify", "session_closed", "Question withdrawn because the work stopped."),
+            ("clarify", "shutdown", "Question withdrawn because Hermes shut down."),
+            ("clarify", "client_gone", "Question withdrawn."),
+            ("clarify", "resolved", nil),
+            ("sudo", "timeout", "Request timed out. The bot carried on without it."),
+            ("secret", "interrupted", "Request withdrawn because the work stopped."),
+            ("vault.code", "session_closed", "Request withdrawn because the work stopped."),
+            ("vault.unlock_prompt", "shutdown", "Request withdrawn because Hermes shut down."),
+            ("vault.save_login", "client_gone", "Request withdrawn."),
+            ("sudo", "resolved", nil),
+            ("sudo", nil, nil),
+            ("sudo", " ", nil)
+        ] + ["tour", "terminal.read", "window.read", "preview.read", "preview.act"].map { ($0, "timeout", nil) }
+        for row in table {
+            XCTAssertEqual(BotRequestWithdrawal(method: row.method, reason: row.reason)?.message, row.message,
+                           "\(row.method) \(row.reason ?? "nil")")
+        }
+        XCTAssertEqual(BotRequestWithdrawal(method: "approval", reason: "timeout")?.systemImage, "clock")
+        XCTAssertEqual(BotRequestWithdrawal(method: "clarify", reason: "shutdown")?.systemImage, "stop.circle")
+    }
+}
+
+extension BotAnsweringTests {
+    private func cancel(_ id: String, _ method: String, reason: String?, seq: Int) -> BotJSON {
+        var payload: [String: BotJSON] = ["id": .string(id), "method": .string(method)]
+        if let reason { payload["reason"] = .string(reason) }
+        return .object(["session_id": .string("runtime"), "seq": .number(Double(seq)),
+                        "type": .string("request.cancel"), "payload": .object(payload)])
+    }
+
+    /// An approval on screen the way the host shows one: its envelope in
+    /// `open_requests` and its queue entry in `pending_approval`. The host has
+    /// dropped both by the time it sends `request.cancel`, so later reads omit them.
+    private func approvalOnScreen(_ wire: BotFixtureWire) async -> BotConversation {
+        wire.pendingApproval = BotFixtureWire.approval()
+        wire.openRequests = .array([serverRequest("approval", id: "srq-a", params: BotFixtureWire.approval().fields!)])
+        let model = await blocked(on: wire)
+        XCTAssertEqual(model.pendingRequest?.requestID, "req-1")
+        wire.pendingApproval = nil
+        wire.openRequests = .array([])
+        return model
+    }
+
+    func testATimedOutApprovalLeavesANote() async {
+        let wire = BotFixtureWire()
+        let model = await approvalOnScreen(wire)
+        wire.onEvent?(cancel("srq-a", "approval", reason: "timeout", seq: 1))
+        XCTAssertNil(model.pendingRequest)
+        XCTAssertEqual(model.withdrawnRequest?.message, "Approval timed out, so it didn't run.")
+        // The host's next read agrees the card is gone, and the note stays in its place.
+        await awaitSnapshot(model)
+        XCTAssertEqual(model.withdrawnRequest?.message, "Approval timed out, so it didn't run.")
+        model.suspend()
+    }
+
+    func testAnApprovalResolvedElsewhereLeavesNoNote() async {
+        let wire = BotFixtureWire()
+        let model = await approvalOnScreen(wire)
+        wire.onEvent?(cancel("srq-a", "approval", reason: "resolved", seq: 1))
+        XCTAssertNil(model.pendingRequest)
+        XCTAssertNil(model.withdrawnRequest)
+        model.suspend()
+    }
+
+    /// The user who tapped Stop already knows, whether the host's withdrawal
+    /// arrives after the acknowledgement or in the replay after the Stop's
+    /// reply was lost.
+    func testAStopFromThisPhoneWithdrawsWithoutANote() async throws {
+        for reason in ["interrupted", "session_closed"] {
+            for lost in [false, true] {
+                let wire = BotFixtureWire(); wire.openClarify = BotFixtureWire.clarify()
+                let model = await blocked(on: wire)
+                let withdraw = cancel("clr-1", "clarify", reason: reason, seq: 1)
+                if lost { wire.stopFailure = .transport }
+                await model.stop(try XCTUnwrap(model.prepareStop()))
+                wire.openClarify = .null
+                if lost {
+                    wire.stopFailure = nil
+                    wire.replay = BotFixtureWire.replay(latest: 1, events: [withdraw])
+                    await model.recover()
+                } else {
+                    wire.onEvent?(withdraw)
+                }
+                XCTAssertNil(model.pendingRequest)
+                XCTAssertNil(model.withdrawnRequest, "\(reason), lost reply: \(lost)")
+                model.suspend()
+            }
+        }
+    }
+
+    func testAStopFromElsewhereLeavesANote() async {
+        for reason in ["interrupted", "session_closed"] {
+            let wire = BotFixtureWire(); wire.openClarify = BotFixtureWire.clarify()
+            let model = await blocked(on: wire)
+            wire.openClarify = .null
+            wire.onEvent?(cancel("clr-1", "clarify", reason: reason, seq: 1))
+            XCTAssertEqual(model.withdrawnRequest?.message, "Question withdrawn because the work stopped.", reason)
+            model.suspend()
+        }
+    }
+
+    /// Interrupt (Stop & send) and a voice stop are this phone's own stop too, even when the
+    /// host withdraws the card before it acknowledges the message. A plain Queue,
+    /// and an Interrupt the host queued for the next turn because the current one
+    /// was still being built, stop nothing, so a stop from elsewhere after them
+    /// still says so.
+    func testStopAndSendAndAVoiceStopWithdrawWithoutANote() async throws {
+        let cases: [(BotPromptMode, BotJSON?, Bool, stoppedHere: Bool)] = [
+            (.redirect, .object(["status": .string("redirected")]), false, true),
+            (.redirect, .object(["status": .string("redirected")]), true, true),
+            (.queue, .object(["voice_stopped": .bool(true)]), false, true),
+            (.queue, nil, false, false),
+            (.redirect, .object(["status": .string("queued")]), false, false)
+        ]
+        for (mode, reply, beforeReply, stoppedHere) in cases {
+            for reason in ["interrupted", "session_closed"] {
+                let wire = BotFixtureWire(); wire.openClarify = BotFixtureWire.clarify()
+                wire.promptReply = reply
+                let model = await blocked(on: wire)
+                let withdraw = cancel("clr-1", "clarify", reason: reason, seq: 1)
+                if beforeReply {
+                    wire.beforeSubmit = { [weak model] in
+                        wire.openClarify = .null
+                        wire.onEvent?(withdraw)
+                        XCTAssertNil(model?.withdrawnRequest, "No note while the Interrupt is in flight")
+                    }
+                }
+                model.editDraft("stop")
+                await model.submit(try XCTUnwrap(model.preparePrompt(mode)))
+                if !beforeReply {
+                    wire.openClarify = .null
+                    wire.onEvent?(withdraw)
+                }
+                XCTAssertNil(model.pendingRequest)
+                XCTAssertEqual(model.withdrawnRequest?.message,
+                               stoppedHere ? nil : "Question withdrawn because the work stopped.",
+                               "\(mode) \(reply?["status"].text ?? "") \(reason) before reply: \(beforeReply)")
+                model.suspend()
+            }
+        }
+    }
+
+    func testACancelForARequestNotOnScreenLeavesNoNote() async {
+        let wire = BotFixtureWire(); wire.openClarify = BotFixtureWire.clarify()
+        wire.openRequests = .array([serverRequest("sudo", id: "sudo-1")])
+        let model = await blocked(on: wire)
+        guard case .question? = model.pendingRequest else { return XCTFail("Expected the question on screen") }
+        wire.openRequests = .array([])
+        wire.onEvent?(cancel("sudo-1", "sudo", reason: "timeout", seq: 1))
+        wire.onEvent?(cancel("never-seen", "clarify", reason: "timeout", seq: 2))
+        // The question's id under another method is not the question (#530).
+        wire.onEvent?(cancel("clr-1", "sudo", reason: "timeout", seq: 3))
+        XCTAssertEqual(model.pendingRequest?.requestID, "clr-1")
+        XCTAssertNil(model.withdrawnRequest)
+        model.suspend()
+    }
+
+    /// The renderer's own tasks already say the bot carries on without them. A
+    /// password-manager prompt waits for a person, so its timeout is worth saying.
+    func testRendererTasksTimeOutSilently() async {
+        for method in ["tour", "terminal.read", "window.read", "preview.read", "preview.act", "vault.code"] {
+            let wire = BotFixtureWire()
+            wire.openRequests = .array([serverRequest(method, id: "task-1")])
+            let model = await blocked(on: wire)
+            XCTAssertEqual(model.pendingRequest?.requestID, "task-1", method)
+            wire.openRequests = .array([])
+            wire.onEvent?(cancel("task-1", method, reason: "timeout", seq: 1))
+            XCTAssertNil(model.pendingRequest)
+            XCTAssertEqual(model.withdrawnRequest?.message,
+                           method == "vault.code" ? "Request timed out. The bot carried on without it." : nil, method)
+            model.suspend()
+        }
+    }
+
+    /// Wording the contract does not name still says the card went. A cancel
+    /// with no reason at all could be an answer given elsewhere, so it stays silent.
+    func testUnknownReasonShowsTheGenericNote() async {
+        for (reason, message) in [("client_gone", "Request withdrawn."), (nil, nil)] as [(String?, String?)] {
+            let wire = BotFixtureWire()
+            wire.openRequests = .array([serverRequest("sudo", id: "sudo-1")])
+            let model = await blocked(on: wire)
+            wire.openRequests = .array([])
+            wire.onEvent?(cancel("sudo-1", "sudo", reason: reason, seq: 1))
+            XCTAssertNil(model.pendingRequest)
+            XCTAssertEqual(model.withdrawnRequest?.message, message, reason ?? "nil")
+            model.suspend()
+        }
+    }
+
+    func testTheNoteClearsOnTheNextAcceptedSendAndOnANewRequest() async {
+        let wire = BotFixtureWire()
+        let model = await approvalOnScreen(wire)
+        wire.onEvent?(cancel("srq-a", "approval", reason: "timeout", seq: 1))
+        XCTAssertEqual(model.withdrawnRequest?.message, "Approval timed out, so it didn't run.")
+        wire.onEvent?(serverRequest("sudo", id: "sudo-2"))
+        XCTAssertEqual(model.pendingRequest?.requestID, "sudo-2")
+        XCTAssertNil(model.withdrawnRequest)
+
+        // That one times out too, the bot settles, and the next accepted send clears the note.
+        wire.running = false
+        wire.onEvent?(cancel("sudo-2", "sudo", reason: "timeout", seq: 2))
+        XCTAssertEqual(model.withdrawnRequest?.message, "Request timed out. The bot carried on without it.")
+        await awaitSnapshot(model)
+        XCTAssertEqual(model.turn, .idle)
+        XCTAssertEqual(model.withdrawnRequest?.message, "Request timed out. The bot carried on without it.")
+        model.editDraft("try that again")
+        await model.send()
+        XCTAssertEqual(wire.calls.last?.0, "prompt.submit")
+        XCTAssertNil(model.withdrawnRequest)
+        model.suspend()
+    }
+
+    /// A snapshot that brings a new request takes the note's place too.
+    func testASnapshotWithANewApprovalClearsTheNote() async {
+        let wire = BotFixtureWire()
+        let model = await approvalOnScreen(wire)
+        wire.pendingApproval = BotFixtureWire.approval(id: "req-2", command: "curl | sh")
+        wire.onEvent?(cancel("srq-a", "approval", reason: "timeout", seq: 1))
+        XCTAssertEqual(model.withdrawnRequest?.message, "Approval timed out, so it didn't run.")
+        await awaitSnapshot(model)
+        XCTAssertEqual(model.pendingRequest?.requestID, "req-2")
+        XCTAssertNil(model.withdrawnRequest)
+        model.suspend()
+    }
+
+    /// A card withdrawn while the phone was locked, or while the socket was
+    /// down, leaves its note once the replay shows the cancel. A truncated
+    /// replay may have lost what followed, so it stays silent. Leaving the
+    /// connection drops a note: it never outlives the conversation's socket.
+    func testACancelWhileAwayIsShownAfterReconnect() async {
+        for (dropped, truncated) in [(false, false), (true, false), (false, true)] {
+            let wire = BotFixtureWire()
+            let model = await approvalOnScreen(wire)
+            if dropped { wire.onDisconnect?(BotFailure.transport) } else { model.suspend() }
+            XCTAssertNil(model.withdrawnRequest)
+            wire.replay = BotFixtureWire.replay(latest: 1, truncated: truncated,
+                                                events: [cancel("srq-a", "approval", reason: "timeout", seq: 1)])
+            await model.recover()
+            XCTAssertNil(model.pendingRequest)
+            XCTAssertEqual(model.withdrawnRequest?.message, truncated ? nil : "Approval timed out, so it didn't run.",
+                           "dropped: \(dropped), truncated: \(truncated)")
+            model.suspend()
+            XCTAssertNil(model.withdrawnRequest)
+        }
+        // A later request's cancel in the same replay means another card took the
+        // slot after this one (its unsequenced frame is not replayed): stay silent.
+        let wire = BotFixtureWire()
+        let model = await approvalOnScreen(wire)
+        model.suspend()
+        wire.replay = BotFixtureWire.replay(latest: 2, truncated: false,
+                                            events: [cancel("srq-a", "approval", reason: "timeout", seq: 1),
+                                                     cancel("srq-b", "approval", reason: "resolved", seq: 2)])
+        await model.recover()
+        XCTAssertNil(model.pendingRequest)
+        XCTAssertNil(model.withdrawnRequest)
         model.suspend()
     }
 }

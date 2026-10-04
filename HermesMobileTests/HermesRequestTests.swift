@@ -52,6 +52,9 @@ final class HermesRequestTests: XCTestCase {
             (.sessionActiveList, "session.active_list", [:]),
             (.promptSubmit(sessionID: "runtime", text: "hi"), "prompt.submit",
              ["session_id": .string("runtime"), "text": .string("hi"), "queued": .bool(true)]),
+            (.promptRewind(sessionID: "runtime", text: "hi", beforeRowID: 41), "prompt.submit",
+             ["session_id": .string("runtime"), "text": .string("hi"), "truncate_before_row_id": .number(41),
+              "confirm_truncate": .bool(true), "confirm_empty_truncate": .bool(true)]),
             (.sessionSteer(sessionID: "runtime", text: "hi"), "session.steer", ["session_id": .string("runtime"), "text": .string("hi")]),
             (.sessionRedirect(sessionID: "runtime", text: "hi"), "session.redirect", ["session_id": .string("runtime"), "text": .string("hi")]),
             (.sessionInterrupt(sessionID: "runtime"), "session.interrupt", ["session_id": .string("runtime")]),
@@ -150,7 +153,9 @@ final class HermesRequestTests: XCTestCase {
             (.setPlugin(name: "hermex-push", enabled: false), "POST",
              "https://hermes.example:9120/api/dashboard/agent-plugins/hermex-push/disable", .object([:]), json),
             (.restartGateway, "POST", "https://hermes.example:9120/api/gateway/restart", .object([:]), json),
-            (.pushPairing, "GET", "https://hermes.example:9120/api/plugins/hermex-push/pairing", nil, [:])
+            (.pushPairing, "GET", "https://hermes.example:9120/api/plugins/hermex-push/pairing", nil, [:]),
+            (.restartDashboard, "POST", "https://hermes.example:9120/api/plugins/hermex-push/restart", .object([:]), json),
+            (.pluginsHub, "GET", "https://hermes.example:9120/api/dashboard/plugins/hub", nil, [:])
         ]
         for (rest, method, url, body, headers) in cases {
             let request = try rest.request(base: base)

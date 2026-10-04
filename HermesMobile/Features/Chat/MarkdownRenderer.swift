@@ -426,6 +426,7 @@ private struct ChatMarkdownView: View {
         performanceSignposter.endInterval("Markdown Parse", signpost, "chars=\(content.count, privacy: .public)")
 
         return Markdown(parsedContent)
+            .environment(\.containsInlineMath, content.contains(InlineMathSource.marker))
             .markdownTheme(MarkdownUI.Theme.chat(colorScheme: colorScheme, isStreaming: isStreaming))
             .markdownTextStyle {
                 ForegroundColor(.primary)
@@ -1358,6 +1359,14 @@ private struct PlainMarkdownFallbackView: View {
     }
 }
 
+enum ChatMarkdownInlineStyle {
+    static let codeFontScale = 0.85
+
+    static func codeBackground(dark: Bool) -> SwiftUI.Color {
+        dark ? SwiftUI.Color(red: 0.08, green: 0.09, blue: 0.12) : SwiftUI.Color(.tertiarySystemGroupedBackground)
+    }
+}
+
 private extension MarkdownUI.Theme {
     static func chat(colorScheme: ColorScheme, isStreaming: Bool) -> MarkdownUI.Theme {
         MarkdownUI.Theme.gitHub
@@ -1367,8 +1376,7 @@ private extension MarkdownUI.Theme {
                 FontSize(16)
             }
             .paragraph { configuration in
-                configuration.label
-                    .responseSelectableText(configuration.content.renderPlainText().trimmingCharacters(in: .newlines), separator: "\n\n")
+                MathMarkdownLabel(content: configuration.content, label: configuration.label)
                     .fixedSize(horizontal: false, vertical: true)
                     .relativeLineSpacing(.em(0.25))
                     .markdownMargin(top: 0, bottom: 16)
@@ -1381,12 +1389,8 @@ private extension MarkdownUI.Theme {
             .heading6 { SelectableMarkdownHeading(configuration: $0, level: 6, colorScheme: colorScheme) }
             .code {
                 FontFamilyVariant(.monospaced)
-                FontSize(.em(0.85))
-                BackgroundColor(
-                    colorScheme == .dark
-                        ? SwiftUI.Color(red: 0.08, green: 0.09, blue: 0.12)
-                        : SwiftUI.Color(.tertiarySystemGroupedBackground)
-                )
+                FontSize(.em(ChatMarkdownInlineStyle.codeFontScale))
+                BackgroundColor(ChatMarkdownInlineStyle.codeBackground(dark: colorScheme == .dark))
             }
             .codeBlock { configuration in
                 MathFenceOrCodeBlock(
@@ -1408,8 +1412,9 @@ private extension MarkdownUI.Theme {
                     minWidth: ChatMarkdownTable.cellMinWidth,
                     maxWidth: ChatMarkdownTable.cellMaxWidth
                 ) {
-                    configuration.label
-                        .responseSelectableText(configuration.content.renderPlainText().trimmingCharacters(in: .newlines), separator: "\t", tableColumn: configuration.column)
+                    MathMarkdownLabel(content: configuration.content, label: configuration.label,
+                                      separator: "\t", tableColumn: configuration.column,
+                                      weight: configuration.row == 0 ? .semibold : .regular)
                         .markdownTextStyle {
                             if configuration.row == 0 {
                                 FontWeight(.semibold)
@@ -1563,8 +1568,9 @@ private struct SelectableMarkdownHeading: View {
         }
     }
     private var label: some View {
-        configuration.label
-            .responseSelectableText(configuration.content.renderPlainText().trimmingCharacters(in: .newlines), separator: "\n\n")
+        MathMarkdownLabel(content: configuration.content, label: configuration.label,
+                          fontScale: fontScale, weight: .semibold, tintImages: level == 6)
+            .foregroundStyle(level == 6 ? tertiaryColor : SwiftUI.Color.primary)
             .relativeLineSpacing(.em(0.125))
             .markdownMargin(top: 24, bottom: 16)
             .markdownTextStyle {

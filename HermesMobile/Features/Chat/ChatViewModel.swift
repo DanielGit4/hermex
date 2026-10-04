@@ -153,6 +153,16 @@ struct ApprovalPromptState: Equatable, Identifiable {
     var patternKeys: [String] {
         pending.displayPatternKeys
     }
+
+    /// What Allow session and Always allow cover on this webui server,
+    /// naming only the choices `ApprovalChoicePolicy` puts on the card.
+    var scopeLine: AttributedString? {
+        let choices = ApprovalChoicePolicy.choices(for: pending)
+        return ApprovalScope.line(
+            keys: patternKeys, description: pending.description, command: pending.command, toolName: nil,
+            host: .webui(offersSession: choices.contains(.session), offersAlways: choices.contains(.always))
+        )
+    }
 }
 
 struct ClarificationPromptState: Equatable, Identifiable {
@@ -236,6 +246,9 @@ final class ChatViewModel {
     @ObservationIgnored var windowsTranscriptRows = ChatTranscriptDisplaySettings.windowsTranscriptRows
     @ObservationIgnored private var turnFoldsMemo: (key: TurnDerivationKey, folds: TranscriptTurnFolds)?
     @ObservationIgnored private var terminalReplyRenderIDsMemo: (key: TurnDerivationKey, renderIDs: Set<String>)?
+    /// The message ↑ brings back into an empty composer. Computed on demand:
+    /// the composer asks only when ↑ is pressed.
+    var lastSentText: String? { ComposerRecall.lastSentText(in: messages) }
     /// Memoized transcript mapping, recomputed once whenever `messages` or
     /// `messagesOffset` changes. Views read this single cached value instead of
     /// re-running the full classification pass on every body evaluation.
@@ -259,6 +272,9 @@ final class ChatViewModel {
     /// Why the transcript fell back to the cache, for the offline banner; nil when live.
     private(set) var cachedDataReason: String?
     var activeStreamID: String? { streamCoordinator.activeStreamID }
+    var successfulResponseCompletion: ChatStreamCoordinator.SuccessfulResponseCompletion? {
+        streamCoordinator.successfulResponseCompletion
+    }
     var activeRunStartedAt: Date? { streamCoordinator.activeRunStartedAt }
     var latestRunEnding: ChatRunEnding? { streamCoordinator.latestRunEnding }
     /// How the latest run ended, keyed to the turn it answered. Drives the
@@ -277,9 +293,17 @@ final class ChatViewModel {
     var liveTokensPerSecond: Double? { streamCoordinator.liveTokensPerSecond }
     private(set) var errorMessage: String?
     private(set) var sendErrorMessage: String? {
-        didSet { sendErrorIsFromStreamRecovery = false }
+        didSet {
+            sendErrorIsFromStreamRecovery = false
+            // Slash commands re-set the same text after a failed send; keep the kind then.
+            if sendErrorMessage != oldValue, sendErrorRuntimeStale != nil { sendErrorRuntimeStale = nil }
+        }
     }
     @ObservationIgnored private var sendErrorIsFromStreamRecovery = false
+    /// Set when the server refused a send because Hermes was updated under the
+    /// running WebUI (#955), so the composer can offer Copy fix prompt. A
+    /// different `sendErrorMessage` clears it.
+    private(set) var sendErrorRuntimeStale: AgentRuntimeStale?
     private(set) var messageActionErrorMessage: String?
     private(set) var cacheErrorMessage: String?
 
@@ -694,7 +718,7 @@ final class ChatViewModel {
     // `activeListeningUtteranceID`: a stale finish callback from a superseded player
     // must not clear the new listen state or deactivate the session.
     private var activeListenPlayerID: ObjectIdentifier?
-    // In-flight `POST /api/tts` fetch for the Listen action. Cancelled by
+    // In-flight settings/audio fetch for the Listen action. Cancelled by
     // `stopListening()`; exposed (read-only) so tests can await the async
     // server-first path deterministically.
     @ObservationIgnored private(set) var listenPreparationTask: Task<Void, Never>?
@@ -780,6 +804,7 @@ final class ChatViewModel {
         listenRemoteControlCenter: (any ListenRemoteControlControlling)? = nil,
         serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
         draftAttachmentStore: any ChatDraftAttachmentStoring = ChatDraftAttachmentStore.shared,
+        draftStore: ChatDraftStore? = nil,
         userDefaults: UserDefaults = .standard,
         followSessionProfile: (@Sendable (String) async -> Bool)? = nil
     ) {
@@ -820,7 +845,8 @@ final class ChatViewModel {
         )
         self.attachmentCoordinator = ChatAttachmentCoordinator(
             client: resolvedClient,
-            draftAttachmentStore: draftAttachmentStore
+            draftAttachmentStore: draftAttachmentStore,
+            draftStore: draftStore
         )
         self.btwStreamClient = btwStreamClient ?? SSEClient()
         self.liveActivityManager = resolvedLiveActivityManager
@@ -1661,6 +1687,15 @@ final class ChatViewModel {
 
     func clearPendingAttachments() {
         attachmentCoordinator.clearPendingAttachments()
+    }
+
+    func protectDraftAttachments(for key: ChatDraftKey, restoring records: [ChatDraftAttachment] = []) {
+        attachmentCoordinator.protectDraft(key)
+        attachmentCoordinator.protectRestoringAttachments(records)
+    }
+
+    func deleteDraftAttachmentCopy(named file: String, attachmentID: UUID) async {
+        await attachmentCoordinator.deleteDraftCopy(named: file, attachmentID: attachmentID)
     }
 
     func removePendingAttachment(id: UUID) {
@@ -2788,7 +2823,7 @@ final class ChatViewModel {
         if didStart {
             for attachment in attachmentPreparation.attachments {
                 guard let fileName = attachment.draftFileName else { continue }
-                await attachmentCoordinator.deleteDraftCopy(named: fileName)
+                await attachmentCoordinator.deleteDraftCopy(named: fileName, attachmentID: attachment.id)
             }
         }
         return didStart
@@ -2927,6 +2962,9 @@ final class ChatViewModel {
         cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
 
         do {
+            #if DEBUG
+            if let failure = APIError.takeLaunchArgumentStaleRuntimeFailure() { throw failure }
+            #endif
             let explicitModelPick = explicitModelPickForChatStart()
             let sentAt = Date()
             let response = try await client.startChat(
@@ -2975,6 +3013,7 @@ final class ChatViewModel {
             }
             lastError = error
             sendErrorMessage = error.localizedDescription
+            sendErrorRuntimeStale = (error as? APIError)?.agentRuntimeStale
             rollbackOptimisticMessage(id: localMessageID)
             cacheCurrentMessages(sessionID: sessionID, modelContext: modelContext)
             restorePendingAttachments(attachmentsToRestoreOnFailure)
@@ -3256,8 +3295,9 @@ final class ChatViewModel {
             // Delete the durable copies of the files that rode along, as
             // `sendMessage` does.
             takeSteeredAttachments(steeredAttachments)
-            for fileName in steeredAttachments.compactMap(\.draftFileName) {
-                await attachmentCoordinator.deleteDraftCopy(named: fileName)
+            for attachment in steeredAttachments {
+                guard let fileName = attachment.draftFileName else { continue }
+                await attachmentCoordinator.deleteDraftCopy(named: fileName, attachmentID: attachment.id)
             }
             return .executed(message: nil)
         case .refused(let transportError):
@@ -4853,14 +4893,24 @@ final class ChatViewModel {
                 // would be dropped anyway.
                 return
             }
+            // Fetch for every Listen using this view's client; preferences never
+            // outlive the request or cross server boundaries.
+            let settings = try? await client.settings()
+            guard !Task.isCancelled, self?.activeListenRequestID == requestID else { return }
+            let engine = TTSEngine(savedValue: settings?.ttsEngine)
             let audioData: Data?
-            do {
-                audioData = try await client.synthesizeSpeech(
-                    text: listenText,
-                    voice: ServerTTSPolicy.defaultVoice
-                )
-            } catch {
+            if engine == .browser {
                 audioData = nil
+            } else {
+                let savedVoice = settings?.ttsVoice?.trimmingCharacters(in: .whitespacesAndNewlines)
+                let voice = engine == .edge
+                    ? (savedVoice?.isEmpty == false ? savedVoice : ServerTTSPolicy.defaultVoice)
+                    : nil
+                audioData = try? await client.synthesizeSpeech(
+                    text: listenText,
+                    voice: voice,
+                    engine: engine
+                )
             }
 
             guard let self, !Task.isCancelled, self.activeListenRequestID == requestID else {
@@ -7264,8 +7314,8 @@ struct SpeechTextNormalizer {
     }
 }
 
-/// Routing policy for the "Listen" action (#15): prefer the server's neural TTS
-/// (`POST /api/tts`, edge engine — no API key needed) and fall back to the
+/// Routing policy for the "Listen" action: honor saved server preferences and
+/// fall back to the
 /// on-device synthesizer when the server can't serve the request.
 enum ServerTTSPolicy {
     /// Server-enforced request cap (`400 text too long` above it); longer text

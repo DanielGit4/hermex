@@ -8,6 +8,16 @@ private let liveActivityReconcilerLogger = Logger(
     category: "LiveActivityReconciler"
 )
 
+/// Taps dismiss only the exact finished card, including a relay-ended card whose
+/// last content still says running. No session-based fallback is safe here.
+enum AgentLiveActivityTapPolicy {
+    static func shouldDismiss(requestedID: String?, activityID: String,
+                              isFinal: Bool, activityState: ActivityState) -> Bool {
+        guard let requestedID, !requestedID.isEmpty, requestedID == activityID else { return false }
+        return isFinal || activityState == .ended
+    }
+}
+
 enum AgentLiveActivityEvent: Equatable {
     case sessionTitle(String)
     case token(String)
@@ -528,6 +538,24 @@ final class AgentLiveActivityManager: AgentLiveActivityManaging {
         _ = nextLifecycleGeneration()
         _ = nextUpdateGeneration()
         return true
+    }
+
+    /// Remove the tapped card before waiting for relay cleanup. Activity identity and
+    /// lifecycle are checked again after the await so a newer run keeps its ownership.
+    func dismissFinishedActivity(from url: URL) async {
+        guard let requestedID = AgentRunTapTarget.activityID(from: url),
+              let tapped = Activity<AgentRunActivityAttributes>.activities.first(where: {
+                  AgentLiveActivityTapPolicy.shouldDismiss(
+                    requestedID: requestedID, activityID: $0.id,
+                    isFinal: $0.content.state.isFinal, activityState: $0.activityState
+                  )
+              }) else { return }
+        let lifecycle = lifecycleGeneration
+        await tapped.end(nil, dismissalPolicy: .immediate)
+        if lifecycleGeneration == lifecycle, activity?.id == tapped.id {
+            reset()
+        }
+        await retirePush(tapped)
     }
 
     @discardableResult

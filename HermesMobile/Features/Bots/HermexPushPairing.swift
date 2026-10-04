@@ -14,6 +14,33 @@ enum HermexPushPlugin {
     /// It is not offered as a choice: a host that already names its own relay keeps it,
     /// and self-hosting stays a server-side setting rather than a field on the phone.
     static let defaultRelayURL = URL(string: "https://hermex-relay.hermex-relay.workers.dev")!
+    /// The newest plugin this build knows (#851). A host that has anything older loaded is
+    /// offered an update in Settings → Notifications. Bump it in the app release that
+    /// follows a plugin release (TESTFLIGHT.md's release gates).
+    static let newestVersion = HermexPushPluginVersion("0.4.0")!
+    /// The first plugin with `POST /api/plugins/hermex-push/restart` (#934). Settings offers
+    /// "Restart Hermes…" only while a plugin this new is loaded: an older one has no route to
+    /// call, so its card keeps asking for a restart on the host.
+    static let restartVersion = HermexPushPluginVersion("0.4.0")!
+
+    /// Whether the dashboard running `loaded` can be restarted from the phone.
+    static func canRestart(_ loaded: HermexPushPluginVersion?) -> Bool {
+        loaded.map { $0 >= restartVersion } ?? false
+    }
+
+    /// `plugin_version` from the pairing route: the code the dashboard process has loaded,
+    /// which lags the files on disk until that process restarts. Nil for a plugin older than
+    /// 0.2.0, which leaves it out, and for anything unparseable; both count as older than
+    /// every known version. Tolerant, unlike the keys beside it.
+    static func loadedVersion(_ body: BotJSON) -> HermexPushPluginVersion? {
+        body["plugin_version"].text.flatMap(HermexPushPluginVersion.init)
+    }
+
+    /// The version on the host's disk: `plugin.yaml`'s, as `GET /api/dashboard/plugins/hub`
+    /// lists it per plugin. Nil when the plugin is not listed or its version doesn't parse.
+    static func installedVersion(hub body: BotJSON) -> HermexPushPluginVersion? {
+        body["plugins"].list?.first { $0["name"].text == name }?["version"].text.flatMap(HermexPushPluginVersion.init)
+    }
 
     /// Decodes `GET /api/plugins/hermex-push/pairing`. Fields the plugin may add later
     /// are ignored, but a key the relay could not use fails instead of pairing a phone
@@ -53,8 +80,12 @@ enum HermexPushPlugin {
 /// to retry.
 enum HermexPushFailure: Error, Equatable, LocalizedError {
     case unusablePairing, pairingUnavailable, noConnection
+    /// A plugin update turned hermex-push off and could not turn it back on.
+    case pluginLeftOff
     var errorDescription: String? {
         switch self {
+        case .pluginLeftOff:
+            return String(localized: "Hermes still has the plugin turned off, so notifications stop when Hermes restarts. Try again to turn it back on.")
         case .unusablePairing:
             return String(localized: "This Hermes host returned pairing keys Hermex cannot use. Update the hermex-push plugin.")
         case .pairingUnavailable:
@@ -62,5 +93,27 @@ enum HermexPushFailure: Error, Equatable, LocalizedError {
         case .noConnection:
             return String(localized: "Connect to this Hermes host first.")
         }
+    }
+}
+
+/// A hermex-push version, compared number by number so 0.10.0 is newer than 0.9.0, and
+/// 0.3 equals 0.3.0. Only dot-separated whole numbers parse.
+struct HermexPushPluginVersion: Comparable, Sendable, CustomStringConvertible {
+    let description: String
+    private let numbers: [Int]
+
+    init?(_ text: String) {
+        let numbers = text.split(separator: ".", omittingEmptySubsequences: false)
+            .map { part in part.allSatisfy { $0.isASCII && $0.isNumber } ? Int(part) : nil }
+        guard !numbers.contains(nil) else { return nil }
+        self.numbers = numbers.compactMap { $0 }
+        description = text
+    }
+
+    static func == (lhs: Self, rhs: Self) -> Bool { lhs.padded(to: rhs) == rhs.padded(to: lhs) }
+    static func < (lhs: Self, rhs: Self) -> Bool { lhs.padded(to: rhs).lexicographicallyPrecedes(rhs.padded(to: lhs)) }
+
+    private func padded(to other: Self) -> [Int] {
+        numbers + Array(repeating: 0, count: max(0, other.numbers.count - numbers.count))
     }
 }

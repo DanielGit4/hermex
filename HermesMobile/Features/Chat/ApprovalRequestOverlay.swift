@@ -2,7 +2,8 @@ import SwiftUI
 import UIKit
 
 /// The Sessions approval card. Offers only the choices the host will honour
-/// (`ApprovalChoicePolicy`) and keeps the pattern keys under "Details".
+/// (`ApprovalChoicePolicy`), says what those choices cover (`ApprovalScope`)
+/// and keeps the pattern keys under "Details".
 struct ApprovalRequestOverlay: View {
     let prompt: ApprovalPromptState
     let isResponding: Bool
@@ -18,25 +19,36 @@ struct ApprovalRequestOverlay: View {
             Color.black.opacity(0.38)
                 .ignoresSafeArea()
 
-            VStack(alignment: .leading, spacing: 14) {
-                header
-                details
-                actions
+            // Scrolls only when the card is taller than the screen (large text,
+            // landscape), so every button stays reachable.
+            ViewThatFits(in: .vertical) {
+                card
+                ScrollView {
+                    card.padding(.vertical, 18)
+                }
             }
-            .padding(16)
-            .frame(maxWidth: 520, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(.primary.opacity(0.10), lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.22), radius: 18, x: 0, y: 12)
-            .padding(.horizontal, 18)
         }
         .accessibilityElement(children: .contain)
         .onChange(of: prompt.id) {
             isShowingDetails = false
         }
+    }
+
+    private var card: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            header
+            details
+            actions
+        }
+        .padding(16)
+        .frame(maxWidth: 520, alignment: .leading)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(.primary.opacity(0.10), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.22), radius: 18, x: 0, y: 12)
+        .padding(.horizontal, 18)
     }
 
     private var header: some View {
@@ -75,6 +87,13 @@ struct ApprovalRequestOverlay: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 8))
+            }
+
+            if let scope = prompt.scopeLine {
+                Text(scope)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             if !prompt.patternKeys.isEmpty {
@@ -179,7 +198,7 @@ struct ApprovalRequestOverlay: View {
 
     @ViewBuilder
     private func approvalButton(
-        _ title: String,
+        _ title: LocalizedStringKey,
         systemImage: String,
         choice: ApprovalChoice,
         prominent: Bool,

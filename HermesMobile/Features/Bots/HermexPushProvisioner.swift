@@ -24,13 +24,66 @@ import UserNotifications
     }
 
     /// A step that did not finish, in the step's own words, so the user knows what to retry.
-    struct Failure: Equatable { let title: String; let message: String }
+    struct Failure: Equatable {
+        let title: String
+        let message: String
+        var remedy: Remedy = .none
+
+        /// What the section offers beside a failure (#851). `updatePlugin`: keys an old
+        /// plugin sent, which updating it fixes. `retryUpdate`: the update itself stopped,
+        /// so the plugin card shows it instead of the red row. `retryRestart`: the restart
+        /// stopped before it ran (#934), so the card offers it again the same way.
+        enum Remedy { case none, updatePlugin, retryUpdate, retryRestart }
+    }
+
+    /// The plugin update's host steps (#851), in order, and how the card names them.
+    enum PluginUpdateStep: CaseIterable {
+        case reinstall, restart, check
+        var progress: String {
+            switch self {
+            case .reinstall: return String(localized: "Step 1 of 3 · Reinstalling the plugin")
+            case .restart: return String(localized: "Step 2 of 3 · Restarting the gateway")
+            case .check: return String(localized: "Step 3 of 3 · Checking the plugin version")
+            }
+        }
+        var failureTitle: String {
+            switch self {
+            case .reinstall: return String(localized: "Couldn’t reinstall the plugin")
+            case .restart: return String(localized: "Couldn’t restart the gateway")
+            case .check: return String(localized: "Couldn’t check the plugin version")
+            }
+        }
+    }
+
+    /// Where this host's hermex-push stands against `HermexPushPlugin.newestVersion`, as the
+    /// host last answered (#851). Kept in memory only: the section asks again each time it
+    /// appears, so "restart needed" never rests on what this iPhone remembers.
+    enum PluginUpdate: Equatable {
+        /// Behind the newest; `loaded` is nil for a plugin too old to report its version.
+        case available(loaded: HermexPushPluginVersion?)
+        /// The newest is on disk, but the dashboard runs the old code, `loaded`, until it
+        /// restarts. With 0.4.0 or newer loaded, the phone can restart it (#934).
+        case restartNeeded(loaded: HermexPushPluginVersion?)
+        /// Hermes didn't answer in time after a restart from the phone (#934). "Check again"
+        /// reads once; a restart is offered again only once the host answers.
+        case restartTimedOut
+        /// An update or check just brought it to the newest. Shown until Settings closes.
+        case upToDate(HermexPushPluginVersion)
+        /// The update or the restart changed the host, but reading its version failed; the
+        /// card offers the read again, never a second reinstall and restart.
+        case checkFailed(Failure)
+    }
+
+    /// The card at the top of the section: the plugin's standing, the update's or the
+    /// restart's progress, or where either stopped.
+    enum PluginCard: Equatable { case status(PluginUpdate), updating(PluginUpdateStep), restarting, failed(Failure) }
 
     /// `checkingPermission` covers the iOS prompt at the start of setup: it blocks re-entry
     /// but names no host step, since none has run yet. `tested` holds the relay's answer to
     /// the Settings test notification until the next action replaces it.
     enum Phase: Equatable {
         case idle, checkingPermission, enabling(Step), disabling, savingPreferences, refreshing, sendingTest
+        case updatingPlugin(PluginUpdateStep), checkingPlugin, restartingHermes
         case tested(PushRelayTestOutcome)
         case failed(Failure)
     }
@@ -40,10 +93,16 @@ import UserNotifications
     private(set) var phase: Phase = .idle
     /// Steps that finished in the current enable run, so the view can show what is done.
     private(set) var completed: Set<Step> = []
+    /// Whether setup, rather than the plugin update or its check, made the last host run,
+    /// so a failure lists setup's steps only when setup is what stopped.
+    private var setupRanLast = false
     /// iOS notification permission for Hermex is denied, so nothing this server sends can
     /// show. Raised when setup finds it (before any host call) and, on a paired server,
     /// whenever the section checks; cleared once the user allows notifications again.
     private(set) var notificationsOff = false
+    private(set) var pluginUpdate: PluginUpdate?
+    /// Deliberate plugin actions supersede passive reads, even after the action finishes.
+    private var pluginCheckGeneration = 0
 
     /// The saved connection this host is reached with. The screen keeps it current so a
     /// password edit made just above this section is the one provisioning signs in with.
@@ -60,6 +119,12 @@ import UserNotifications
     private let testSender: @MainActor (PushPairing) async -> PushRelayTestOutcome
     /// Retries while the host is coming back from its restart; injected so tests never sleep.
     private let retryDelays: [Duration]
+    /// The wait for Hermes after a restart from the phone (#934): about 60 s in all, since a
+    /// whole dashboard starts, not just the gateway.
+    private let restartDelays: [Duration]
+    /// The newest plugin this build knows, injectable so tests can load a plugin that has the
+    /// restart route and is still behind, which this build's own constants never pair.
+    private let newestPlugin: HermexPushPluginVersion
     private let sleep: @Sendable (Duration) async throws -> Void
 
     /// The main-actor collaborators are built here rather than in default arguments,
@@ -71,6 +136,9 @@ import UserNotifications
          connectionID: (@MainActor () -> UUID?)? = nil,
          testSender: (@MainActor (PushPairing) async -> PushRelayTestOutcome)? = nil,
          retryDelays: [Duration] = [.seconds(2), .seconds(3), .seconds(5), .seconds(5), .seconds(5), .seconds(10)],
+         restartDelays: [Duration] = [.seconds(2), .seconds(2), .seconds(3), .seconds(3), .seconds(5), .seconds(5),
+                                      .seconds(10), .seconds(10), .seconds(10), .seconds(10)],
+         newestPlugin: HermexPushPluginVersion = HermexPushPlugin.newestVersion,
          sleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
         self.server = server
         self.connection = connection
@@ -80,23 +148,36 @@ import UserNotifications
         self.connectionID = connectionID ?? { (try? BotConnectionStore().load(server: server))?.id }
         self.testSender = testSender ?? { await PushRelayClient().sendTestNotification(pairing: $0) }
         self.retryDelays = retryDelays
+        self.restartDelays = restartDelays
+        self.newestPlugin = newestPlugin
         self.sleep = sleep
         pairing = self.registrar?.pairing(for: server)
     }
 
     var isWorking: Bool {
         switch phase {
-        case .checkingPermission, .enabling, .disabling, .savingPreferences, .refreshing, .sendingTest: return true
+        case .checkingPermission, .enabling, .disabling, .savingPreferences, .refreshing, .sendingTest,
+             .updatingPlugin, .checkingPlugin, .restartingHermes: return true
         case .idle, .tested, .failed: return false
         }
     }
 
-    /// A step's failure, or the test notification's. Both show in the same red row.
+    /// A step's failure, or the test notification's. Both show in the same red row, except
+    /// the plugin update's own, which its card shows (`pluginCard`).
     var failure: Failure? {
         switch phase {
         case .failed(let failure): return failure
         case .tested(let outcome): return Self.testFailure(for: outcome)
         default: return nil
+        }
+    }
+
+    var pluginCard: PluginCard? {
+        switch phase {
+        case .updatingPlugin(let step): return .updating(step)
+        case .restartingHermes: return .restarting
+        case .failed(let failure) where failure.remedy == .retryUpdate || failure.remedy == .retryRestart: return .failed(failure)
+        default: return pluginUpdate.map(PluginCard.status)
         }
     }
 
@@ -110,14 +191,17 @@ import UserNotifications
 
     func isRunning(_ step: Step) -> Bool { phase == .enabling(step) }
 
-    /// Whether the step list belongs on screen: while a host step runs, after a failure, and
-    /// after a run that changed the host before stopping (permission revoked mid-run), so
+    /// Whether the step list belongs on screen: while a host step runs, after setup fails,
+    /// and after a run that changed the host before stopping (permission revoked mid-run), so
     /// those changes stay visible. Hidden while iOS asks for permission: nothing ran yet.
+    /// The plugin update's failures leave it hidden; its card and the red row name them.
     var showsSteps: Bool {
         switch phase {
-        case .enabling, .failed: return true
+        case .enabling: return true
+        case .failed: return setupRanLast
         case .checkingPermission: return false
-        case .idle, .disabling, .savingPreferences, .refreshing, .sendingTest, .tested: return !completed.isEmpty
+        case .idle, .disabling, .savingPreferences, .refreshing, .sendingTest, .tested,
+             .updatingPlugin, .checkingPlugin, .restartingHermes: return !completed.isEmpty
         }
     }
 
@@ -129,6 +213,8 @@ import UserNotifications
         guard !Task.isCancelled else { return }
         connection = try? BotConnectionStore().load(server: server)
         pairing = registrar?.pairing(for: server)
+        // A removed connection leaves no host to update.
+        if connection == nil { pluginUpdate = nil }
         phase = .idle
         if let pairing, pairing.preferencesNeedSync == true {
             await updatePreferences(pairing.effectivePreferences)
@@ -153,12 +239,14 @@ import UserNotifications
 
     /// The view cancels only its presentation of a preference write. The registrar
     /// owns completing the durable transaction after this screen goes away. A test result
-    /// is cleared too; a test still in flight keeps the phase, so it stays one request.
+    /// and a finished plugin update are cleared too; a test still in flight keeps the
+    /// phase, so it stays one request.
     func leaveSettings() {
         switch phase {
         case .savingPreferences, .refreshing, .tested: phase = .idle
         default: break
         }
+        if case .upToDate = pluginUpdate { pluginUpdate = nil }
     }
 
     /// Settings' end-to-end check: one `reply` through this server's relay, to Apple, and
@@ -192,7 +280,8 @@ import UserNotifications
         case .rejected(let status, _):
             message = String(localized: "The relay couldn’t deliver (HTTP \(status)).")
         }
-        return Failure(title: String(localized: "Test notification failed"), message: message)
+        return Failure(title: String(localized: "Test notification failed"), message: message,
+                       remedy: outcome == .unusablePairing ? .updatePlugin : .none)
     }
 
     /// The whole setup. A host that already answers the pairing route has its relay set
@@ -204,6 +293,7 @@ import UserNotifications
     /// could not show what it sends.
     func enable() async {
         guard !isWorking else { return }
+        setupRanLast = true
         guard let connection else { return fail(Step.relayURL.title, HermexPushFailure.noConnection) }
         completed = []
         phase = .checkingPermission
@@ -288,8 +378,170 @@ import UserNotifications
             step = String(localized: "Remove this iPhone from the relay")
             try await registrar?.disable(for: server)
             pairing = registrar?.pairing(for: server)
+            // Its install enables the plugin again, so the update goes with the pairing.
+            pluginUpdate = nil
             phase = .idle
         } catch { fail(step, error) }
+    }
+
+    /// The section's one passive read (#851), each time it appears on a paired server: the
+    /// pairing route's `plugin_version`, then the hub only when that is behind. Reads alone,
+    /// so no confirmation; a host that doesn't answer leaves the card as it was.
+    func checkPlugin() async {
+        guard pairing != nil, let connection, !isUpdatingPlugin else { return }
+        let generation = pluginCheckGeneration
+        guard let standing = try? await pluginStanding(dashboard(connection)), !Task.isCancelled,
+              pairing != nil, !isUpdatingPlugin, generation == pluginCheckGeneration else { return }
+        // A plugin already on the newest needs no card; only an update run says so.
+        if case .upToDate = standing { pluginUpdate = nil } else { pluginUpdate = standing }
+    }
+
+    /// "Check again" once the host has been restarted, after a failed read, or after a
+    /// restart Hermes didn't come back from: one read, whose answer replaces the card. A
+    /// failure goes to the red row and leaves the card standing, except on a card that is
+    /// itself a failed read, which takes the newer failure, and on "Hermes didn't come back":
+    /// a host that still doesn't answer leaves it as it is, and one that answers with an
+    /// error is a failed read.
+    func checkPluginAgain() async {
+        guard !isWorking, let connection else { return }
+        pluginCheckGeneration &+= 1
+        setupRanLast = false
+        phase = .checkingPlugin
+        do {
+            pluginUpdate = try await pluginStanding(dashboard(connection))
+        } catch {
+            switch pluginUpdate {
+            case .restartTimedOut? where Self.isUnreachable(error): break
+            case .checkFailed?, .restartTimedOut?: pluginUpdate = .checkFailed(Self.checkFailure(error))
+            default: return fail(PluginUpdateStep.check.failureTitle, error)
+            }
+        }
+        phase = .idle
+    }
+
+    /// Settings' plugin update (#851), from a confirmed tap only: turn hermex-push off,
+    /// reinstall it over itself (cloned again from `main`, which turns it back on), restart
+    /// the gateway, then read what the host has loaded. Current Hermes asks at a terminal
+    /// before it replaces an enabled plugin that declares Python packages, and refuses the
+    /// dashboard's reinstall; a disabled one skips that question, and enabling it runs
+    /// Hermes's own dependency admission. The keys stay in `plugin-data`, so a paired phone
+    /// stays paired; an update started from a pairing failure ends here too, since pairing
+    /// waits for its own tap.
+    /// The dashboard that serves the pairing route and runs Bot turns loads plugins only
+    /// when it starts, so "restart needed" is the usual end. Only a plugin that is already
+    /// 0.4.0 or newer can then restart it from the phone (`restartHermes`).
+    func updatePlugin() async {
+        guard !isWorking else { return }
+        pluginCheckGeneration &+= 1
+        setupRanLast = false
+        guard let connection else {
+            phase = .failed(Failure(title: PluginUpdateStep.reinstall.failureTitle,
+                                    message: Self.message(for: HermexPushFailure.noConnection), remedy: .retryUpdate))
+            return
+        }
+        completed = []
+        var step = PluginUpdateStep.reinstall
+        phase = .updatingPlugin(step)
+        let client = dashboard(connection)
+        do { try await client.signIn() } catch { return failSignIn(error, remedy: .retryUpdate) }
+        do {
+            var turnedOff = false
+            do {
+                try await client.setPlugin(HermexPushPlugin.name, enabled: false)
+                turnedOff = true
+                try await client.installPlugin(identifier: HermexPushPlugin.installIdentifier)
+            } catch {
+                // Turning a plugin off only edits the host's config, so the running gateway keeps
+                // it; turning it back on keeps the next restart from dropping push. A disable that
+                // failed may still have landed, so it is undone too; enabling an enabled plugin is a
+                // no-op. Only a confirmed disable is reported as left off.
+                let failure = error
+                do { try await client.setPlugin(HermexPushPlugin.name, enabled: true) } catch {
+                    if turnedOff { throw HermexPushFailure.pluginLeftOff }
+                    throw failure
+                }
+                throw failure
+            }
+            step = .restart
+            phase = .updatingPlugin(step)
+            try await client.restartGateway()
+            step = .check
+            phase = .updatingPlugin(step)
+            pluginUpdate = try await afterRestart { try await self.pluginStanding(client) }
+            phase = .idle
+        } catch where step == .check {
+            // The host already took the reinstall and the restart; only the read is left to retry.
+            pluginUpdate = .checkFailed(Self.checkFailure(error))
+            phase = .idle
+        } catch {
+            phase = .failed(Failure(title: step.failureTitle, message: Self.message(for: error), remedy: .retryUpdate))
+        }
+    }
+
+    /// "Restart Hermes…" (#934), from a confirmed tap on a host whose loaded plugin has the
+    /// restart route: hermex-push answers 202 and re-execs the dashboard about a second later.
+    /// A connection dropped on that request counts as the restart. Then the public `/api/status`
+    /// is probed on `restartDelays`, and whenever it answers the pairing route is read, until
+    /// the newest plugin is loaded. The old process can still answer just after the 202, so an
+    /// answer with the old plugin keeps waiting. When the schedule runs out the last answer
+    /// stands: the old plugin, offered the restart again; a host that answers but whose read
+    /// fails (a new plugin that didn't load leaves its routes unmounted), a failed read; or
+    /// silence, "Hermes didn't come back". Like the update, the run outlives Settings.
+    func restartHermes() async {
+        guard !isWorking, let connection, case .restartNeeded(let loaded)? = pluginUpdate,
+              HermexPushPlugin.canRestart(loaded) else { return }
+        pluginCheckGeneration &+= 1
+        setupRanLast = false
+        completed = []
+        phase = .restartingHermes
+        let client = dashboard(connection)
+        do { try await client.signIn() } catch { return failSignIn(error, remedy: .retryRestart) }
+        do { try await client.restartHermes() } catch BotFailure.transport, is URLError {
+            // The host can go down before its answer arrives; that is the restart.
+        } catch {
+            phase = .failed(Failure(title: String(localized: "Couldn’t restart Hermes"), message: Self.message(for: error),
+                                    remedy: .retryRestart))
+            return
+        }
+        var answer: Result<PluginUpdate, Error>?
+        for delay in restartDelays {
+            do { try await sleep(delay) } catch { break }
+            answer = nil
+            guard await client.answersStatus() else { continue }
+            do { answer = .success(try await pluginStanding(client)) } catch where !Self.isUnreachable(error) {
+                answer = .failure(error)
+            } catch {}
+            if case .success(.upToDate)? = answer { break }
+        }
+        switch answer {
+        case .success(let standing)?: pluginUpdate = standing
+        case .failure(let error)?: pluginUpdate = .checkFailed(Self.checkFailure(error))
+        case nil: pluginUpdate = .restartTimedOut
+        }
+        phase = .idle
+    }
+
+    private static func checkFailure(_ error: Error) -> Failure {
+        Failure(title: PluginUpdateStep.check.failureTitle, message: message(for: error))
+    }
+
+    private var isUpdatingPlugin: Bool {
+        switch phase {
+        case .updatingPlugin, .checkingPlugin, .restartingHermes: return true
+        default: return false
+        }
+    }
+
+    /// Where the host's plugin stands. The hub is read only for a loaded plugin that is
+    /// behind: its on-disk version tells a copy waiting for a restart from one that still
+    /// needs updating. A host without the hub, or one that fails it, reads as the latter.
+    private func pluginStanding(_ client: BotDashboardClient) async throws -> PluginUpdate {
+        let loaded = try await client.loadedPluginVersion()
+        if let loaded, loaded >= newestPlugin { return .upToDate(loaded) }
+        if let installed = try? await client.installedPluginVersion(), installed >= newestPlugin {
+            return .restartNeeded(loaded: loaded)
+        }
+        return .available(loaded: loaded)
     }
 
     /// Clears the notifications-off state once the user has allowed notifications in iOS
@@ -337,6 +589,7 @@ import UserNotifications
     private func abandon() async {
         await registrar?.forget(for: server)
         pairing = nil
+        pluginUpdate = nil
         phase = .idle
     }
 
@@ -344,9 +597,14 @@ import UserNotifications
     /// mounts it once the host has reloaded, so a missing route, a relay address the
     /// plugin has not read yet, and a refused connection are all retried.
     private func pairAfterRestart(_ client: BotDashboardClient) async throws -> PushPairing {
+        try await afterRestart { try await client.pairing() }
+    }
+
+    /// Runs `read` until the host answers it or the retry schedule runs out.
+    private func afterRestart<T>(_ read: () async throws -> T) async throws -> T {
         var delays = retryDelays.makeIterator()
         while true {
-            do { return try await client.pairing() } catch {
+            do { return try await read() } catch {
                 guard Self.isRestarting(error) else { throw error }
                 guard let delay = delays.next() else { throw HermexPushFailure.pairingUnavailable }
                 try await sleep(delay)
@@ -354,10 +612,19 @@ import UserNotifications
         }
     }
 
+    /// A host coming back from a restart: unreachable, or up without the plugin's routes yet.
     private static func isRestarting(_ error: Error) -> Bool {
         switch error {
-        case BotFailure.rejected(404), BotFailure.rejected(409), BotFailure.rejected(502),
-             BotFailure.rejected(503), BotFailure.transport: return true
+        case BotFailure.rejected(404), BotFailure.rejected(409): return true
+        default: return isUnreachable(error)
+        }
+    }
+
+    /// No answer from Hermes itself: a dropped or refused connection, or a proxy in front of
+    /// a host that is down.
+    private static func isUnreachable(_ error: Error) -> Bool {
+        switch error {
+        case BotFailure.rejected(502), BotFailure.rejected(503), BotFailure.transport: return true
         default: return error is URLError
         }
     }
@@ -368,19 +635,31 @@ import UserNotifications
         return next
     }
 
+    /// A failure whose words send the user to update the plugin also offers that update.
     private func fail(_ step: String, _ error: Error) {
-        phase = .failed(Failure(title: step, message: Self.message(for: error)))
+        phase = .failed(Failure(title: step, message: Self.message(for: error),
+                                remedy: Self.needsNewerPlugin(error) ? .updatePlugin : .none))
+    }
+
+    /// Keys an old plugin sent, the errors `message(for:)` answers with "Update the
+    /// hermex-push plugin."
+    private static func needsNewerPlugin(_ error: Error) -> Bool {
+        switch error {
+        case HermexPushFailure.unusablePairing, PushRegistrarError.malformedPairing,
+             PushRelayError.malformedInstallKey: return true
+        default: return false
+        }
     }
 
     /// Sign-in changes nothing on the host, so a connection that fails there really is
     /// unreachable, unlike a later step that may still be finishing when it times out.
-    private func failSignIn(_ error: Error) {
+    private func failSignIn(_ error: Error, remedy: Failure.Remedy = .none) {
         let message = switch error {
         case BotFailure.transport, is URLError:
             String(localized: "Could not reach this Hermes host. Check the connection, then try again.")
         default: Self.message(for: error)
         }
-        phase = .failed(Failure(title: String(localized: "Sign in to Hermes"), message: message))
+        phase = .failed(Failure(title: String(localized: "Sign in to Hermes"), message: message, remedy: remedy))
     }
 
     /// Provisioning speaks for itself rather than borrowing the Bot chat's wording: a step
@@ -417,6 +696,8 @@ import UserNotifications
             return String(localized: "This Hermes host rejected the saved sign-in. Update the Hermes connection, then try again.")
         case BotFailure.differentHost:
             return BotFailure.differentHost.localizedDescription
+        case BotFailure.blocked, BotFailure.browserSignIn, BotFailure.outdated:
+            return error.localizedDescription
         case BotFailure.rejected(let status):
             return String(localized: "This Hermes host refused the step (HTTP \(status)). Check the host’s logs, then try again.")
         case BotFailure.unsupported, BotFailure.wrongIdentity, BotFailure.notDashboard:

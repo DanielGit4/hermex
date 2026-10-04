@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import HermesMobile
 
@@ -210,6 +211,36 @@ import XCTest
         XCTAssertEqual(BotRoomEvent.gapStarts(in: events[1...]), [2, 6], "the window's first message is dated")
     }
 
+    func testARoomIsNewUntilItsFirstUserOrMemberMessage() async throws {
+        func events(_ kinds: String...) -> [BotRoomEvent] {
+            kinds.enumerated().compactMap { BotRoomEvent(RoomFixture.event($0.offset + 1, kind: $0.element)) }
+        }
+        XCTAssertFalse(BotRoomEvent.hasConversation(in: []))
+        XCTAssertFalse(BotRoomEvent.hasConversation(in: events("room.renamed", "turn.failed")),
+                       "A rename before anyone speaks leaves the room new")
+        XCTAssertTrue(BotRoomEvent.hasConversation(in: events("room.renamed", "message.user")))
+        XCTAssertTrue(BotRoomEvent.hasConversation(in: events("message.member")))
+
+        let wire = RoomWire(); wire.latest = 1; wire.kind = "room.renamed"
+        let reader = makeReader(wire)
+        XCTAssertFalse(reader.showsWelcome, "A room that hasn't loaded can't say it is empty")
+        await reader.open()
+        XCTAssertTrue(reader.showsWelcome)
+        reader.draft = "hello everyone"
+        await reader.send()
+        XCTAssertEqual(reader.events.map(\.kind), ["room.renamed", "message.user"])
+        XCTAssertFalse(reader.showsWelcome, "The first message ends the welcome")
+        reader.close()
+
+        let olderWire = RoomWire(); olderWire.latest = 250; olderWire.kind = "room.renamed"
+        let older = makeReader(olderWire)
+        await older.open()
+        XCTAssertTrue(older.hasEarlier)
+        XCTAssertFalse(BotRoomEvent.hasConversation(in: older.events))
+        XCTAssertFalse(older.showsWelcome, "Only system rows are loaded, but earlier history may hold messages")
+        older.close()
+    }
+
     func testMemberFallbackAndForeignAuthorityAndScopedIdentity() throws {
         let room = try XCTUnwrap(BotGroupRoom(RoomFixture.room(latest: 0)))
         let event = try XCTUnwrap(BotRoomEvent(RoomFixture.event(1, kind: "message.member")))
@@ -390,6 +421,97 @@ import XCTest
         reader.close()
     }
 
+    func testContinuedThreadKeepsOldMessagesVisibleUntilExactReplyAcknowledgment() async throws {
+        let wire = RoomWire(), cache = BotHistoryCache()
+        wire.latest = 1
+        var root = RoomFixture.event(1).fields!
+        root["payload"] = .object(["text": .string("Desktop root"), "thread_id": .string("desktop-thread")])
+        try await cache.appendRoom(key: key(), room: BotGroupRoom(RoomFixture.room(latest: 1))!,
+                                   page: RoomFixture.page([.object(root)], cursor: 1), since: 0)
+        let subject = makeReader(wire, cache: cache)
+        await subject.open()
+        let thread = "desktop-thread"
+        subject.setDraft("Phone reply", in: thread)
+        let parked = expectation(description: "reply awaiting acknowledgment")
+        wire.holdWrite = true; wire.onWriteHeld = { parked.fulfill() }
+        let reply = Task { await subject.send(threadID: thread) }
+        await fulfillment(of: [parked], timeout: 2)
+        await subject.poll()
+        XCTAssertEqual(subject.events.map { $0.payload["text"].text }, ["Desktop root"],
+                       "Suppress only this event, never earlier user messages in the same thread")
+        XCTAssertEqual(wire.writes[0].1["payload"]?["thread_id"].text, "desktop-thread")
+        wire.releaseWrite(); await reply.value
+        XCTAssertEqual(subject.events.map { $0.payload["text"].text }, ["Desktop root", "Phone reply"])
+        XCTAssertEqual(subject.threads.count, 1)
+        XCTAssertEqual(subject.threads.first?.replyCount, 1)
+        subject.close()
+    }
+
+    func testThreadDraftsAndUncertainRetriesStayWithTheirOriginalContext() async throws {
+        let wire = RoomWire()
+        let subject = makeReader(wire)
+        await subject.open(); subject.draft = "root"; await subject.send()
+        let thread = try XCTUnwrap(subject.events.first?.threadID)
+        subject.draft = "separate overview draft"
+        subject.setDraft("uncertain reply", in: thread)
+        wire.loseWrite = true; await subject.send(threadID: thread)
+        let original = wire.writes[1].1
+        XCTAssertEqual(subject.draft, "separate overview draft")
+        XCTAssertEqual(subject.draft(in: thread), "uncertain reply")
+        XCTAssertNil(subject.uncertainSend)
+        XCTAssertEqual(subject.uncertainSend(in: thread)?.threadID, thread)
+        wire.loseWrite = false; await subject.open()
+        XCTAssertEqual(subject.events.count, 1, "Replay cannot turn an uncertain reply into an acknowledged bubble")
+        await subject.send()
+        XCTAssertNotEqual(wire.writes[2].1["payload"]?["thread_id"].text, thread)
+        XCTAssertEqual(subject.draft(in: thread), "uncertain reply")
+        await subject.send(retry: true, threadID: thread)
+        XCTAssertEqual(wire.writes[3].1, original, "Retry freezes both event and thread identity")
+        XCTAssertEqual(subject.draft(in: thread), "")
+        XCTAssertEqual(subject.events.count, 3)
+        XCTAssertEqual(subject.threads.count, 2)
+        subject.close()
+    }
+
+    func testThreadNavigationKeepsLocallyLoadedSearchTargetsBeyondRecentCacheLimit() async throws {
+        let wire = RoomWire(), subject = makeReader(wire)
+        wire.latest = 600
+        let overview = UUID(), detail = UUID()
+        await subject.open(owner: overview)
+        await subject.loadEarlier(); await subject.loadEarlier()
+        XCTAssertEqual(subject.events.first?.seq, 1)
+        subject.leave(owner: overview, preservingLoadedHistory: true)
+        await subject.open(owner: detail, preservingLoadedHistory: true)
+        subject.leave(owner: overview)
+        XCTAssertEqual(subject.events.first?.seq, 1, "Navigation must not trim an already materialized search target")
+        XCTAssertEqual(subject.events.count, 600)
+        XCTAssertEqual(subject.link, .live, "The outgoing overview cannot close the detail's reader")
+        subject.close()
+    }
+
+    func testThreadProjectionOrdersActivityWithoutInventingPartialRootsOrReplyTargets() throws {
+        func event(_ seq: Int, _ kind: String, _ thread: BotJSON) -> BotRoomEvent {
+            var value = RoomFixture.event(seq, kind: kind).fields!
+            value["payload"] = .object(["text": .string("row \(seq)"), "thread_id": thread])
+            return BotRoomEvent(.object(value))!
+        }
+        let events = [event(1, "message.user", .string("desktop")),
+                      event(2, "message.user", .string("other")),
+                      event(3, "message.member", .string("desktop")),
+                      event(4, "message.user", .string("desktop")),
+                      event(5, "message.member", .null),
+                      event(6, "message.user", .string("invalid thread"))]
+        let complete = BotRoomThread.group(events, hasEarlier: false)
+        XCTAssertEqual(complete.map(\.id), ["desktop", "other"])
+        XCTAssertEqual(complete[0].events.map(\.seq), [1, 3, 4])
+        XCTAssertEqual(complete[0].root?.seq, 1)
+        XCTAssertEqual(complete[0].replyCount, 2)
+        XCTAssertEqual(events.filter { $0.threadID == nil }.map(\.seq), [5, 6])
+        let partial = BotRoomThread.group(Array(events.dropFirst(2)), hasEarlier: true)
+        XCTAssertNil(partial.first?.root)
+        XCTAssertEqual(partial.first?.replyCount, 2, "Only loaded replies can be counted")
+    }
+
     func testAcknowledgmentDoesNotSkipEarlierUnreadEvents() {
         var log = BotRoomLog(); log.begin(latest: 0)
         log.acknowledge(RoomFixture.event(3))
@@ -565,6 +687,37 @@ import XCTest
         XCTAssertNil(reader.uncertainSend)
     }
 
+    /// A refused password stops the room with Update sign-in, and any other stop keeps
+    /// Reconnect. A reopen after backgrounding shows the saved history again but builds
+    /// no client, so the refused password is never sent again (#884).
+    func testARejectedPasswordStopsTheRoomNeedingSignIn() async {
+        let wire = RoomWire(); wire.latest = 3; wire.connectFailure = BotFailure.transport
+        var clients = 0
+        let reader = BotRoomReader(key: key(), connection: connection, room: BotGroupRoom(RoomFixture.room(latest: 0))!,
+                                   cache: BotHistoryCache(), makeWire: { _ in clients += 1; return wire })
+        await reader.open()
+        XCTAssertEqual(reader.link, .stopped)
+        XCTAssertFalse(reader.needsSignIn, "a lost route keeps Reconnect")
+
+        wire.connectFailure = nil; await reader.open()
+        XCTAssertEqual(reader.link, .live)
+        reader.close()
+
+        wire.connectFailure = BotFailure.rejected(401); await reader.open()
+        XCTAssertEqual(reader.link, .stopped)
+        XCTAssertTrue(reader.needsSignIn)
+        XCTAssertEqual(clients, 3)
+
+        reader.close()
+        XCTAssertTrue(reader.events.isEmpty)
+        await reader.open()
+        XCTAssertEqual(clients, 3, "the refused password is not sent again")
+        XCTAssertEqual(reader.link, .stopped)
+        XCTAssertTrue(reader.needsSignIn)
+        XCTAssertEqual(reader.events.map(\.seq), [1, 2, 3], "the saved history is back on screen")
+        XCTAssertEqual(reader.errorMessage, "Hermes didn't accept the username or password.")
+    }
+
     func testRoomMentionsUseHandlesAndIncludeBroadcastTargets() throws {
         var value = RoomFixture.room(latest: 0).fields!
         value["members"] = .array([.object(["member_id": .string("member"), "handle": .string("chief"), "display_name": .string("Chief of Staff")])])
@@ -580,6 +733,33 @@ import XCTest
 }
 
 final class BotRoomTranscriptWindowTests: XCTestCase {
+    func testExpandedOverviewSurvivesOldestThreadReceivingAReply() {
+        var window = BotRoomTranscriptWindow()
+        let original = Self.events(1...100)
+        window.seed(original, live: true, overview: true)
+        XCTAssertTrue(window.showEarlier(in: original, overview: true))
+        XCTAssertEqual(window.start(in: original, overview: true), 0)
+
+        // Thread 1 moves to the front of the descending overview at sequence 101.
+        let reordered = Self.events(2...101)
+        XCTAssertEqual(window.start(in: reordered, overview: true), 0,
+                       "Incoming activity must not hide the 50 previously revealed threads")
+        window.seed(reordered, live: true, overview: true)
+        XCTAssertEqual(window.start(in: reordered, overview: true), 0)
+    }
+
+    func testOverviewRowIdentitySurvivesThreadActivityWhileDetailTargetsStayDistinct() throws {
+        func event(_ seq: Int) -> BotRoomEvent {
+            var value = RoomFixture.event(seq).fields!
+            value["payload"] = .object(["text": .string("reply"), "thread_id": .string("desktop-thread")])
+            return BotRoomEvent(.object(value))!
+        }
+        XCTAssertEqual(BotRoomTranscriptRow(event: event(1), isOverview: true).id,
+                       BotRoomTranscriptRow(event: event(9), isOverview: true).id)
+        XCTAssertEqual(BotRoomTranscriptRow(event: event(1), isOverview: false).id, .event(1))
+        XCTAssertEqual(BotRoomTranscriptRow(event: event(9), isOverview: false).id, .event(9))
+    }
+
     func testOpensOnTheNewestPageBeforeAndAfterSeeding() {
         let events = Self.events(1...300)
         var window = BotRoomTranscriptWindow()
@@ -709,6 +889,8 @@ enum RoomFixture {
     var capabilities = RoomFixture.capabilities
     var disbanded = false
     var roomName = "Comms"
+    /// The members `groups.state` reports; nil keeps the fixture's one member.
+    var members: [BotJSON]?
     var listedRooms: [BotJSON]?
     var listCalls = 0
     var listFailure: Error?
@@ -752,6 +934,7 @@ enum RoomFixture {
                     var payload = params["payload"]!.fields!
                     payload["text"] = .string(payload["text"]!.text!.trimmingCharacters(in: .whitespacesAndNewlines))
                     event["payload"] = .object(payload)
+                    event["event_id"] = .string("user:" + SHA256.hash(data: Data(id.utf8)).map { String(format: "%02x", $0) }.joined())
                     sentEvents[id] = .object(event)
                 }
                 result = .object(["accepted": .bool(true), "client_event_id": params["event_id"]!, "event": sentEvents[id]!])
@@ -803,6 +986,7 @@ enum RoomFixture {
             if holdState { return await withCheckedContinuation { held = $0; onHeld?() } }
             var room = RoomFixture.room(latest: latest).fields!
             room["name"] = .string(roomName)
+            if let members { room["members"] = .array(members) }
             room["authority_gateway_id"] = .string(authority); room["authority_epoch"] = .number(Double(epoch))
             return .object(["room": .object(room), "driver_status": driverStatus])
         case "groups.log":

@@ -8,14 +8,23 @@ struct ComposerRetryableStatus {
 }
 
 private struct ComposerStatusView: View {
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     let text: String
     let isError: Bool
     let isDismissible: Bool
     let onRetry: (() -> Void)?
+    /// Offers Copy fix prompt, which puts this text on the pasteboard (#955).
+    let fixPrompt: String?
     let onDismiss: () -> Void
+    @State private var didCopyFixPrompt = false
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
+        // At accessibility sizes Copy fix prompt drops below the message,
+        // like the transcript log rows' stacked labels.
+        let layout = fixPrompt != nil && dynamicTypeSize.isAccessibilitySize
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 6))
+            : AnyLayout(HStackLayout(alignment: .top, spacing: 8))
+        layout {
             Text(text)
                 .font(AppFont.caption())
                 .foregroundStyle(textColor)
@@ -26,6 +35,10 @@ private struct ComposerStatusView: View {
                 Button("Retry", action: onRetry)
                     .font(AppFont.caption(weight: .semibold))
                     .buttonStyle(.borderless)
+            }
+
+            if let fixPrompt {
+                fixPromptButton(fixPrompt)
             }
 
             if isDismissible {
@@ -50,6 +63,30 @@ private struct ComposerStatusView: View {
                 .stroke(borderColor, lineWidth: 0.5)
         )
         .padding(.horizontal, 16)
+        .onChange(of: text) { didCopyFixPrompt = false }
+    }
+
+    /// Swaps to "Copied" without animation and announces it for VoiceOver.
+    private func fixPromptButton(_ prompt: String) -> some View {
+        Button {
+            UIPasteboard.general.string = prompt
+            didCopyFixPrompt = true
+            AccessibilityNotification.Announcement(String(localized: "Fix prompt copied")).post()
+        } label: {
+            if didCopyFixPrompt {
+                Label("Copied", systemImage: "checkmark")
+                    .labelStyle(.titleAndIcon)
+            } else {
+                Text("Copy fix prompt")
+            }
+        }
+        .font(AppFont.caption(weight: .semibold))
+        .buttonStyle(.borderless)
+        // Wraps like Retry would: a long translation shares the row with the
+        // message instead of squeezing it, and never overflows when stacked.
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel(didCopyFixPrompt ? Text("Fix prompt copied") : Text("Copy fix prompt"))
+        .accessibilityHint(Text("Copies a prompt that asks your Hermes agent to restart Hermes WebUI."))
     }
 
     private var textColor: Color {
@@ -121,6 +158,8 @@ struct MessageComposerView: View {
     let isCancellingStream: Bool
     let readOnlyMessage: String?
     let errorMessage: String?
+    /// Offered as Copy fix prompt on the `errorMessage` banner (#955).
+    let errorFixPrompt: String?
     let configurationErrorMessage: String?
     let contextWindowSnapshot: ContextWindowSnapshot?
     let gitViewModel: GitWorkspaceAvailabilityViewModel
@@ -213,6 +252,9 @@ struct MessageComposerView: View {
     /// Each edit the user makes to the draft here (typing, completions,
     /// dictation), after it lands in `draftMessage`, for the owner to persist.
     let onDraftEdit: (String) -> Void
+    /// The chat's last sent message, for ↑ in an empty composer on a hardware
+    /// keyboard. A closure, so the transcript is scanned only when ↑ is pressed.
+    var recallLastSentText: (() -> String?)? = nil
     /// A file chip the user tapped, by workspace-relative path.
     let onOpenFileReference: (String) -> Void
     let onSelectGitBranch: (GitCheckoutTarget) -> Void
@@ -425,8 +467,7 @@ struct MessageComposerView: View {
         }
     }
 
-    var body: some View {
-        let _ = ViewBodyProbe.hit(.composer)
+    private var composerWithLifecycle: some View {
         AdaptiveGlassContainer(spacing: 6) {
             VStack(spacing: 6) {
                 if voiceNoteRecorder.isRecording {
@@ -447,6 +488,7 @@ struct MessageComposerView: View {
                         isError: composerStatus.isError,
                         isDismissible: composerStatus.isDismissible,
                         onRetry: composerStatus.onRetry,
+                        fixPrompt: composerStatus.fixPrompt,
                         onDismiss: onDismissUploadAttachmentError
                     )
                 }
@@ -599,18 +641,24 @@ struct MessageComposerView: View {
         .task(id: slashAutocompleteLoadKey) {
             await loadSlashAutocompleteSubArgsIfNeeded()
         }
-        .task {
+        .task(id: AppLock.shared.isLocked) {
             // Cold path: the composer appears already active (the usual case for the
             // "New Chat with Voice" intent once its session is created) — start here.
+            // Runs again when the app lock changes, since dictation waits for it (#885);
+            // one modifier keeps this chain inside CI Xcode's type-checking budget.
+            if AppLock.shared.isLocked { voiceInput.suspend() }
+            else if scenePhase == .active { voiceInput.resume() }
             autoStartVoiceInputIfNeeded()
         }
+        .onChange(of: sessionID) { _, _ in voiceInput.stopBeforeSubmittingDraft() }
         .onChange(of: scenePhase) { _, newPhase in
             if newPhase != .active {
-                voiceInput.stopBeforeSubmittingDraft()
+                voiceInput.suspend()
                 // Backgrounding stops the recorder's run-loop ticker, so cancel
                 // the in-flight recording rather than leave it silently stalled.
                 cancelVoiceNote()
             } else {
+                voiceInput.resume()
                 // An intent that opened this composer may have foregrounded the app
                 // a beat after it appeared; auto-start once we're active (#338).
                 autoStartVoiceInputIfNeeded()
@@ -640,6 +688,11 @@ struct MessageComposerView: View {
                 }
             }
         }
+    }
+
+    var body: some View {
+        let _ = ViewBodyProbe.hit(.composer)
+        composerWithLifecycle
         .sheet(isPresented: $showsAllModelsSheet, onDismiss: restoreFocusAfterPresentationIfNeeded) {
             ModelPickerSheet(
                 configuration: .composer,
@@ -844,7 +897,8 @@ struct MessageComposerView: View {
                         onOpenFileReference(path)
                     },
                     onTapQuote: presentQuote,
-                    onRemoveQuote: removeQuote
+                    onRemoveQuote: removeQuote,
+                    recallLastSentText: recallLastSentText
                 )
 
                 if !isExpanded {
@@ -1152,27 +1206,27 @@ struct MessageComposerView: View {
         showsAllModelsSheet = true
     }
 
-    private var composerStatus: (text: String, isError: Bool, isDismissible: Bool, onRetry: (() -> Void)?)? {
+    private var composerStatus: (text: String, isError: Bool, isDismissible: Bool, onRetry: (() -> Void)?, fixPrompt: String?)? {
         if let readOnlyMessage {
-            return (readOnlyMessage, false, false, nil)
+            return (readOnlyMessage, false, false, nil, nil)
         } else if isWaitingForStream && isCancellingStream {
-            return (String(localized: "Stopping response..."), false, false, nil)
+            return (String(localized: "Stopping response..."), false, false, nil, nil)
         } else if isCompressingSession {
-            return (String(localized: "Compressing context..."), false, false, nil)
+            return (String(localized: "Compressing context..."), false, false, nil, nil)
         } else if let uploadAttachmentErrorMessage {
-            return (uploadAttachmentErrorMessage, true, true, nil)
+            return (uploadAttachmentErrorMessage, true, true, nil, nil)
         } else if isSendingVoiceNote {
-            return (String(localized: "Sending voice note..."), false, false, nil)
+            return (String(localized: "Sending voice note..."), false, false, nil, nil)
         } else if isUploadingAttachment {
-            return (String(localized: "Uploading attachment..."), false, false, nil)
+            return (String(localized: "Uploading attachment..."), false, false, nil, nil)
         } else if let steerFailure {
-            return (steerFailure.message, true, false, steerFailure.onRetry)
+            return (steerFailure.message, true, false, steerFailure.onRetry, nil)
         } else if let errorMessage {
-            return (errorMessage, true, false, nil)
+            return (errorMessage, true, false, nil, errorFixPrompt)
         } else if let configurationErrorMessage {
-            return (configurationErrorMessage, true, false, nil)
+            return (configurationErrorMessage, true, false, nil, nil)
         } else if isUpdatingConfiguration {
-            return (String(localized: "Updating composer settings..."), false, false, nil)
+            return (String(localized: "Updating composer settings..."), false, false, nil, nil)
         }
 
         return nil
@@ -1357,12 +1411,14 @@ struct MessageComposerView: View {
 
     /// Starts dictation once for a composer opened by the "New Chat with Voice" intent (#338),
     /// mirroring a mic tap. Gated so it fires a single time, only while the app is active and
-    /// the mic is free; the reused tap path handles the mic/speech permission prompt and surfaces
-    /// a clear error if access is denied, so a denied/undetermined mic degrades gracefully.
+    /// unlocked (the scene stays active under the app lock, so the microphone never starts
+    /// behind it) and the mic is free; the reused tap path handles the mic/speech permission
+    /// prompt and surfaces a clear error if access is denied, so a denied/undetermined mic
+    /// degrades gracefully.
     @MainActor
     private func autoStartVoiceInputIfNeeded() {
         guard autoStartsVoiceInput, !didAutoStartVoiceInput else { return }
-        guard scenePhase == .active else { return }
+        guard scenePhase == .active, !AppLock.shared.isLocked else { return }
         didAutoStartVoiceInput = true
         guard !voiceInput.isListening, !isVoiceInputDisabled else { return }
         toggleVoiceInput()
@@ -1372,10 +1428,8 @@ struct MessageComposerView: View {
     private func toggleVoiceInput() {
         voiceInput.apiClient = apiClient
         voiceInput.providerPreference = ComposerSTTProviderPreference.storedValue(sttProviderPreferenceRawValue)
-        Task {
-            await voiceInput.toggle(currentDraft: draftMessage) { newDraft in
-                editDraft(newDraft)
-            }
+        voiceInput.scheduleToggle(currentDraft: draftMessage) { newDraft in
+            editDraft(newDraft)
         }
     }
 

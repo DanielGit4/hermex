@@ -11,6 +11,19 @@ import UIKit
 /// have reacted, Remove Reaction (#761).
 @MainActor
 enum BotMessageActions {
+    /// Settled Bot replies expose Copy in their footer instead of on the text.
+    /// Reuse the menu action so Markdown and the haptics preference stay identical.
+    static func footerCopy(
+        message: ChatMessage,
+        isLive: Bool,
+        isHapticsEnabled: Bool,
+        copy: @escaping (String) -> Void = { UIPasteboard.general.string = $0 }
+    ) -> (() -> Void)? {
+        guard !isLive, message.role == "assistant",
+              message.displayKind != BotDelegationCompletion.displayKind else { return nil }
+        return items(copyText: message.content, isHapticsEnabled: isHapticsEnabled, copy: copy).first?.perform
+    }
+
     /// Your side of a row's reactions, for the long-press menu.
     struct Reacting {
         /// Your current emoji on the row, if any.

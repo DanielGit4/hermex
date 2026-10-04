@@ -13,7 +13,11 @@ see [Push provisioning](bots.md#push-provisioning) and
 - **Plugin.** `hermex-push` runs on the user's Hermes host (installed from
   `uzairansaruzi/hermex-push`). It watches the agent, seals each notification's
   text with AES-256-GCM, and posts the event to the relay. Tool arguments and
-  results never leave the host.
+  results never leave the host. When a paired host has an older plugin loaded
+  than the newest this build knows, Settings → Notifications offers to update
+  it. The dashboard loads the update only when it restarts: a loaded plugin of
+  0.4.0 or newer lets the phone restart it, while an older one still needs one
+  restart on the host ([Push provisioning](bots.md#push-provisioning)).
 - **Relay.** A Cloudflare Worker in the same repository. The default is
   `https://hermex-relay.hermex-relay.workers.dev`; a host overrides it with
   `HERMEX_PUSH_RELAY_URL`, so self-hosting is a server-side setting. The relay
@@ -21,8 +25,8 @@ see [Push provisioning](bots.md#push-provisioning) and
   to APNs. It sees device tokens, the notification kind, a coarse source (bot,
   webui, other), a subagent flag, thread and collapse ids, the raw agent
   session id, and timestamps. Progress events add a status, the tool's name,
-  and a call count. Title, subtitle, body, profile name, and request id stay
-  inside the sealed blob, which the relay cannot open.
+  and a call count. Title, subtitle, body, profile name, the bot's name, and
+  request id stay inside the sealed blob, which the relay cannot open.
 - **App.** `HermesMobile/Push/` provisions the host, stores the pairing,
   registers the device token with every paired relay, and routes taps. The
   app target carries the Time Sensitive entitlement, so the relay's

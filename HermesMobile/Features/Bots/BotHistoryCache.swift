@@ -27,14 +27,17 @@ actor BotHistoryCache {
         /// Optional server display hint (e.g. `"steer"`). Absent on snapshots
         /// saved before steering hints existed; decodes as nil.
         var displayKind: String? = nil
+        var threadID: String? = nil
+        var eventID: String? = nil
 
         /// Rebuild only the message projection, never cached commands or runtime state.
         var roomEvent: BotJSON? {
             guard let seq else { return nil }
             return .object(["seq": .number(Double(seq)), "kind": .string(role),
+                "event_id": eventID.map(BotJSON.string) ?? .null,
                 "actor": .object(["id": memberID.map(BotJSON.string) ?? .null,
                                   "display_name": sender.map(BotJSON.string) ?? .null]),
-                "payload": .object(["text": .string(text)]),
+                "payload": .object(["text": .string(text), "thread_id": threadID.map(BotJSON.string) ?? .null]),
                 "created_at": timestamp.map(BotJSON.number) ?? .null])
         }
     }
@@ -173,7 +176,7 @@ actor BotHistoryCache {
                   text.utf8.count <= Self.maximumMessageBytes, seen.insert(event.seq).inserted else { continue }
             rows.append(Message(id: String(event.seq), role: event.kind, text: text, seq: event.seq,
                 sender: event.kind == "message.user" ? String(localized: "You") : event.sender(in: room),
-                memberID: event.payload["member_id"].text ?? event.actor["id"].text, timestamp: event.timestamp))
+                memberID: event.payload["member_id"].text ?? event.actor["id"].text, timestamp: event.timestamp, threadID: event.threadID, eventID: event.eventID))
         }
         rows.sort { ($0.seq ?? 0) < ($1.seq ?? 0) }
         var boundary = overlaps ? min(previous?.earlierBoundary ?? since, since) : since

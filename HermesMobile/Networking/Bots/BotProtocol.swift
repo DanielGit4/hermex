@@ -37,9 +37,24 @@ indirect enum BotJSON: Codable, Hashable, Sendable {
 }
 
 enum BotFailure: Error, Equatable, LocalizedError {
-    /// `notDashboard`: the address answered `/api/status` with 401, 404 or a body that
-    /// is not JSON, so it is not a Hermes dashboard (often the webui address). Permanent.
+    /// `notDashboard`: the address answered `/api/status` with 404, a JSON 401 (the webui's
+    /// auth gate) or a body that is not JSON, so it is not a Hermes dashboard (often the
+    /// webui address). Permanent.
     case stale, unsupported, missingChat, wrongIdentity, differentHost, rejected(Int), transport, invalidAddress, notDashboard
+    /// Something in front of Hermes wants its own sign-in: a request ended on another host
+    /// (an access proxy's login page), or `/api/status` answered a 401 whose body is not a
+    /// JSON object. Permanent.
+    case blocked
+    /// The host requires sign-in but offers no `basic` provider, only a browser (OIDC)
+    /// one Hermex can't use yet. Permanent.
+    case browserSignIn
+    /// The gateway upgrade was refused with this HTTP status after a good sign-in, usually
+    /// by a proxy that drops the ticket header or has no WebSocket support. Permanent;
+    /// 408, 429 and 5xx arrive as `.rejected` instead (`init(upgradeStatus:)`).
+    case upgradeRefused(Int)
+    /// `/api/status` reported this release, older than `HermesCompatibility.minimumVersion`,
+    /// so sign-in stopped before the password. Permanent.
+    case outdated(String)
     var errorDescription: String? {
         switch self {
         case .stale: return String(localized: "This action is no longer current. Refresh the conversation.")
@@ -48,9 +63,10 @@ enum BotFailure: Error, Equatable, LocalizedError {
         case .missingChat: return String(localized: "Open this bot’s chat in Hermes Desktop, then refresh.")
         case .wrongIdentity: return String(localized: "The conversation identity changed. Check this bot in Desktop.")
         case .differentHost: return String(localized: "The Hermes host at this address reports a different identity than the one you connected to. Check the address in the Hermes connection.")
-        case .rejected(401): return String(localized: "Sign in again. Check your Bot connection username and password.")
-        // Hermes never answers 403 or 520-530 itself. 502-504 usually come from a proxy; Hermes's
-        // own 503 (its auth provider is unreachable) shares the approved proxy copy.
+        case .rejected(401): return String(localized: "Hermes didn't accept the username or password.")
+        // Hermes's REST routes never answer 403, but the gateway upgrade does (see `.upgradeRefused`).
+        // Hermes never answers 520-530 itself. 502-504 usually come from a proxy; Hermes's own 503
+        // (its auth provider is unreachable) shares the approved proxy copy.
         case .rejected(403): return String(localized: "Something in front of Hermes, such as Cloudflare Access, blocked the request.")
         case .rejected(502...504): return String(localized: "Your proxy answered, but Hermes didn't. Check that the dashboard is running on the host.")
         case .rejected(520...530): return String(localized: "Cloudflare can't reach your tunnel. Check that cloudflared and the dashboard are running on the host.")
@@ -58,6 +74,11 @@ enum BotFailure: Error, Equatable, LocalizedError {
         case .rejected(4090): return String(localized: "Another Hermes process owns this conversation. Resolve it on the host, then refresh.")
         case .rejected(4130): return String(localized: "This conversation is too large to open here. Use Desktop.")
         case .invalidAddress: return String(localized: "Enter a Hermes HTTP or HTTPS address without a path, credentials or query.")
+        case .blocked: return String(localized: "Something in front of Hermes, such as Cloudflare Access, wants its own sign-in first. Add its service token under Connection Headers in the Hermes connection, or use an address that skips it, such as the dashboard's local network address.")
+        case .browserSignIn: return String(localized: "This Hermes host only offers sign-in with a browser, which Hermex doesn't support yet. To connect now, add a dashboard username and password on the host.")
+        case .upgradeRefused: return String(localized: "Hermes accepted the sign-in, but the live connection was refused. If a proxy or tunnel sits in front of Hermes, turn on WebSocket support and let the Sec-WebSocket-Protocol header through.")
+        case .outdated(let version):
+            return String(localized: "This Hermes host runs \(version). Hermex needs Hermes \(HermesCompatibility.minimumVersion) or later. Update Hermes on the host, then try again.")
         default: return String(localized: "Connection lost. The bot may still be working. Reconnect to check its current conversation.")
         }
     }
@@ -112,6 +133,9 @@ enum BotConnectionAdvice {
     var serverVersion: String? { get }
     /// `install_id` from `/api/status` at the last connect; nil when the host omits it.
     var serverInstallID: String? { get }
+    /// Gateway methods the host answered -32601 (method not found) on this connection,
+    /// shared by every screen on it; a new connection starts empty.
+    var unavailableMethods: Set<String> { get }
     /// Sequenced event params or a complete string-id server-request envelope. The socket
     /// is shared, so this sees other screens' sessions too: admit only your own.
     var onEvent: ((BotJSON) -> Void)? { get set }
@@ -133,6 +157,7 @@ enum BotConnectionAdvice {
 extension BotTransport {
     var serverVersion: String? { nil }
     var serverInstallID: String? { nil }
+    var unavailableMethods: Set<String> { [] }
 
     func uploadImage(data: Data, filename: String, context: BotArtifactContext) async throws -> String {
         throw BotFailure.unsupported
@@ -192,7 +217,9 @@ enum BotHostProbeFailure: Error, Equatable {
 }
 
 /// One unauthenticated `GET /api/status` on its own short-lived session. It sends no
-/// cookies or credentials, so checking never counts against the host's sign-in limit.
+/// cookies or credentials, so checking never counts against the host's sign-in limit;
+/// only the saved Connection Headers, which a proxy such as Cloudflare Access needs even
+/// for this public route. A redirect to another host drops them.
 struct BotHostStatusProbe {
     let configuration: URLSessionConfiguration
 
@@ -205,12 +232,12 @@ struct BotHostStatusProbe {
         self.configuration = configuration
     }
 
-    func check(_ address: URL) async -> Result<BotHostStatus, BotHostProbeFailure> {
+    func check(_ address: URL, headers: HermesHeaders = .none) async -> Result<BotHostStatus, BotHostProbeFailure> {
         let session = URLSession(configuration: configuration)
         defer { session.finishTasksAndInvalidate() }
         do {
-            let request = try HermesREST.status.request(base: address)
-            let (data, response) = try await session.data(for: request)
+            let request = headers.applied(to: try HermesREST.status.request(base: address), origin: address)
+            let (data, response) = try await session.data(for: request, delegate: headers.redirectGuard(for: address))
             guard let response = response as? HTTPURLResponse else { return .failure(.notHermes) }
             if response.url?.host != request.url?.host || [401, 403].contains(response.statusCode) { return .failure(.blocked) }
             guard response.statusCode == 200 else { return .failure(.answered(response.statusCode)) }

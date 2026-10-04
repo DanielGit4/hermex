@@ -1,8 +1,20 @@
 import SwiftUI
 
-@MainActor struct BotsInboxView: View {
+/// What titles the Bots inbox as a Hermes server's home: the server's name, and its host
+/// when that differs from the name.
+struct BotsInboxHome {
+    let title: String
+    let subtitle: String?
+}
+
+/// The Bots inbox: pushed from a webui server's session list, or the root of a Hermes
+/// server's home (`HermesServerHome`), where `home` titles it and `HomeControl` replaces
+/// the Bot connection gear.
+@MainActor struct BotsInboxView<HomeControl: View>: View {
     @Environment(\.scenePhase) private var scenePhase
     let server: URL
+    private let home: BotsInboxHome?
+    private let homeControl: HomeControl
     /// The bot a deep link named, resolved here because this is where the live roster
     /// is. Cleared once this inbox has settled, whether or not it matched (#554).
     @Binding private var pendingDestination: BotDestination?
@@ -10,6 +22,9 @@ import SwiftUI
     @State private var showingSearch = false
     @State private var searchedProfile: (connectionID: UUID, profileID: String)?
     @State private var showingSetup = false
+    /// True while the form is open to replace a password the host refused; it opens
+    /// with the password field focused.
+    @State private var updatingSignIn = false
     @State private var revision = UUID()
     @State private var editSelection: BotProfileEditSelection?
     @State private var creation: BotCreationIntent?
@@ -37,10 +52,32 @@ import SwiftUI
     init(
         server: URL,
         pendingDestination: Binding<BotDestination?> = .constant(nil)
+    ) where HomeControl == EmptyView {
+        self.init(server: server, pendingDestination: pendingDestination, home: nil) { EmptyView() }
+    }
+
+    /// A Hermes server's home. Its sign-in form is reached through Settings there, so
+    /// `homeControl`, the server's avatar, takes the gear's place.
+    init(
+        server: URL,
+        pendingDestination: Binding<BotDestination?>,
+        home: BotsInboxHome?,
+        @ViewBuilder homeControl: () -> HomeControl
     ) {
         self.server = server
+        self.home = home
+        self.homeControl = homeControl()
         _pendingDestination = pendingDestination
         _inbox = State(initialValue: BotInbox(server: server))
+    }
+
+    /// An inbox the caller built, such as one on scripted wires.
+    init(server: URL, inbox: BotInbox) where HomeControl == EmptyView {
+        self.server = server
+        home = nil
+        homeControl = EmptyView()
+        _pendingDestination = .constant(nil)
+        _inbox = State(initialValue: inbox)
     }
 
     var body: some View {
@@ -67,7 +104,12 @@ import SwiftUI
             if inbox.connection != nil {
                 if let message = inbox.errorMessage ?? inbox.routeAdvice {
                     Text(message).font(.callout)
-                    Button("Reconnect") { revision = UUID() }
+                    // Reconnecting would only send the refused password again (#884).
+                    if inbox.needsSignIn {
+                        Button("Update sign-in", action: updateSignIn)
+                    } else {
+                        Button("Reconnect") { revision = UUID() }
+                    }
                 } else if inbox.isLoadingRoster {
                     // The first row speaks for the set, so VoiceOver hears one
                     // "Loading bots" instead of nothing.
@@ -139,13 +181,7 @@ import SwiftUI
                 }
             }
         }
-        // Pushed from the session list's Bots row: the back button and the
-        // toolbar are the whole header, so the pinned tiles sit at the top. The
-        // title still names the screen for VoiceOver and for a pushed chat's
-        // back button; only its visible text is removed.
-        .navigationTitle("Bots")
-        .navigationBarTitleDisplayMode(.inline)
-        .toolbar(removing: .title)
+        .modifier(BotsInboxTitle(home: home))
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Search bots and messages", systemImage: "magnifyingglass") { showingSearch = true }
@@ -169,7 +205,11 @@ import SwiftUI
             }
             if #available(iOS 26, *) { ToolbarSpacer(.fixed, placement: .topBarTrailing) }
             ToolbarItem(placement: .topBarTrailing) {
-                Button("Bot connection", systemImage: "gearshape") { showingSetup = true }
+                if home == nil {
+                    Button("Bot connection", systemImage: "gearshape") { showingSetup = true }
+                } else {
+                    homeControl
+                }
             }
         }
     }
@@ -276,12 +316,20 @@ import SwiftUI
         .padding(.vertical, 12)
     }
 
+    /// Opens the sign-in form for a password the host refused. A chat or room returns
+    /// here first: its client is bound to the rejected sign-in, and the inbox reloads the
+    /// record when the form closes. Its callback calls `noteRejectedSignIn` before it
+    /// pops, so the inbox's reappearing `open()` does not send that password again.
+    private func updateSignIn() {
+        updatingSignIn = true; showingSetup = true
+    }
+
     private func chat(_ profile: BotProfile, _ connection: BotConnection) -> some View {
         BotChatView(server: server, connection: connection, profile: profile, roster: inbox.profiles,
                     avatars: inbox.avatars, conversation: selection.conversation, onConversationUnavailable: {
                         selection.profile = nil
                         toast = String(localized: "That conversation is no longer available.")
-                    })
+                    }, onUpdateSignIn: { inbox.noteRejectedSignIn(connection); selection.profile = nil; updateSignIn() })
             // A composite rather than a concatenation: a Profile name and a
             // conversation root are both arbitrary server strings, so joining them
             // could let two destinations share one identity and keep the wrong
@@ -508,8 +556,10 @@ extension BotsInboxView {
             .sheet(isPresented: $showingSectionOrder) {
                 BotSectionOrderView(inbox: inbox)
             }
-            .sheet(isPresented: $showingSetup, onDismiss: { revision = UUID() }) {
-                NavigationStack { BotConnectionView(server: server) }
+            .sheet(isPresented: $showingSetup, onDismiss: { updatingSignIn = false; revision = UUID() }) {
+                NavigationStack {
+                    BotConnectionView(server: server, focusesPassword: updatingSignIn) { inbox.signInSaved() }
+                }
             }
             .navigationDestination(item: $selection.profile) { profile in
                 if let connection = inbox.connection { chat(profile, connection) }
@@ -522,25 +572,66 @@ extension BotsInboxView {
                         toast = String(localized: "This room’s history is no longer available.")
                     }, onChanged: { inbox.updateRoom($0, connectionID: key.connectionID) }, onDisbanded: {
                         inbox.removeRoom(key); selection.room = nil
-                    }), roster: inbox.profiles, avatars: inbox.avatars)
+                    }), roster: inbox.profiles, avatars: inbox.avatars,
+                        onUpdateSignIn: { inbox.noteRejectedSignIn(connection); selection.room = nil; updateSignIn() })
                     .id(key)
                 }
             }
             .navigationDestination(item: $editSelection) { selection in
                 editProfile(selection)
             }
-            // The subscription lives while the inbox is on screen and the app is active;
-            // returning, refreshing and reconnecting all go through the same open().
+            // The subscription lives while the inbox is on screen and the app is not in the
+            // background; returning, refreshing and reconnecting all go through the same open().
             .task(id: revision) { await inbox.open(); hasSettled = true; openPendingDestination() }
             .onChange(of: inbox.link) { openPendingDestination() }
             .onChange(of: pendingDestination) { openPendingDestination() }
             .onChange(of: selection.profile) { if selection.profile == nil { selection.conversation = nil } }
             .refreshable { await inbox.open() }
             .onChange(of: scenePhase) {
-                if scenePhase == .active { revision = UUID() }
-                else { inbox.close() }
+                // Control Center and banners (`.inactive`) keep the socket (#902); only an
+                // inbox the background closed reopens.
+                switch scenePhase {
+                case .background: inbox.close()
+                case .active where inbox.link == .idle: revision = UUID()
+                default: break
+                }
             }
             .onDisappear { inbox.close() }
+    }
+}
+
+/// The inbox's title. Pushed from the session list's Bots row, the back button and the
+/// toolbar are the whole header, so the pinned tiles sit at the top; the title still
+/// names the screen for VoiceOver and for a pushed chat's back button, with only its
+/// visible text removed. As a Hermes server's home, the server's name titles it, leading,
+/// with its host under it on iOS 26.
+private struct BotsInboxTitle: ViewModifier {
+    let home: BotsInboxHome?
+
+    func body(content: Content) -> some View {
+        if let home {
+            content
+                .navigationTitle(home.title)
+                .toolbarTitleDisplayMode(.inlineLarge)
+                .modifier(BotsInboxSubtitle(subtitle: home.subtitle))
+        } else {
+            content
+                .navigationTitle("Bots")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar(removing: .title)
+        }
+    }
+}
+
+private struct BotsInboxSubtitle: ViewModifier {
+    let subtitle: String?
+
+    func body(content: Content) -> some View {
+        if #available(iOS 26, *), let subtitle {
+            content.navigationSubtitle(subtitle)
+        } else {
+            content
+        }
     }
 }
 

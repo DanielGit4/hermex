@@ -1,11 +1,17 @@
 import UIKit
 import UserNotifications
 
-/// SwiftUI has no scene-level hook for APNs device tokens or notification taps, so
-/// this delegate hands tokens to `PushRegistrar`, relay taps to
+/// The app's one UIKit delegate. SwiftUI has no scene-level hook for APNs device tokens or
+/// notification taps, so this delegate hands tokens to `PushRegistrar`, relay taps to
 /// `PushNotificationRouter`, and local run alert taps to
-/// `ResponseCompletionNotificationRequest`. Nothing else belongs here.
+/// `ResponseCompletionNotificationRequest`. It also gives the scene `AppLockSceneDelegate`.
+/// It also supplies the recording-only iPhone orientation policy.
 final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(_ application: UIApplication,
+                     supportedInterfaceOrientationsFor window: UIWindow?) -> UIInterfaceOrientationMask {
+        ComposerDictationLease.supportedOrientations(for: window)
+    }
+
     func application(
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
@@ -14,6 +20,18 @@ final class PushAppDelegate: NSObject, UIApplicationDelegate, UNUserNotification
         UNUserNotificationCenter.current().delegate = self
         MainActor.assumeIsolated { PushRegistrar.shared?.refreshOnLaunch() }
         return true
+    }
+
+    /// SwiftUI still builds the scene and its window; the extra delegate adds the app lock's
+    /// window above it (#885).
+    func application(
+        _ application: UIApplication,
+        configurationForConnecting connectingSceneSession: UISceneSession,
+        options: UIScene.ConnectionOptions
+    ) -> UISceneConfiguration {
+        let configuration = UISceneConfiguration(name: nil, sessionRole: connectingSceneSession.role)
+        configuration.delegateClass = AppLockSceneDelegate.self
+        return configuration
     }
 
     func application(

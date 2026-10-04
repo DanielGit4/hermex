@@ -347,6 +347,79 @@ import XCTest
         }
         XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 0)
     }
+
+    /// Upstream #961 on the shared sign-in: a host reporting a release below
+    /// `HermesCompatibility.minimumVersion` is refused from its public status, so neither
+    /// the password nor any Dashboard request goes out, and the Dashboard says why.
+    func testAHostBelowTheMinimumReleaseIsRefusedBeforeThePassword() async throws {
+        let http = HermesConnection(connection: record, configuration: HermesHostFixture.configuration { request in
+            guard request.url?.path == "/api/status" else { return nil }
+            return .json(200, .object(["auth_required": .bool(true), "auth_providers": .array([.string("basic")]),
+                                       "version": .string("0.21.2")]))
+        })
+        let dashboard = DashboardClient(http: http)
+
+        let calls: [() async throws -> Void] = [
+            { _ = try await dashboard.pluginsHub() },
+            { _ = try await dashboard.installedSkills(profile: "work") }
+        ]
+        for call in calls {
+            do {
+                try await call()
+                XCTFail("Expected the release to be refused")
+            } catch {
+                XCTAssertEqual(error as? BotFailure, .outdated("0.21.2"))
+                XCTAssertEqual(DashboardProblem(error).message,
+                               "This Hermes host runs 0.21.2. Hermex needs Hermes 0.21.3 or later. Update Hermes on the host, then try again.")
+            }
+        }
+        XCTAssertEqual(HermesHostFixture.requests.compactMap(\.url?.path), ["/api/status", "/api/status"],
+                       "Only the public status is read: no password and no Dashboard route")
+    }
+
+    /// Upstream #964 on the Dashboard: every request to the Hermes origin, sign-in included,
+    /// carries the Hermes connection's own headers, never the webui's `CustomHeaderStore`
+    /// headers, and a redirect that leaves the origin drops them.
+    func testDashboardRequestsCarryOnlyTheHermesConnectionHeadersAndOnlyToItsOrigin() async throws {
+        let webuiHeaders = CustomHeaderStore.shared.snapshot()
+        CustomHeaderStore.shared.replace(with: [CustomHeader(name: "X-Webui", value: "webui-token")])
+        defer { CustomHeaderStore.shared.replace(with: webuiHeaders) }
+        var saved = record
+        saved.headers = [CustomHeader(name: "CF-Access-Client-Id", value: "id.access")]
+        let relay = URL(string: "https://access.example/login")!
+        let http = HermesConnection(connection: saved, configuration: HermesHostFixture.configuration { request in
+            switch request.url?.path {
+            case "/api/skills": return .json(200, .array([]))
+            case "/api/mcp/servers/files/enabled": return .json(200, .object(["ok": .bool(true), "enabled": .bool(false)]))
+            case "/api/dashboard/plugins/hub": return .redirect(relay)
+            case "/login": return .json(200, .object(["ok": .bool(true)]))
+            default: return nil
+            }
+        })
+        let dashboard = DashboardClient(http: http)
+
+        _ = try await dashboard.installedSkills(profile: "work")
+        _ = try await dashboard.setMCPServer("files", enabled: false, profile: "work")
+        do {
+            _ = try await dashboard.pluginsHub()
+            XCTFail("A redirect to another host is something in front of Hermes")
+        } catch {
+            XCTAssertEqual(error as? BotFailure, .blocked)
+            XCTAssertEqual(DashboardProblem(error).message, BotFailure.blocked.localizedDescription)
+        }
+
+        let toOrigin = HermesHostFixture.requests.filter { $0.url?.host == "hermes.example" }
+        XCTAssertEqual(Set(toOrigin.compactMap(\.url?.path)),
+                       ["/api/status", "/auth/password-login", "/api/auth/me", "/api/skills",
+                        "/api/mcp/servers/files/enabled", "/api/dashboard/plugins/hub"])
+        for request in toOrigin {
+            XCTAssertEqual(request.value(forHTTPHeaderField: "CF-Access-Client-Id"), "id.access", request.url?.path ?? "")
+            XCTAssertNil(request.value(forHTTPHeaderField: "X-Webui"), request.url?.path ?? "")
+        }
+        let hop = try XCTUnwrap(HermesHostFixture.requests.first { $0.url?.host == relay.host })
+        XCTAssertNil(hop.value(forHTTPHeaderField: "CF-Access-Client-Id"), "The redirect left the origin")
+        XCTAssertNil(hop.value(forHTTPHeaderField: "X-Webui"))
+    }
 }
 
 /// A small stand-in for a Hermes host's dashboard: it answers the sign-in and Skills Hub

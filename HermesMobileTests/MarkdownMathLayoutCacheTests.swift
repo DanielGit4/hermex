@@ -22,7 +22,7 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
 
     /// The load-bearing equivalence: `.plain` must equal what the old
     /// `replacingInlineMath(in:)` pass produced, or rendering changed.
-    func testPlainLayoutMatchesLegacyInlineMathPass() {
+    func testPlainLayoutMatchesInlineImageInlineMathPass() {
         let inputs = [
             "plain prose with no math at all",
             "**bold** and _italic_ and `code`",
@@ -44,8 +44,8 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
             }
             XCTAssertEqual(
                 layout,
-                MarkdownMathFormatter.replacingInlineMath(in: input),
-                "Cached plain layout diverged from the legacy pass for \(input.debugDescription)"
+                MarkdownMathFormatter.inlineMathImages(in: input),
+                "Cached plain layout diverged from the inline-image pass for \(input.debugDescription)"
             )
         }
     }
@@ -106,12 +106,12 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
     }
 
     /// Differential check over generated content: for every no-math input, the
-    /// cached `.plain` payload must equal the legacy two-pass output exactly.
+    /// cached `.plain` payload must equal the inline-image two-pass output exactly.
     ///
     /// This is the test that actually licenses dropping the second
     /// `replacingInlineMath` pass. It is randomized but seeded, so a failure is
     /// reproducible from the printed input.
-    func testPlainLayoutMatchesLegacyPassAcrossGeneratedContent() {
+    func testPlainLayoutMatchesInlineImagePassAcrossGeneratedContent() {
         let fragments = [
             "prose ", "**bold** ", "`code` ", "$5 ", "$x^2$ ", "\\$escaped ",
             "\n\n", "- item\n", "> quote\n", "café ", "| a | b |\n", "[l](u) ",
@@ -140,8 +140,8 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
 
             XCTAssertEqual(
                 layout,
-                MarkdownMathFormatter.replacingInlineMath(in: content),
-                "Layout diverged from the legacy pass for \(content.debugDescription)"
+                MarkdownMathFormatter.inlineMathImages(in: content),
+                "Layout diverged from the inline-image pass for \(content.debugDescription)"
             )
         }
 
@@ -175,7 +175,7 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
             }
             XCTAssertEqual(
                 layout,
-                MarkdownMathFormatter.replacingInlineMath(in: input),
+                MarkdownMathFormatter.inlineMathImages(in: input),
                 "Empty display-math delimiters were dropped for \(input.debugDescription)"
             )
         }
@@ -185,10 +185,12 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
 
     // Golden layouts of `uncachedLayout(for:)`, the pass the streaming path runs on the whole reply.
     //
-    // The constants were captured from `e0bd8f9`'s math code. A change to any of them means the
-    // rendered transcript changed; re-baseline (copy `lines=` and `fnv=` from the failure) only for
-    // an intended output change. Section A uses the host timing bench's corpus and dump format, so
-    // its hash matches a dump taken on the host.
+    // The constants were captured from `e0bd8f9`'s math code and re-baselined for upstream #989
+    // (`f177b4a`), which renders inline math as `hermex-math:///` images: every line count stayed the
+    // same and only inline-math payloads changed. A change to any of them means the rendered transcript
+    // changed; re-baseline (copy `lines=` and `fnv=` from the failure) only for an intended output
+    // change. Section A uses the host timing bench's corpus and dump format, so its hash matches a
+    // dump taken on the host.
 
     func testGoldenLayoutsP8Corpus() {
         var dump = ""
@@ -203,7 +205,7 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
             }
         }
 
-        GoldenLayouts.assertDump(dump, section: "A (P8 corpus)", lines: 1_860, fnv: 0xfd6d857ded662f9f)
+        GoldenLayouts.assertDump(dump, section: "A (P8 corpus)", lines: 1_860, fnv: 0xa13667319ca8976d)
     }
 
     /// Prefixes at every Unicode-scalar boundary, because a stream can end between `$` and its
@@ -219,7 +221,7 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
             }
         }
 
-        GoldenLayouts.assertDump(dump, section: "B (edge corpus)", lines: 457, fnv: 0x101ca2ce6b9ec09b)
+        GoldenLayouts.assertDump(dump, section: "B (edge corpus)", lines: 457, fnv: 0xcdb842c4ba28f774)
     }
 
     func testGoldenLayoutsRandomCutsOf6KBFixtures() {
@@ -240,13 +242,13 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
             }
         }
 
-        GoldenLayouts.assertDump(dump, section: "C (random cuts of 6 KB fixtures)", lines: 36_488, fnv: 0x40484dad11fe60f6)
+        GoldenLayouts.assertDump(dump, section: "C (random cuts of 6 KB fixtures)", lines: 36_488, fnv: 0xf94bbb0b7605a010)
     }
 
     /// A combining mark joins the second delimiter byte into a larger Character, so these inputs'
     /// bytes contain `$$`, `\[` or `\]` while their Characters don't. A byte-level delimiter scan
     /// says yes and a Character-level one says no; either way the segmenter finds no display math,
-    /// so the layout must be the plain inline-math pass.
+    /// so the layout must be the plain inline-math pass (inline images since upstream #989).
     func testDisplayDelimiterFalsePositivesKeepTheSameLayout() {
         let inputs = [
             "$$\u{301}",
@@ -268,7 +270,7 @@ final class MarkdownMathLayoutCacheTests: XCTestCase {
             )
             XCTAssertEqual(
                 MarkdownMathLayoutCache.uncachedLayout(for: input),
-                .plain(MarkdownMathFormatter.replacingInlineMath(in: input)),
+                .plain(MarkdownMathFormatter.inlineMathImages(in: input)),
                 "Layout changed for \(input.debugDescription)"
             )
         }

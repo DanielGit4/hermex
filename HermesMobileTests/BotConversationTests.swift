@@ -264,6 +264,30 @@ import Vision
         XCTAssertEqual(delays, [1, 2, 4, 8, 16, 30, 30].map { .seconds($0) })
         XCTAssertEqual(model.connectionState, .disconnected)
         XCTAssertEqual(model.errorMessage, BotFailure.rejected(401).localizedDescription)
+        XCTAssertTrue(model.needsSignIn)
+        model.suspend()
+    }
+
+    /// Only a refused password swaps Reconnect for Update sign-in; a proxy's 502 keeps
+    /// the quiet retry (#884).
+    func testOnlyARejectedPasswordNeedsSignIn() async {
+        let wire = BotFixtureWire(); wire.lookupFailure = .rejected(401)
+        var delays = 0
+        let model = make(wire, reconnectDelay: { _ in delays += 1; throw CancellationError() })
+        await model.recover()
+        XCTAssertTrue(model.needsSignIn)
+        XCTAssertFalse(model.isReconnecting)
+        XCTAssertEqual(delays, 0, "a refused password is never retried on its own")
+
+        wire.lookupFailure = .rejected(502)
+        await model.recover()
+        XCTAssertFalse(model.needsSignIn)
+        XCTAssertTrue(model.isReconnecting)
+
+        wire.lookupFailure = nil
+        await model.recover()
+        XCTAssertEqual(model.connectionState, .connected)
+        XCTAssertFalse(model.needsSignIn)
         model.suspend()
     }
 
@@ -282,6 +306,26 @@ import Vision
         XCTAssertEqual(delays, 1, "no retry is scheduled after .notDashboard")
         XCTAssertEqual(model.connectionState, .disconnected)
         XCTAssertEqual(model.errorMessage, "hermes.local isn't a Hermes dashboard. Use the dashboard address, not the Hermes Web UI.")
+        model.suspend()
+    }
+
+    /// A proxy that refuses the gateway upgrade does not heal on its own, and each retry
+    /// would mint another ticket.
+    func testReconnectStopsWithAdviceWhenTheGatewayUpgradeIsRefused() async {
+        let wire = BotFixtureWire()
+        var delays = 0
+        let model = make(wire, reconnectDelay: { _ in
+            delays += 1
+            wire.lookupFailure = .upgradeRefused(403)
+        })
+        await model.recover()
+        let stopped = expectation(description: "The proxy needs the user's attention")
+        wire.onDisconnect?(BotFailure.transport)
+        withObservationTracking { _ = model.isReconnecting } onChange: { stopped.fulfill() }
+        await fulfillment(of: [stopped], timeout: 3)
+        XCTAssertEqual(delays, 1, "no retry is scheduled after a refused upgrade")
+        XCTAssertEqual(model.connectionState, .disconnected)
+        XCTAssertEqual(model.errorMessage, "Hermes accepted the sign-in, but the live connection was refused. If a proxy or tunnel sits in front of Hermes, turn on WebSocket support and let the Sec-WebSocket-Protocol header through.")
         model.suspend()
     }
 
@@ -796,6 +840,256 @@ import Vision
         XCTAssertNil(BotConversation.TitleFace.resting.accessibilityValue)
     }
 
+    // MARK: turn outcome (#878)
+
+    /// A retained failure as `session.resume` sends it (`_inflight_snapshot`).
+    private func failedInflight(user: String = "Summarize my unread email.", error: String = "HTTP 429: Rate limit exceeded",
+                                surface: BotJSON = .null, recoverable: BotJSON = .bool(true)) -> BotJSON {
+        var fields: [String: BotJSON] = ["user": .string(user), "assistant": .string(""), "streaming": .bool(false),
+                                         "error": .string(error), "status": .string("error"), "recoverable": recoverable]
+        if surface != .null { fields["error_surface"] = surface }
+        return .object(fields)
+    }
+
+    /// The failed prompt's saved row: the host writes it at submit, dated inside the turn.
+    private let failedPromptRow = BotJSON.object(["role": .string("user"), "text": .string("Summarize my unread email."),
+                                                  "timestamp": .number(210), "row_id": .number(41)])
+    private let retryableSurface = BotJSON.object(["layer": .string("endpoint"), "code": .string("timeout"), "retryable": .bool(true)])
+
+    func testAFailedTurnReadsTheHostsReasonFromTheResumeSnapshot() async throws {
+        let wire = BotFixtureWire(); wire.turnStartedAt = 200; wire.history = [failedPromptRow]
+        wire.inflight = failedInflight(surface: .object([
+            "layer": .string("provider"), "code": .string("rate_limit"), "retryable": .bool(true),
+            "provider": .string("openrouter"), "resets_at": .number(2_000_000_000), "auth_kind": .string("api_key")
+        ]))
+        let model = make(wire); await model.recover()
+        let failure = try XCTUnwrap(model.turnFailure)
+        XCTAssertEqual(failure.error, "HTTP 429: Rate limit exceeded")
+        XCTAssertEqual(failure.surface, HermesTurnOutcome.Surface(
+            layer: "provider", code: "rate_limit", retryable: true, provider: "openrouter",
+            resetsAt: Date(timeIntervalSince1970: 2_000_000_000), message: nil))
+        XCTAssertEqual(failure.recoverable, true)
+        XCTAssertEqual(model.titleFace, .failed)
+
+        // Locking the phone keeps the row; the reconnect rebuilds the same one from the host.
+        model.suspend()
+        XCTAssertEqual(model.turnFailure, failure)
+        XCTAssertEqual(model.titleFace, .resting, "a disconnected chat still rests its face")
+        await model.recover()
+        XCTAssertEqual(model.turnFailure, failure)
+        XCTAssertEqual(model.titleFace, .failed)
+
+        // The host drops the failure when the next turn starts, from any client.
+        wire.running = true; wire.inflight = .object(["user": .string("Try again"), "started_at": .number(300)])
+        await model.recover()
+        XCTAssertNil(model.turnFailure)
+        model.suspend()
+    }
+
+    func testTheOutcomeTitleIsTheHostsSentenceThenItsCodeThenItsLayer() throws {
+        func title(_ surface: BotJSON) throws -> String {
+            BotTurnOutcomeRow.title(for: try XCTUnwrap(HermesTurnOutcome(inflight: failedInflight(surface: surface))))
+        }
+        XCTAssertEqual(try title(.object(["layer": .string("provider"), "code": .string("free_tier_rate_limited"),
+                                          "retryable": .bool(true), "message": .string("The free tier is busy.")])),
+                       "The free tier is busy.")
+        XCTAssertEqual(try title(retryableSurface), String(localized: "Your custom model endpoint did not answer"),
+                       "a custom endpoint's timeout points at that endpoint")
+        XCTAssertEqual(try title(.object(["layer": .string("provider"), "code": .string("timeout"), "retryable": .bool(true)])),
+                       String(localized: "The model provider did not answer in time"),
+                       "the code names the fix before the layer does")
+        XCTAssertEqual(try title(.object(["layer": .string("streaming"), "code": .string("stream_drop"), "retryable": .bool(true)])),
+                       String(localized: "The connection to the model provider dropped mid-reply"))
+        XCTAssertEqual(try title(.object(["layer": .string("quantum"), "code": .string("new_reason")])),
+                       String(localized: "The turn failed"))
+        XCTAssertEqual(try title(.null), String(localized: "The turn failed"))
+    }
+
+    func testRetryIsOfferedOnlyWhenTheHostSaysItCanHelp() async {
+        let cases: [(surface: BotJSON, recoverable: BotJSON, offered: Bool, why: String)] = [
+            (.object(["layer": .string("auth"), "code": .string("auth"), "retryable": .bool(false)]), .bool(true), false,
+             "a bad key fails the same way again"),
+            (retryableSurface, .bool(true), true, "the host says a retry can help"),
+            (.null, .bool(true), true, "a host without a surface marks every kept failure recoverable"),
+            (.null, .null, false, "no verdict at all offers nothing")
+        ]
+        for (surface, recoverable, offered, why) in cases {
+            let wire = BotFixtureWire(); wire.turnStartedAt = 200; wire.history = [failedPromptRow]
+            wire.inflight = failedInflight(surface: surface, recoverable: recoverable)
+            let model = make(wire); await model.recover()
+            XCTAssertNotNil(model.turnFailure, why)
+            XCTAssertEqual(model.offersRetry, offered, why)
+            XCTAssertEqual(model.mayRetry, offered, why)
+            model.suspend()
+            XCTAssertFalse(model.mayRetry, "a disconnected chat cannot retry")
+        }
+        // Without the prompt's durable row there is nothing to cut.
+        let wire = BotFixtureWire(); wire.turnStartedAt = 200
+        wire.history = [.object(["role": .string("user"), "text": .string("Summarize my unread email."), "timestamp": .number(210)])]
+        wire.inflight = failedInflight(surface: retryableSurface)
+        let model = make(wire); await model.recover()
+        XCTAssertNotNil(model.turnFailure)
+        XCTAssertFalse(model.offersRetry)
+        model.suspend()
+    }
+
+    func testBillingAndTheSaveWarningComeFromMessageComplete() async throws {
+        let billingURL = "https://openrouter.ai/settings/credits"
+        let billing = BotJSON.object([
+            "text": .string(""), "status": .string("error"), "error": .string("HTTP 402: This request requires more credits"),
+            "recoverable": .bool(true), "failure_reason": .string("billing"),
+            "error_surface": .object(["layer": .string("billing"), "code": .string("billing"), "retryable": .bool(false)]),
+            "billing": .object(["provider": .string("openrouter"), "provider_label": .string("OpenRouter"), "model": .string("m"),
+                                "billing_url": .string(billingURL), "is_nous": .bool(false), "message": .string("Add credits…")])
+        ])
+        let wire = BotFixtureWire(); wire.running = true
+        let model = make(wire); await model.recover()
+        wire.onEvent?(typed(1, "message.complete", billing))
+        XCTAssertEqual(model.turnNotice?.billingURL, URL(string: billingURL))
+        XCTAssertEqual(model.turnNotice?.failureReason, "billing")
+
+        // Kept across a lock and a continuous reconnect, though resume never carries it.
+        wire.running = false; wire.replay = BotFixtureWire.replay(latest: 1)
+        model.suspend()
+        await model.recover()
+        XCTAssertEqual(model.turnNotice?.billingURL, URL(string: billingURL))
+        model.suspend()
+
+        // A phone that missed the frame gets it back from the replay ring, even on a turn that succeeded.
+        let warning = "History changed during this turn — the response above is visible but was not saved to session history."
+        wire.replay = BotFixtureWire.replay(latest: 3, events: [
+            typed(2, "message.start"),
+            typed(3, "message.complete", .object(["text": .string("Two things."), "status": .string("complete"),
+                                                  "warning": .string(warning)]))
+        ])
+        let reopened = make(wire); await reopened.recover()
+        XCTAssertEqual(reopened.turnNotice?.warning, warning)
+        XCTAssertNil(reopened.turnNotice?.billingURL)
+        XCTAssertNil(reopened.turnFailure, "a successful turn keeps no failure")
+        reopened.suspend()
+
+        let plainHTTP = BotJSON.object(["warning": .string("w"), "billing": .object(["billing_url": .string("http://openrouter.ai/credits")])])
+        XCTAssertNil(HermesTurnOutcome(complete: plainHTTP)?.billingURL, "only an https billing page opens")
+    }
+
+    func testTheOutcomeRowClearsWhenTheNextSendIsAccepted() async throws {
+        let wire = BotFixtureWire(); wire.turnStartedAt = 200; wire.history = [failedPromptRow]
+        wire.inflight = failedInflight(surface: retryableSurface)
+        let model = make(wire); await model.recover()
+        wire.onEvent?(typed(1, "message.complete", .object(["status": .string("error"), "error": .string("Connection error."),
+                                                             "warning": .string("History changed during this turn.")])))
+        wire.replay = BotFixtureWire.replay(latest: 1)
+        await model.recover()
+        XCTAssertNotNil(model.turnFailure)
+        XCTAssertEqual(model.turnNotice?.warning, "History changed during this turn.")
+
+        wire.submitFailure = .rejected(4009)
+        model.editDraft("Use the local model and try again.")
+        await model.submit(try XCTUnwrap(model.preparePrompt(.send)))
+        XCTAssertNotNil(model.turnFailure, "a refused send keeps the row")
+        XCTAssertNotNil(model.turnNotice)
+
+        wire.submitFailure = nil
+        await model.recover()
+        await model.submit(try XCTUnwrap(model.preparePrompt(.send)))
+        XCTAssertEqual(model.feedback?.event, .sent)
+        XCTAssertNil(model.turnFailure, "the host took the next prompt")
+        XCTAssertNil(model.turnNotice)
+        model.suspend()
+    }
+
+    func testRetryResubmitsTheFailedPromptInPlace() async throws {
+        let note = BotMentions(roster: [try XCTUnwrap(BotProfile(.object(["name": .string("research")])))], excluding: "inbox-triage")
+            .annotation(for: "@research")
+        let raw = "Ask @research about my mail." + note
+        let wire = BotFixtureWire(); wire.turnStartedAt = 200
+        wire.history = [.object(["role": .string("user"), "text": .string(raw), "timestamp": .number(210), "row_id": .number(41)])]
+        wire.inflight = failedInflight(user: raw, surface: retryableSurface)
+        let model = make(wire); await model.recover()
+        model.editDraft("an unrelated draft")
+        await model.retryFailedTurn()
+        XCTAssertEqual(wire.calls.filter { $0.0 == "prompt.submit" }.map(\.1), [[
+            "session_id": .string("runtime"), "text": .string(raw), "truncate_before_row_id": .number(41),
+            "confirm_truncate": .bool(true), "confirm_empty_truncate": .bool(true)
+        ]], "the saved row is cut and its prompt resent as the host holds it, never queued")
+        XCTAssertNil(model.turnFailure)
+        XCTAssertEqual(model.feedback?.event, .sent)
+        XCTAssertEqual(model.draft, "an unrelated draft", "Retry never touches the composer")
+        // The host's next snapshot, not the phone, says the turn runs again.
+        let refreshed = expectation(description: "snapshot after the retry")
+        withObservationTracking { _ = model.turn } onChange: { refreshed.fulfill() }
+        await fulfillment(of: [refreshed], timeout: 5)
+        XCTAssertEqual(model.turn, .running)
+        model.suspend()
+
+        // Busy: say so, and do nothing else.
+        let busy = BotFixtureWire(); busy.turnStartedAt = 200; busy.history = wire.history
+        busy.inflight = failedInflight(user: raw, surface: retryableSurface); busy.submitFailure = .rejected(4009)
+        let waiting = make(busy); await waiting.recover()
+        let callsBefore = busy.calls.count
+        await waiting.retryFailedTurn()
+        XCTAssertEqual(busy.calls.count, callsBefore + 1, "one refused write and no resend")
+        XCTAssertEqual(waiting.errorMessage, String(localized: "Wait for the bot to finish."))
+        XCTAssertEqual(waiting.turn, .interrupted, "nothing changed, so nothing is reread")
+        XCTAssertNotNil(waiting.turnFailure)
+        waiting.suspend()
+
+        // A `/skill` prompt resends what the host received, not its displayed invocation,
+        // which leaves out the attachment the user sent with it.
+        let expanded = "[IMPORTANT: The user has invoked the \"work\" skill.]\n\nfix the leak\n\n@file:/tmp/leak.log"
+        let skill = BotFixtureWire(); skill.turnStartedAt = 200
+        skill.history = [.object(["role": .string("user"), "text": .string("/work fix the leak"),
+                                  "display_kind": .string("skill_invocation"), "timestamp": .number(210), "row_id": .number(7)])]
+        skill.inflight = failedInflight(user: expanded, surface: retryableSurface)
+        let skilled = make(skill); await skilled.recover()
+        await skilled.retryFailedTurn()
+        XCTAssertEqual(skill.calls.last { $0.0 == "prompt.submit" }?.1["text"], .string(expanded))
+        skilled.suspend()
+    }
+
+    /// An agent that never started leaves its prompt row saved but outside the host's
+    /// live history, so the host refuses every cut at it with 4018.
+    func testRetryHidesOnceTheHostCannotCutTheFailedPrompt() async throws {
+        let wire = BotFixtureWire(); wire.turnStartedAt = 200; wire.history = [failedPromptRow]
+        wire.inflight = failedInflight(surface: .object([
+            "layer": .string("runtime"), "code": .string("agent_init_failed"), "retryable": .bool(true)
+        ]))
+        wire.submitFailure = .rejected(4018)
+        let model = make(wire); await model.recover()
+        XCTAssertTrue(model.offersRetry)
+
+        await model.retryFailedTurn()
+        XCTAssertEqual(model.errorMessage, String(localized: "This message can’t be changed any more."))
+        let refreshed = expectation(description: "snapshot after the refusal")
+        withObservationTracking { _ = model.turn } onChange: { refreshed.fulfill() }
+        await fulfillment(of: [refreshed], timeout: 5)
+        XCTAssertEqual(model.turn, .interrupted)
+        XCTAssertNotNil(model.turnFailure, "the host still keeps the failure")
+        XCTAssertEqual(model.titleFace, .failed)
+        XCTAssertFalse(model.offersRetry, "the same cut would fail on every tap")
+        XCTAssertEqual(wire.calls.filter { $0.0 == "prompt.submit" }.count, 1, "one refused write and no resend")
+        model.suspend()
+    }
+
+    func testAStopShowsNoOutcomeRow() async throws {
+        let wire = BotFixtureWire(); wire.running = true
+        let model = make(wire); await model.recover()
+        await model.stop(try XCTUnwrap(model.prepareStop()))
+        wire.onEvent?(typed(1, "message.complete", .object(["text": .string(""), "status": .string("interrupted")])))
+        wire.running = false; wire.replay = BotFixtureWire.replay(latest: 1)
+        wire.transformResume = { snapshot in
+            guard case .object(var fields) = snapshot else { return snapshot }
+            fields["status"] = .string("interrupted")
+            return .object(fields)
+        }
+        await model.recover()
+        XCTAssertEqual(model.turn, .interrupted)
+        XCTAssertNil(model.turnFailure)
+        XCTAssertNil(model.turnNotice)
+        XCTAssertFalse(model.offersRetry)
+        model.suspend()
+    }
+
     func testReplayFaultsReplaceHistoryWithoutAppendingOverlap() async {
         let wire = BotFixtureWire(); let model = make(wire)
         await model.recover()
@@ -844,6 +1138,7 @@ import Vision
     func testLiveEventsReplaceInflightSnapshotsWithoutDuplicatingText() async {
         let wire = BotFixtureWire(); wire.running = true
         let model = make(wire); await model.recover()
+        let opened = wire.calls.count
         wire.inflight = .object(["user": .string("question"), "assistant": .string("first second")])
         let updated = expectation(description: "inflight snapshot published")
         withObservationTracking {
@@ -855,7 +1150,7 @@ import Vision
         await fulfillment(of: [updated], timeout: 3)
         XCTAssertEqual(model.liveMessages.map(\.content), ["question", "first second"])
         XCTAssertEqual(model.messages.map(\.content), ["saved"])
-        XCTAssertEqual(wire.calls.filter { $0.0 == "session.resume" && $0.1["omit_messages"] == .bool(true) }.count, 1)
+        XCTAssertEqual(wire.calls.dropFirst(opened).filter { $0.0 == "session.resume" && $0.1["omit_messages"] == .bool(true) }.count, 1)
         model.suspend()
         let retained = model.liveMessages
         wire.inflight = .object(["assistant": .string("late old connection")])
@@ -1216,6 +1511,36 @@ import Vision
         }
     }
 
+    /// Control Center and banners (`.inactive`) keep a chat on the shared socket; only the
+    /// background suspends it, and the return recovers it once (#902).
+    func testOnlyTheBackgroundSuspendsTheChatAndTheReturnRecoversItOnce() async throws {
+        let wire = BotFixtureWire()
+        let model = make(wire)
+        // Shown while inactive, so the screen leaves the first recovery to the test.
+        let scene = ScenePhaseDriver(.inactive)
+        let window = try host(BotChatView(model: model), phase: scene)
+        defer { model.suspend(); window.isHidden = true; window.rootViewController = nil }
+        await settle(window)
+        await model.recover()
+        for phase in [ScenePhase.active, .inactive, .active] {
+            scene.phase = phase
+            await settle(window)
+        }
+        XCTAssertEqual(model.connectionState, .connected, "Control Center keeps the chat connected")
+        XCTAssertEqual(wire.connectCount, 1, "and nothing reconnects")
+
+        scene.phase = .background
+        await settle(window)
+        XCTAssertEqual(model.connectionState, .disconnected, "The background suspends the chat")
+        let recovered = expectation(description: "the return recovers the chat once")
+        wire.onConnect = { recovered.fulfill() }
+        scene.phase = .inactive
+        await settle(window)
+        scene.phase = .active
+        await fulfillment(of: [recovered], timeout: 5)
+        XCTAssertEqual(wire.connectCount, 2)
+    }
+
     /// Each snapshot replaces the live reply with a longer string. On the settled
     /// path every one of them would be parsed whole and stored in the shared
     /// layout cache, evicting the settled rows it exists for.
@@ -1454,6 +1779,261 @@ import Vision
     }
 }
 
+/// Reattaching over the shared socket (#901): live frames that land while the chat
+/// recovers wait for the replay and the snapshot, and the host's temporary resume
+/// refusals are retried for a minute.
+extension BotConversationTests {
+    /// Seq 4 and 5 were missed while away. Seq 6 is live and lands ahead of the replay
+    /// reply, behind a copy of seq 4, which the replay carries too.
+    func testAReattachAppliesTheReplayBeforeAFrameThatSkippedAhead() async {
+        let host = BotSocketHost()
+        let (model, _) = overSocket(host)
+        await model.recover()
+        XCTAssertEqual(model.sequence, 3)
+        let missed = [typed(4, "tool.complete", Self.tool("a", done: true)),
+                      typed(5, "reasoning.delta", .object(["text": .string(" Then archive.")]))]
+        host.next("session.events.since", .init(result: BotFixtureWire.replay(latest: 5, events: missed),
+                                                before: [missed[0], typed(6, "tool.start", Self.tool("b"))]))
+        await model.recover()
+        XCTAssertEqual(model.connectionState, .connected)
+        XCTAssertFalse(model.replayWasReset, "nothing was lost, so nothing is rebuilt")
+        XCTAssertEqual(model.sequence, 6)
+        XCTAssertEqual(model.liveActivity.toolCalls.map(\.id), ["a", "b"])
+        XCTAssertEqual(model.liveActivity.toolCalls.map(\.isCompleted), [true, false])
+        XCTAssertEqual(model.liveActivity.reasoning, "Read the inbox. Then archive.")
+        XCTAssertEqual(model.liveActivitySnapshot.chips, ["2 tools"])
+        model.suspend()
+    }
+
+    /// The host can write a frame after reading the replay it is about to send.
+    func testAFrameAheadOfAnUnchangedReplayIsAppliedOnceAfterIt() async {
+        let host = BotSocketHost()
+        let (model, _) = overSocket(host)
+        await model.recover()
+        host.next("session.events.since", .init(result: BotFixtureWire.replay(latest: 3),
+                                                before: [typed(4, "tool.start", Self.tool("b"))]))
+        await model.recover()
+        XCTAssertFalse(model.replayWasReset, "nothing was missed, so nothing is rebuilt")
+        XCTAssertEqual(model.sequence, 4, "the cursor never moves back to the replay's")
+        XCTAssertEqual(model.liveActivity.toolCalls.map(\.id), ["a", "b"])
+        model.suspend()
+    }
+
+    func testAGapAfterTheHeldFramesSchedulesAFullRead() async {
+        let host = BotSocketHost()
+        let (model, _) = overSocket(host)
+        await model.recover()
+        host.next("session.events.since", .init(result: BotFixtureWire.replay(latest: 4, events: [typed(4, "tool.complete", Self.tool("a", done: true))]),
+                                                before: [typed(9, "tool.start", Self.tool("c"))]))
+        await model.recover()
+        let refreshed = expectation(description: "the gap's refresh")
+        host.expect(refreshed, onNext: "session.resume")
+        let reattached = host.requests.count
+        XCTAssertTrue(model.replayWasReset, "seq 5 to 8 never arrived")
+        XCTAssertEqual(model.sequence, 9)
+        XCTAssertEqual(model.liveActivity.toolCalls.map(\.id), ["c"], "rows from before the gap may be stale")
+        await fulfillment(of: [refreshed], timeout: 3)
+        XCTAssertEqual(host.transcriptReads(since: reattached), [true])
+        model.suspend()
+    }
+
+    /// The identity resume carries no transcript and the snapshot is the reconnect's one
+    /// full read, even when a turn boundary asked for one just before the screen left.
+    func testAReattachReadsTheTranscriptOnce() async {
+        let host = BotSocketHost()
+        let (model, wire) = overSocket(host)
+        await model.recover()
+        wire.onEvent?(typed(4, "message.complete"))
+        let leaving = host.requests.count
+        host.next("session.events.since", .init(result: BotFixtureWire.replay(latest: 4, events: [typed(4, "message.complete")])))
+        await model.recover()
+        XCTAssertEqual(host.transcriptReads(since: leaving), [false, true])
+        let refreshed = expectation(description: "the next delta's refresh")
+        host.expect(refreshed, onNext: "session.resume")
+        wire.onEvent?(typed(5, "message.delta", .object(["text": .string("Archiving")])))
+        await fulfillment(of: [refreshed], timeout: 3)
+        XCTAssertEqual(host.transcriptReads(since: leaving), [false, true, false], "no full read was left pending")
+        model.suspend()
+    }
+
+    /// Past the replay ring's 512 frames the hold has lost some, so the chat rebuilds
+    /// from a full read instead of showing what it kept.
+    func testFramesPastTheHoldLimitRebuildFromAFullRead() async {
+        let host = BotSocketHost()
+        let (model, _) = overSocket(host)
+        await model.recover()
+        let flood = (4...(4 + BotConversation.heldFrameLimit)).map { typed($0, "reasoning.delta", .object(["text": .string(".")])) }
+        host.next("session.events.since", .init(result: BotFixtureWire.replay(latest: 3), before: flood))
+        await model.recover()
+        let refreshed = expectation(description: "the rebuild's read")
+        host.expect(refreshed, onNext: "session.resume")
+        let reattached = host.requests.count
+        XCTAssertTrue(model.replayWasReset)
+        XCTAssertFalse(model.liveActivity.hasTurnWork)
+        await fulfillment(of: [refreshed], timeout: 3)
+        XCTAssertEqual(host.transcriptReads(since: reattached), [true])
+        model.suspend()
+    }
+
+    func testAResumeRefusedWhileTheHostSwapsOrSettlesTheRuntimeReconnectsWithoutAdvice() async {
+        for code in [4007, 4009] {
+            let host = BotSocketHost()
+            host.next("session.resume", .init(error: code))
+            var delays: [Duration] = []
+            let (model, _) = overSocket(host, reconnectDelay: { delays.append($0) })
+            await model.recover()
+            XCTAssertTrue(model.isReconnecting, "\(code)")
+            XCTAssertNil(model.errorMessage, "\(code)")
+            let connected = expectation(description: "reconnected after \(code)")
+            withObservationTracking { _ = model.isReconnecting } onChange: { connected.fulfill() }
+            await fulfillment(of: [connected], timeout: 3)
+            XCTAssertEqual(model.connectionState, .connected, "\(code)")
+            XCTAssertNil(model.errorMessage, "\(code)")
+            XCTAssertEqual(delays, [.seconds(1)], "\(code)")
+            model.suspend()
+        }
+    }
+
+    func testAResumeRefusalThatOutlastsAMinuteStopsWithTheAdvice() async {
+        let host = BotSocketHost()
+        host.always("session.resume", .init(error: 4007))
+        var clock = ContinuousClock.now
+        var delays: [Duration] = []
+        let (model, _) = overSocket(host, now: { clock }, reconnectDelay: { delays.append($0); clock = clock.advanced(by: $0) })
+        await model.recover()
+        let stopped = expectation(description: "the refusals outlasted the window")
+        withObservationTracking { _ = model.isReconnecting } onChange: { stopped.fulfill() }
+        await fulfillment(of: [stopped], timeout: 5)
+        XCTAssertEqual(delays, [1, 2, 4, 8, 16, 30].map { .seconds($0) }, "refused at 0, 1, 3, 7, 15, 31 and 61 s")
+        XCTAssertEqual(model.connectionState, .disconnected)
+        XCTAssertEqual(model.errorMessage, BotFailure.rejected(4007).localizedDescription)
+        XCTAssertEqual(Set(host.requests.compactMap { $0["method"].text }), ["session.list", "session.resume"],
+                       "a reconnect only reads: no prompt, answer, stop or setting is sent")
+        model.suspend()
+    }
+
+    /// Only `session.resume`'s refusals wait out the window.
+    func testA4007FromTheChatLookupStillStopsWithAdvice() async {
+        let wire = BotFixtureWire(); wire.lookupFailure = .rejected(4007)
+        let model = make(wire, reconnectDelay: { _ in XCTFail("a lookup refusal is never retried") })
+        await model.recover()
+        XCTAssertFalse(model.isReconnecting)
+        XCTAssertEqual(model.errorMessage, BotFailure.rejected(4007).localizedDescription)
+        model.suspend()
+    }
+
+    /// A conversation, and its client, on a fresh connection to `host`. Its first replay
+    /// holds the running turn through seq 3: the start, tool `a` and some reasoning.
+    private func overSocket(_ host: BotSocketHost, now: @escaping () -> ContinuousClock.Instant = { ContinuousClock.now },
+                            reconnectDelay: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) })
+        -> (BotConversation, BotClient) {
+        addTeardownBlock { HermesHostFixture.reset() }
+        host.always("session.events.since", .init(result: BotFixtureWire.replay(latest: 3, events: [
+            typed(1, "message.start"), typed(2, "tool.start", Self.tool("a")),
+            typed(3, "reasoning.delta", .object(["text": .string("Read the inbox.")]))
+        ])))
+        let record = connection
+        let client = BotClient(http: host.connection(record))
+        let model = BotConversation(server: server, connection: record, profile: profile, wire: client,
+                                    drafts: ChatDraftStore(persistence: BotMemoryDrafts(), debounceDuration: .seconds(60)),
+                                    reconnectDelay: reconnectDelay, now: now)
+        return (model, client)
+    }
+
+    private static func tool(_ id: String, done: Bool = false) -> BotJSON {
+        .object(["tool_id": .string(id), "name": .string("terminal")].merging(done ? ["result": .string("ok")] : [:]) { $1 })
+    }
+}
+
+/// A Hermes host scripted at the socket, so a `BotConversation` runs over a real
+/// `BotClient` and the shared `HermesGateway`. A reply can follow live frames, as the
+/// host's event thread writes them ahead of it, which `BotFixtureWire` cannot show.
+/// Sockets answer off the main actor, so the script is locked.
+final class BotSocketHost: @unchecked Sendable {
+    struct Reply {
+        var result: BotJSON = .object([:])
+        /// A JSON-RPC error code answered instead of `result`.
+        var error: Int?
+        /// Event frames written ahead of the reply.
+        var before: [BotJSON] = []
+    }
+
+    private let lock = NSLock()
+    private var standing: [String: Reply] = [
+        "session.list": Reply(result: .object(["sessions": .array([.object(["id": .string("root"), "resolved_id": .string("tip")])])])),
+        "subagent.list": Reply(result: .object(["subagents": .array([]), "delegations": .array([])]))
+    ]
+    private var queued: [String: [Reply]] = [:]
+    private var log: [BotJSON] = []
+    private var waiters: [(method: String, expectation: XCTestExpectation)] = []
+
+    /// Every request the conversation sent, across its sockets, handshakes excluded.
+    var requests: [BotJSON] { lock.withLock { log } }
+
+    /// Answers every later `method` call with `reply`.
+    func always(_ method: String, _ reply: Reply) { lock.withLock { standing[method] = reply } }
+    /// Answers the next `method` call with `reply`, ahead of any standing one.
+    func next(_ method: String, _ reply: Reply) { lock.withLock { queued[method, default: []].append(reply) } }
+    /// Fulfills `expectation` when the next `method` call arrives.
+    func expect(_ expectation: XCTestExpectation, onNext method: String) {
+        lock.withLock { waiters.append((method, expectation)) }
+    }
+
+    /// For each `session.resume` from request `index` on, whether it asked for the transcript.
+    func transcriptReads(since index: Int) -> [Bool] {
+        requests.dropFirst(index).filter { $0["method"].text == "session.resume" }
+            .map { $0["params"]["omit_messages"].flag != true }
+    }
+
+    /// A connection to this host: an ordinary sign-in, then a scripted socket per open.
+    @MainActor func connection(_ record: BotConnection) -> HermesConnection {
+        HermesConnection(connection: record, configuration: HermesHostFixture.configuration { _ in nil },
+                         gateway: .init(socketFactory: { [self] _ in
+                             let socket = BotScriptedSocket()
+                             socket.reply = { [weak socket, self] request in answer(request, on: socket) }
+                             return socket
+                         }))
+    }
+
+    /// Without a script, `session.resume` answers with the running turn, honouring
+    /// `omit_messages` as the host does, and any other method is unknown.
+    private func answer(_ request: BotJSON, on socket: BotScriptedSocket?) -> BotJSON {
+        let method = request["method"].text ?? ""
+        let (reply, fulfilled): (Reply?, [XCTestExpectation]) = lock.withLock {
+            log.append(request)
+            let fulfilled = waiters.filter { $0.method == method }.map(\.expectation)
+            waiters.removeAll { $0.method == method }
+            if var replies = queued[method], !replies.isEmpty {
+                let reply = replies.removeFirst()
+                queued[method] = replies
+                return (reply, fulfilled)
+            }
+            return (standing[method], fulfilled)
+        }
+        fulfilled.forEach { $0.fulfill() }
+        for frame in reply?.before ?? [] {
+            socket?.enqueue(Self.message(["method": .string("event"), "params": frame]))
+        }
+        if let code = reply?.error {
+            return .object(["id": request["id"], "error": .object(["code": .number(Double(code)), "message": .string("refused")])])
+        }
+        if let reply { return .object(["id": request["id"], "result": reply.result]) }
+        guard method == "session.resume" else {
+            return .object(["id": request["id"], "error": .object(["code": .number(-32601), "message": .string("unknown method")])])
+        }
+        let omitted = request["params"]["omit_messages"].flag == true
+        return .object(["id": request["id"], "result": .object([
+            "session_id": .string("runtime"), "session_key": .string("tip"), "running": .bool(true),
+            "messages": .array(omitted ? [] : [.object(["role": .string("assistant"), "text": .string("saved")])]),
+            "messages_omitted": .bool(omitted), "info": .object(["profile_name": .string("inbox-triage")])
+        ])])
+    }
+
+    private static func message(_ fields: [String: BotJSON]) -> URLSessionWebSocketTask.Message {
+        .string(String(decoding: (try? JSONEncoder().encode(BotJSON.object(fields))) ?? Data(), as: UTF8.self))
+    }
+}
+
 extension XCTestCase {
     /// Lets a hosted SwiftUI window apply pending state before a test reads it.
     /// Each pass yields one main-queue turn, so queued main-actor work (a view's
@@ -1494,6 +2074,30 @@ extension XCTestCase {
     }
 
     @MainActor private static var softwareKeyboardIsWarm = false
+
+    /// Hosts `content` in a window whose scene phase `driver` sets.
+    @MainActor func host(_ content: some View, phase driver: ScenePhaseDriver) throws -> UIWindow {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 390, height: 844)
+        window.rootViewController = UIHostingController(rootView: ScenePhased(driver: driver, content: content))
+        window.makeKeyAndVisible()
+        return window
+    }
+}
+
+/// Stands in for the system's scene phase under a hosted screen, so a test can pull down
+/// Control Center (`.inactive`) or go home (`.background`). Settle the window after each
+/// change, so the screen sees every phase rather than only the last.
+@MainActor @Observable final class ScenePhaseDriver {
+    var phase: ScenePhase
+    init(_ phase: ScenePhase) { self.phase = phase }
+}
+
+private struct ScenePhased<Content: View>: View {
+    let driver: ScenePhaseDriver
+    let content: Content
+    var body: some View { content.environment(\.scenePhase, driver.phase) }
 }
 
 actor BotMemoryDrafts: ChatDraftPersisting {
@@ -1567,7 +2171,8 @@ actor BotMemoryDrafts: ChatDraftPersisting {
         return try await downloadArtifact(path, context)
     }
     var connectCount = 0
-    func connect() async throws { connectCount += 1 }
+    var onConnect: (() -> Void)?
+    func connect() async throws { connectCount += 1; onConnect?() }
     func close() {}
     func call(_ call: HermesCall, validateDispatch: (() throws -> Void)?) async throws -> BotJSON {
         let method = call.method, params = try call.params()

@@ -20,9 +20,8 @@ final class APIClientTTSTests: APIClientTestCase {
             // The server defaults to `zh-CN-XiaoxiaoNeural`, so the voice must
             // always be sent explicitly.
             XCTAssertEqual(json["voice"] as? String, "en-US-AriaNeural")
-            // No engine/rate/pitch: the server defaults to the keyless edge engine
-            // with neutral prosody, and a picker is a non-goal (#15).
-            XCTAssertEqual(json.count, 2)
+            XCTAssertEqual(json["engine"] as? String, "edge")
+            XCTAssertEqual(json.count, 3)
 
             let response = HTTPURLResponse(
                 url: request.url!,
@@ -36,6 +35,37 @@ final class APIClientTTSTests: APIClientTestCase {
         let data = try await client.synthesizeSpeech(text: "Hello from Hermex.", voice: "en-US-AriaNeural")
 
         XCTAssertEqual(data, audioBytes)
+    }
+
+    func testProviderEngineIsExplicitAndAbsentVoiceUsesProviderConfiguration() async throws {
+        for engine in [TTSEngine.openai, .elevenlabs] {
+            let client = makeClient { request in
+                let body = try XCTUnwrap(apiTestBodyData(from: request))
+                let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+                XCTAssertEqual(json, ["text": "Hello", "engine": engine.rawValue])
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data([1]))
+            }
+            let audio = try await client.synthesizeSpeech(text: "Hello", voice: nil, engine: engine)
+            XCTAssertEqual(audio, Data([1]))
+        }
+    }
+
+    func testSettingsDecodesTTSPreferencesTolerantly() async throws {
+        for (json, engine, voice) in [
+            (#"{"tts_engine":"edge","tts_voice":"tr-TR-EmelNeural"}"#, "edge", "tr-TR-EmelNeural"),
+            (#"{}"#, nil, nil),
+            (#"{"tts_engine":null,"tts_voice":null}"#, nil, nil),
+            (#"{"tts_engine":[],"tts_voice":{"future":true}}"#, nil, nil),
+            (#"{"tts_engine":12,"tts_voice":false}"#, nil, nil)
+        ] as [(String, String?, String?)] {
+            let client = makeClient { request in
+                XCTAssertEqual(request.url?.path, "/api/settings")
+                return apiTestJSONResponse(json, for: request)
+            }
+            let settings = try await client.settings()
+            XCTAssertEqual(settings.ttsEngine, engine)
+            XCTAssertEqual(settings.ttsVoice, voice)
+        }
     }
 
     func testSynthesizeSpeechThrowsHTTPCarryingServerErrorBodyOnRateLimit() async {

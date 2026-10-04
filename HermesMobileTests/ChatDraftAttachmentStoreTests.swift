@@ -3,6 +3,21 @@ import XCTest
 @testable import HermesMobile
 
 final class ChatDraftAttachmentStoreTests: XCTestCase {
+    func testRetainedBytesMeasureOwnedFilesAndFollowDeletion() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ChatDraftAttachmentStore(directoryURL: directory)
+        let empty = try await store.retainedFileBytes()
+        XCTAssertEqual(empty, [:])
+        let first = try await store.save(data: Data(repeating: 1, count: 1024), suggestedFilename: "first")
+        let second = try await store.save(data: Data(repeating: 2, count: 7), suggestedFilename: "second")
+        let inventory = try await store.retainedFileBytes()
+        XCTAssertEqual(inventory, [first: 1024, second: 7])
+        await store.delete(named: first)
+        let after = try await store.retainedFileBytes()
+        XCTAssertEqual(after, [second: 7])
+    }
+
     func testSaveAndLoadRoundTrip() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
@@ -66,6 +81,21 @@ final class ChatDraftAttachmentStoreTests: XCTestCase {
         await XCTAssertThrowsErrorAsync(try await store.data(named: "../\(outside)"))
         await XCTAssertThrowsErrorAsync(try await store.data(named: ".."))
         await XCTAssertThrowsErrorAsync(try await store.data(named: "nested/\(outside)"))
+    }
+
+    /// Quick Look reads a file, not bytes; the URL obeys the same name rules.
+    func testFileURLPointsAtTheSavedCopyAndRejectsTraversalNames() async throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = ChatDraftAttachmentStore(directoryURL: directory)
+        let fileName = try await store.save(data: Data("%PDF-1.7".utf8), suggestedFilename: "report.pdf")
+
+        let url = try await store.fileURL(named: fileName)
+
+        XCTAssertEqual(url.lastPathComponent, fileName)
+        XCTAssertEqual(try Data(contentsOf: url), Data("%PDF-1.7".utf8))
+        await XCTAssertThrowsErrorAsync(try await store.fileURL(named: "../\(fileName)"))
+        await XCTAssertThrowsErrorAsync(try await store.fileURL(named: "nested/\(fileName)"))
     }
 
     func testDeleteRemovesFilesAndToleratesMissingOnes() async throws {

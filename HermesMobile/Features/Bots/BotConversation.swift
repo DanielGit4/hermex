@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import OSLog
 
 @MainActor @Observable final class BotConversation {
     enum ConnectionState { case disconnected, recovering, connected }
@@ -72,6 +73,10 @@ import Observation
     /// only when this is nil.
     private(set) var activePromptMessageID: String?
     private(set) var errorMessage: String?
+    /// True after the host refused the saved username or password (`.rejected(401)`).
+    /// The chat offers Update sign-in instead of Reconnect and does not recover on
+    /// foreground; a new password needs a new client, so the fix goes through the inbox.
+    private(set) var needsSignIn = false
     let chatControls = BotChatControls()
     let attachments: BotAttachmentDraft
     private(set) var draft = ""
@@ -135,6 +140,17 @@ import Observation
     private(set) var answeringRequestID: String?
     /// The verdict on the request currently on screen, if it has one.
     private(set) var requestResolution: BotRequestResolution?
+    /// The note left where a card stood when the host withdrew it (#892): a
+    /// timeout or a stopped run, never an answer given elsewhere or this phone's
+    /// own stop. Cleared by the next accepted prompt, a new request, or leaving
+    /// the connection; never cached.
+    private(set) var withdrawnRequest: BotRequestWithdrawal?
+    /// The envelope on screen when the phone last left a live connection, so a
+    /// `request.cancel` replayed on return still names it. The next replay consumes it.
+    @ObservationIgnored private var envelopeShownWhenLeft: BotRequestWithdrawal.Envelope?
+    /// The envelope on screen when this phone's Interrupt send or voice stop was
+    /// accepted: the host withdrawing it is the user's own doing.
+    @ObservationIgnored private var envelopeStoppedHere: BotRequestWithdrawal.Envelope?
     /// The last action the host confirmed, for the chat view's haptic.
     private(set) var feedback: BotFeedback?
     /// Rows with a `message.react` in flight. Their footer controls stay inert
@@ -162,16 +178,50 @@ import Observation
     private var clockRevision = 0
     /// When this phone first saw the current turn, for a host that sends no start time.
     private var turnObservedAt = Date()
-    /// Whether the last snapshot's interruption was a host error rather than a stop.
-    private var turnFailed = false
+    /// The failure the host keeps for the last turn (`inflight.error`), read from every
+    /// snapshot, so reopening, backgrounding or a push tap rebuilds the same outcome
+    /// row. Nil after a success or a Stop, and once the host starts the next turn. It
+    /// stays on screen while disconnected, and is never cached.
+    private(set) var turnFailure: HermesTurnOutcome?
+    /// What only a live or replayed `message.complete` carries: a billing link and the
+    /// host's warning. Kept across suspend and a continuous reconnect; cleared by
+    /// `message.start`, an accepted send, or a gap in the stream that could hide a
+    /// newer turn. Never cached.
+    private(set) var turnNotice: HermesTurnOutcome?
+    /// The failed turn's prompt exactly as the host received it (`inflight.user`: a
+    /// skill's expansion, attachment references and mention note included), which
+    /// Retry resends.
+    @ObservationIgnored private var failedPrompt: String?
+    /// The failed prompt's row the host refused to cut (4018), for example after an
+    /// agent that never started. Retry hides for it, since the same cut fails on
+    /// every tap; the user sends the prompt again from the composer.
+    private var uncuttableRowID: Int?
     private var snapshotIsBusy: Bool?
     private var snapshotDirty = false
     private var fullSnapshotNeeded = false
+    /// This runtime's frames that arrived while recovering, applied once the replay and the
+    /// snapshot are in, so a live frame never moves `sequence` past events the replay is
+    /// about to apply. At most the host's replay ring (`heldFrameLimit`); frames past it are
+    /// only counted in `framesPastHold`, and any of those makes the release a gap.
+    @ObservationIgnored private var heldFrames: [BotJSON] = []
+    @ObservationIgnored private var framesPastHold = 0
+    /// The host's replay ring per session: 512 events.
+    static let heldFrameLimit = 512
+    /// When `session.resume` first refused this run of reconnects with 4007 or 4009; nil
+    /// once a reconnect succeeds, fails another way, or the screen leaves.
+    @ObservationIgnored private var resumeRefusedSince: ContinuousClock.Instant?
+    /// How long those refusals are retried on the reconnect backoff before the advice shows.
+    private static let resumeRefusalWindow = Duration.seconds(60)
+    /// Automatic reconnect attempts since the chat was last connected, for the log.
+    @ObservationIgnored private var reconnectRetries = 0
     private var refreshTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
-    private var isActive = false
+    /// True from `recover()` until `suspend()`: the screen wants this chat connected,
+    /// whether it is, is reconnecting, or failed and shows why.
+    private(set) var isActive = false
     private var shouldRetryConnection = false
     private let reconnectDelay: (Duration) async throws -> Void
+    private let now: () -> ContinuousClock.Instant
     private(set) var isReconnecting = false
     private var stopAcknowledged = false
     private var localOperation = false
@@ -189,12 +239,14 @@ import Observation
          historyCache: BotHistoryCache? = nil, wire: (any BotTransport)? = nil, drafts: ChatDraftStore? = nil,
          attachmentCopies: any ChatDraftAttachmentStoring = ChatDraftAttachmentStore.shared,
          liveActivityFeed: BotLiveActivityFeed? = nil,
-         reconnectDelay: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) }) {
+         reconnectDelay: @escaping (Duration) async throws -> Void = { try await Task.sleep(for: $0) },
+         now: @escaping () -> ContinuousClock.Instant = { ContinuousClock.now }) {
         let resolvedWire = wire ?? BotClient(saved: connection, server: server)
         self.server = server; self.connection = connection; self.profile = profile
         self.linkedRoot = conversation; self.root = conversation
         self.mentions = BotMentions(roster: roster, excluding: profile.id)
         self.reconnectDelay = reconnectDelay
+        self.now = now
         self.wire = resolvedWire
         self.delegatedWork = BotDelegatedWork(wire: resolvedWire)
         self.historyCache = historyCache
@@ -249,7 +301,7 @@ import Observation
                 phase = .working(turn: turnStartedAt.map { String($0) } ?? runtime ?? "",
                                  startedAt: turnStartedAt.map(Date.init(timeIntervalSince1970:)) ?? turnObservedAt)
             case .idle: phase = .finished(.complete)
-            case .interrupted: phase = .finished(turnFailed ? .failed : .cancelled)
+            case .interrupted: phase = .finished(turnFailure != nil ? .failed : .cancelled)
             case .unknown, .submitting, .uncertain: phase = .unknown
             }
         }
@@ -318,10 +370,27 @@ import Observation
     var titleFace: TitleFace {
         switch turn {
         case .needsAttention: return .waiting
-        case .interrupted: return turnFailed ? .failed : .resting
+        case .interrupted: return turnFailure != nil ? .failed : .resting
         case .running, .stopping: return .working
         case .unknown, .idle, .submitting, .uncertain: return .resting
         }
+    }
+
+    /// Whether the outcome row offers Retry: the host says retrying can help and the
+    /// failed prompt's saved row names where to cut. Hidden otherwise, and once the
+    /// host has refused to cut that row.
+    var offersRetry: Bool { retryTarget != nil }
+    var mayRetry: Bool { maySend && retryTarget != nil }
+
+    /// The failed prompt's durable row and the text a retry resends: the host's raw
+    /// prompt, so a `/skill` turn keeps the attachments and mention note its displayed
+    /// invocation leaves out.
+    private var retryTarget: (rowID: Int, text: String)? {
+        guard turnFailure?.offersRetry == true, let id = activePromptMessageID,
+              let row = messages.last(where: { $0.id == id }), row.role == "user", let rowID = row.rowID,
+              rowID != uncuttableRowID, let text = failedPrompt,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return (rowID, text)
     }
 
     var mayGuide: Bool {
@@ -351,8 +420,7 @@ import Observation
 
     /// The one request blocking this conversation, in order: a question, the
     /// snapshot's approval, a server-request approval, any other server request
-    /// (a credential prompt or a Desktop task such as `vault.*`), then an open
-    /// connection operation.
+    /// (a credential prompt or a Desktop task), then an open connection operation.
     var pendingRequest: BotPendingRequest? {
         let current = serverRequests.compactMap(\.pending)
         return current.first { if case .question = $0 { return true }; return false }
@@ -362,18 +430,28 @@ import Observation
             ?? connectionOperation.map(BotPendingRequest.connection)
     }
 
+    /// The request on screen by its envelope. Nil for a connection operation,
+    /// and for an approval the snapshot shows without one.
+    private var envelopeOnScreen: BotRequestWithdrawal.Envelope? {
+        guard let shown = pendingRequest?.requestID else { return nil }
+        return serverRequests.first { $0.pending?.requestID == shown }
+            .map { BotRequestWithdrawal.Envelope(id: $0.id, method: $0.method) }
+    }
+
+    /// The note for the host withdrawing `envelope`, or nil when it stays
+    /// silent. A stop this phone sent (Stop, an Interrupt send or a voice stop, in
+    /// flight or acknowledged) is the user's own doing.
+    private func withdrawal(of envelope: BotRequestWithdrawal.Envelope, reason: String?) -> BotRequestWithdrawal? {
+        guard let note = BotRequestWithdrawal(method: envelope.method, reason: reason) else { return nil }
+        let stoppedHere = uncertainStop || stopAcknowledged || submittingPrompt == .redirect
+            || envelope == envelopeStoppedHere
+        return note.reason == .stopped && stoppedHere ? nil : note
+    }
+
     /// True when the user may answer the request on screen.
     var mayAnswer: Bool {
         guard let request = pendingRequest, request.isAnswerable else { return false }
         return mayDispatchAnswer(for: request.requestID)
-    }
-
-    /// True when the request on screen can be skipped from here. Separate from
-    /// `mayAnswer`: a Desktop task is never answerable, but the kinds with a
-    /// person in the loop can still be declined rather than waited out.
-    var mayDecline: Bool {
-        guard case .desktopTask(let task)? = pendingRequest, task.kind.needsSomeoneAtTheMac else { return false }
-        return mayDispatchAnswer(for: task.requestID)
     }
 
     /// A resolved or expired request stays inert; an uncertain one is actionable
@@ -548,6 +626,7 @@ import Observation
 
     private func recoverConnection() async {
         resetConnection()
+        attachments.activate()
         if hasRecentTranscript, historyCache?.recent.snapshot(for: recentKey) == nil {
             // Clear Offline Cache may have run after construction but before entry.
             messages = []; settledActivity = []; recentRoot = nil; hasRecentTranscript = false
@@ -555,18 +634,19 @@ import Observation
         recentOwner = historyCache?.recent.begin(recentKey)
         let owner = generation
         connectionState = .recovering
-        errorMessage = nil
+        errorMessage = nil; needsSignIn = false
         do {
+            await drafts.markUsed(draftKey)
+            let saved = await drafts.draft(for: draftKey)
+            try check(owner)
             if !hydrated {
-                let saved = await drafts.draft(for: draftKey)
-                try check(owner)
                 draft = saved?.text ?? ""
                 quotes = saved?.quotes ?? []
                 uncertainSend = saved?.botSubmissionUncertain ?? false
-                await attachments.restore(saved?.attachments ?? [])
-                try check(owner)
                 hydrated = true
             }
+            await attachments.restore(saved?.attachments ?? [])
+            try check(owner)
             // Recovered text and attachments are an ordinary editable draft.
             // Clearing this local marker never retries the earlier prompt.
             if uncertainSend { try await releasePromptMarker(owner: owner) }
@@ -591,7 +671,8 @@ import Observation
                 discardRecentTranscript()
                 recentOwner = historyCache?.recent.begin(recentKey)
             }
-            let first = try await request(resume(), owner: owner)
+            // Identity only: the snapshot below is the one read that carries the transcript.
+            let first = try await resume(full: false, owner: owner)
             guard first["session_key"].text == foundTip, let foundRuntime = first["session_id"].text,
                   !foundRuntime.isEmpty, let foundEpoch = wire.replayEpoch else { throw BotFailure.wrongIdentity }
             replayWasReset = epoch != foundEpoch || runtime != foundRuntime
@@ -605,7 +686,10 @@ import Observation
             let requestsRevision = requestRevision
             let clockRevision = clockRevision
             let reactionRevision = reactionRevision
-            let current = try await request(resume(), owner: owner)
+            // This full read covers whatever asked for one before it, including a refresh
+            // the disconnect cancelled; only what arrives after it schedules another.
+            snapshotDirty = false; fullSnapshotNeeded = false
+            let current = try await resume(full: true, owner: owner)
             try applySnapshot(current, full: true, requestsRevision: requestsRevision, clockRevision: clockRevision,
                               reactionRevision: reactionRevision)
             try check(owner)
@@ -616,6 +700,10 @@ import Observation
             guard connectionState == .recovering, chatControls.context == controlsContext else { throw BotFailure.transport }
             chatControls.snapshot(current["info"], idle: [.idle, .interrupted].contains(turn))
             connectionState = .connected
+            let frames = releaseHeldFrames()
+            let retries = reconnectRetries
+            HermesConnectionLog.logger.notice("Bot Chat reattached after \(retries, privacy: .public) retries: frames held \(frames.held, privacy: .public), applied \(frames.applied, privacy: .public), dropped \(frames.dropped, privacy: .public)")
+            reconnectRetries = 0; resumeRefusedSince = nil
             hasRecentTranscript = false; recentRoot = nil
             saveRecentTranscript()
             shouldRetryConnection = false
@@ -634,9 +722,21 @@ import Observation
         }
     }
 
-    private func resume(full: Bool = true) -> HermesCall {
-        .sessionResume(profile: profile.id, sessionID: tip ?? "", omitMessages: !full)
+    /// Reads this chat's live session; `full` asks for the transcript as well. The host
+    /// answers 4007 while it swaps in a replacement runtime and 4009 while a client-gone
+    /// interrupt settles, and both clear on their own, so they come back as
+    /// `ResumeRefusal` for the reconnect window. Matched by code alone: a real "session
+    /// not found" also says 4007, and only the host's wording, which can change, differs.
+    private func resume(full: Bool, owner: Int) async throws -> BotJSON {
+        do {
+            return try await request(.sessionResume(profile: profile.id, sessionID: tip ?? "", omitMessages: !full), owner: owner)
+        } catch BotFailure.rejected(let code) where [4007, 4009].contains(code) {
+            throw ResumeRefusal(code: code)
+        }
     }
+
+    /// A `session.resume` the host refused for now (see `resume(full:owner:)`).
+    private struct ResumeRefusal: Error { let code: Int }
 
     private func check(_ owner: Int) throws {
         guard generation == owner, !Task.isCancelled else { throw BotFailure.stale }
@@ -667,15 +767,28 @@ import Observation
         }
         if cursor < latest { replayWasReset = true }
         epoch = receivedEpoch; sequence = latest
+        // A card withdrawn while the phone was away leaves its note, but only from
+        // a complete replay whose last cancel is that card's: host requests are
+        // unsequenced frames, so a later cancel is the only trace of a request
+        // that took the slot after it, and a truncated replay may have lost more.
+        if let left = envelopeShownWhenLeft {
+            envelopeShownWhenLeft = nil
+            let cancel = missed.last { $0["type"].text == "request.cancel" }?["payload"]
+            if !replayWasReset, let cancel,
+               BotRequestWithdrawal.Envelope(id: cancel["id"].text ?? "", method: cancel["method"].text ?? "") == left {
+                withdrawnRequest = withdrawal(of: left, reason: cancel["reason"].text)
+            }
+        }
         // Replay never appends text; the full snapshot below owns it. It does rebuild
         // the current turn's activity: every missed event when the sequence was
         // continuous, otherwise only the events after the last `message.start` the
         // ring still holds, which is the whole current turn. Without either, every
         // live row and notice is dropped rather than shown incomplete or stale: a
         // notice whose clear was in the gap has no snapshot state to reconcile it.
+        // The turn notice goes too, since the gap may hide a newer turn's start.
         if replayWasReset {
             guard let start = missed.lastIndex(where: { $0["type"].text == "message.start" }) else {
-                liveActivity = BotTurnActivity(); return
+                liveActivity = BotTurnActivity(); turnNotice = nil; return
             }
             missed.removeFirst(start)
         }
@@ -689,15 +802,20 @@ import Observation
         }
     }
 
-    /// Feeds activity events to the live reducer, plan and work status. Returns
-    /// false for event types that carry conversation text or turn state instead.
+    /// Feeds activity events to the live reducer, plan, work status and turn notice.
+    /// Returns false for event types that carry conversation text or turn state instead.
     @discardableResult
     private func applyActivity(type: String, payload: BotJSON) -> Bool {
         switch type {
         case "message.start":
             clockRevision += 1
             confirmedWorkingStart = nil
-            liveActivity = BotTurnActivity(); workStatus = nil
+            liveActivity = BotTurnActivity(); workStatus = nil; turnNotice = nil
+            return false
+        case "message.complete":
+            // Only this frame carries the billing link and warning; the snapshot it
+            // schedules owns everything else about how the turn ended.
+            turnNotice = HermesTurnOutcome(complete: payload)
             return false
         case "todo.updated":
             if let next = BotPlan(payload), next.revision >= (plan?.revision ?? 0) { plan = next }
@@ -753,6 +871,9 @@ import Observation
         }
         if let next = BotPlan(snapshot["todo_state"]), next.revision >= (plan?.revision ?? 0) { plan = next }
         let inflight = snapshot["inflight"]
+        let failure = HermesTurnOutcome(inflight: inflight)
+        if failure != turnFailure { turnFailure = failure }
+        failedPrompt = failure == nil ? nil : inflight["user"].text
         let startedAt = inflight["started_at"].number ?? snapshot["turn_started_at"].number
         if clockRevision == self.clockRevision, running, let startedAt, startedAt.isFinite, startedAt > 0,
            startedAt <= Date().timeIntervalSince1970 {
@@ -800,6 +921,8 @@ import Observation
             restoreServerRequests(snapshot)
             applyPendingRequest(snapshot)
             restoreConnectionOperation(snapshot)
+            // A request on screen takes the withdrawn card's slot.
+            if withdrawnRequest != nil, pendingRequest != nil { withdrawnRequest = nil }
         }
         // A request the phone cannot address still blocks the bot. Claiming the
         // turn is running would be the lie; attention without a card is the truth.
@@ -816,8 +939,8 @@ import Observation
         else if uncertainSend || uncertainStop { turn = .uncertain }
         else if localOperation { /* A snapshot cannot acknowledge a local command. */ }
         else if running || continuation || queued { turn = .running }
-        else if inflight["error"] != .null || snapshot["status"].text == "interrupted" {
-            turn = .interrupted; turnFailed = inflight["error"] != .null
+        else if failure != nil || snapshot["status"].text == "interrupted" {
+            turn = .interrupted
             completionArmed = false
         }
         else {
@@ -900,6 +1023,8 @@ import Observation
     func submit(_ action: PromptAction) async {
         guard action == preparePrompt(action.mode) else { return }
         let owner = action.generation
+        let attachmentLease = attachments.protectOperation()
+        defer { withExtendedLifetime(attachmentLease) {} }
         let mentionNote = mentions.annotation(for: action.text)
         localOperation = true; submittingPrompt = action.mode
         errorMessage = nil
@@ -950,6 +1075,7 @@ import Observation
             try await drafts.flush()
             try check(owner)
             uncertainSend = true
+            let shown = envelopeOnScreen
             let reply = try await request(action.mode.call(runtime: action.runtime, text: text + mentionNote), owner: owner) { [weak self] in
                 guard let self else { throw BotFailure.stale }
                 try self.check(owner)
@@ -966,8 +1092,11 @@ import Observation
                 return
             }
             guard outcome != .unknown else { throw BotFailure.unsupported }
+            // An Interrupt send (Stop & send) and a voice stop stop the work behind the card on
+            // screen. An Interrupt queued for the next turn (`redirectQueued`) stopped nothing.
+            if outcome == .redirected || outcome == .voiceStopped, let shown { envelopeStoppedHere = shown }
             // A voice-stop phrase is taken but starts no turn, so it is not a send.
-            if outcome != .voiceStopped { emit(.sent) }
+            if outcome != .voiceStopped { emit(.sent); clearTurnOutcome(); withdrawnRequest = nil }
             drafts.setDraft("", for: draftKey)
             drafts.setQuotes([], for: draftKey)
             drafts.setAttachments([], for: draftKey)
@@ -975,6 +1104,7 @@ import Observation
             try await drafts.flush()
             try check(owner)
             draft = ""; quotes = []; uncertainSend = false
+            attachmentLease.files = []
             await attachments.consumed()
             try check(owner)
             localOperation = false
@@ -1126,6 +1256,55 @@ import Observation
         fullSnapshotNeeded = true; snapshotDirty = true; scheduleRefresh()
     }
 
+    /// The host took the next prompt, so the last turn's outcome row goes.
+    private func clearTurnOutcome() {
+        turnFailure = nil; turnNotice = nil; failedPrompt = nil
+    }
+
+    /// Starts the failed turn again in place: one `prompt.submit` cuts the failed
+    /// prompt's row and resubmits it (`HermesCall.promptRewind`), so the transcript
+    /// shows the prompt once, here and in Desktop. Deliberate only: a lost reply is
+    /// never resent, and the snapshot read after reconnecting shows whether the turn
+    /// ran. The composer draft is never touched.
+    func retryFailedTurn() async {
+        guard mayRetry, let runtime, let target = retryTarget else { return }
+        let owner = generation, revision = turnRevision
+        localOperation = true; errorMessage = nil
+        do {
+            let reply = try await request(.promptRewind(sessionID: runtime, text: target.text, beforeRowID: target.rowID),
+                                          owner: owner) { [weak self] in
+                guard let self else { throw BotFailure.stale }
+                try self.check(owner)
+                guard self.connectionState == .connected, self.runtime == runtime,
+                      self.turnRevision == revision else { throw BotFailure.stale }
+            }
+            // A cut only ever starts a turn; any other reply is a shape this build can't read.
+            guard reply["status"].text == "streaming" else { throw BotFailure.unsupported }
+            emit(.sent); clearTurnOutcome()
+            localOperation = false
+            refreshAfterPrompt()
+        } catch {
+            guard owner == generation, !Task.isCancelled else { return }
+            localOperation = false
+            switch error {
+            case BotFailure.stale: return
+            case BotFailure.rejected(4009):
+                // The host never queues a cut, so nothing changed.
+                errorMessage = String(localized: "Wait for the bot to finish.")
+            case BotFailure.rejected(4018):
+                // The host can't place the row in its live transcript (compacted, cut
+                // elsewhere, or never reached by an agent that didn't start). The same
+                // cut would fail again, so Retry goes.
+                uncuttableRowID = target.rowID
+                errorMessage = String(localized: "This message can’t be changed any more.")
+                refreshAfterPrompt()
+            default:
+                // Anything short of a definite refusal may follow the cut: reread, never resend.
+                disconnected(BotPromptMode.send.definitelyRejected(error) ? error : BotFailure.transport)
+            }
+        }
+    }
+
     func prepareStop() -> StopAction? {
         guard mayStop, let runtime else { return nil }
         return StopAction(generation: generation, revision: turnRevision, runtime: runtime)
@@ -1156,10 +1335,10 @@ import Observation
         }
     }
 
-    /// Captures what an answer or a decline is validated against, or nil when
-    /// the request on screen cannot be acted on right now.
+    /// Captures what an answer is validated against, or nil when the request on
+    /// screen cannot be acted on right now.
     func prepareAnswer() -> AnswerAction? {
-        guard mayAnswer || mayDecline, let runtime, let id = pendingRequest?.requestID else { return nil }
+        guard mayAnswer, let runtime, let id = pendingRequest?.requestID else { return nil }
         return AnswerAction(generation: generation, runtime: runtime, requestID: id)
     }
 
@@ -1203,9 +1382,10 @@ import Observation
         await dispatchAnswers([BotQuestionAnswer(questionID: nil, text: "")], for: action)
     }
 
-    /// Sends the value the user typed for a `sudo` or `secret` request.
-    /// The value is passed straight to the dispatch and never stored on the model,
-    /// so nothing retains it once the write completes.
+    /// Sends the value the user typed for a credential request: a password,
+    /// secret or code, or a save-login's JSON string. The value is passed straight
+    /// to the dispatch and never stored on the model, so nothing retains it once
+    /// the write completes.
     func answerCredential(_ action: AnswerAction, value: String) async {
         guard case .credential(let request)? = pendingRequest, request.requestID == action.requestID,
               action == prepareAnswer() else { return }
@@ -1218,22 +1398,11 @@ import Observation
     }
 
     /// Declines to supply the value. An empty string is the host's own skip: the
-    /// secret tool records a skip and the sudo command is left to fail, which is
-    /// the honest outcome and far better than parking the bot until it times out.
+    /// secret tool records a skip, the sudo command is left to fail and a vault
+    /// prompt is declined, which is the honest outcome and far better than
+    /// parking the bot until it times out.
     func skipCredential(_ action: AnswerAction) async {
         await answerCredential(action, value: "")
-    }
-
-    /// Skips a `vault.*` prompt the phone cannot answer. An empty `value` is the
-    /// host's own "declined", so the bot moves on now instead of waiting for
-    /// someone at the Mac.
-    func declineDesktopTask(_ action: AnswerAction) async {
-        guard case .desktopTask(let task)? = pendingRequest, task.requestID == action.requestID,
-              task.kind.needsSomeoneAtTheMac, action == prepareAnswer() else { return }
-        await deliver(action, confirming: .declined) {
-            let reply = try await self.answerServerRequest(action, result: .value(""))
-            return reply["status"].text == "expired" ? .alreadyResolved : .answered
-        }
     }
 
     private func dispatchAnswers(_ answers: [BotQuestionAnswer], for action: AnswerAction) async {
@@ -1374,6 +1543,7 @@ import Observation
             if let index = serverRequests.firstIndex(where: { $0.id == request.id }) {
                 serverRequests[index] = request
             } else { serverRequests.append(request) }
+            if withdrawnRequest != nil { withdrawnRequest = nil }
             requestRevision += 1
             turnRevision += 1
             if !localOperation { turn = .needsAttention }
@@ -1381,26 +1551,28 @@ import Observation
             return
         }
         guard event["session_id"].text == runtime else { return }
+        guard connectionState == .connected else {
+            if heldFrames.count < Self.heldFrameLimit { heldFrames.append(event) } else { framesPastHold += 1 }
+            // As when live, a request frame is newer than the snapshot in flight, which then
+            // leaves the cards on screen for this frame to settle (a withdrawn one keeps its
+            // note); the read after it restores the rest.
+            if ["request.cancel", "connection.request", "connection.update"].contains(event["type"].text) {
+                requestRevision += 1; snapshotDirty = true
+            }
+            return
+        }
+        applyFrame(event)
+    }
+
+    /// Applies one of this runtime's sequenced frames to the connected chat.
+    private func applyFrame(_ event: BotJSON) {
         guard let next = event["seq"].integer, next > 0 else {
-            clockRevision += 1; confirmedWorkingStart = nil
-            replayWasReset = true; snapshotDirty = true; fullSnapshotNeeded = true
-            turnRevision += 1
-            liveActivity = BotTurnActivity()
-            serverRequests.removeAll(); requestRevision += 1
-            if !localOperation { turn = .unknown }
+            streamGap(); snapshotDirty = true
             scheduleRefresh(); return
         }
         guard next != sequence else { return }
         let discontinuity = next != sequence + 1
-        if discontinuity {
-            clockRevision += 1; confirmedWorkingStart = nil
-            replayWasReset = true; fullSnapshotNeeded = true; turnRevision += 1
-            // Missed events may hold tool rows, a notice's clear or a request's
-            // cancellation; partial or stale state is worse than none.
-            liveActivity = BotTurnActivity()
-            serverRequests.removeAll(); requestRevision += 1
-            if !localOperation { turn = .unknown }
-        }
+        if discontinuity { streamGap() }
         sequence = next
         let type = event["type"].text ?? ""
         // A newer frame than any snapshot already in flight, like a live request.
@@ -1435,15 +1607,52 @@ import Observation
         scheduleRefresh()
     }
 
+    /// A break in this runtime's stream. Missed events may hold tool rows, a notice's
+    /// clear, a newer turn's start or a request's cancellation; partial or stale state is
+    /// worse than none, so it all goes and the next read is a full one.
+    private func streamGap() {
+        clockRevision += 1; confirmedWorkingStart = nil
+        replayWasReset = true; fullSnapshotNeeded = true; turnRevision += 1
+        liveActivity = BotTurnActivity(); turnNotice = nil
+        serverRequests.removeAll(); requestRevision += 1
+        if !localOperation { turn = .unknown }
+    }
+
+    /// Applies the frames held while recovering, now that the replay and the snapshot are
+    /// in: one the replay already covered (or for a runtime this chat left) is dropped, and
+    /// each later one takes the live path, where a gap schedules the coalesced refresh.
+    /// Frames past the hold limit are lost, so the stream is a gap and rebuilt from a full
+    /// snapshot, as after a truncated replay.
+    private func releaseHeldFrames() -> (held: Int, applied: Int, dropped: Int) {
+        let frames = heldFrames, lost = framesPastHold
+        heldFrames = []; framesPastHold = 0
+        guard lost == 0 else {
+            streamGap(); snapshotDirty = true; scheduleRefresh()
+            return (frames.count + lost, 0, frames.count + lost)
+        }
+        var applied = 0
+        for event in frames where event["session_id"].text == runtime {
+            if let seq = event["seq"].integer, seq > 0, seq <= sequence { continue }
+            applyFrame(event)
+            applied += 1
+        }
+        return (frames.count, applied, frames.count - applied)
+    }
+
     /// Applies `request.cancel`, which withdraws only the matching envelope.
-    /// Returns true when it was one.
+    /// Only the card on screen leaves a note, and only in an empty slot: one
+    /// queued behind it or never seen was never read, and the next card takes
+    /// the slot. Returns true when it was one.
     private func applyRequestCancel(type: String, payload: BotJSON) -> Bool {
         guard type == "request.cancel", let id = payload["id"].text, !id.isEmpty,
               let method = payload["method"].text, !method.isEmpty else { return false }
+        let envelope = BotRequestWithdrawal.Envelope(id: id, method: method)
+        let shown = envelope == envelopeOnScreen
         if let request = serverRequests.first(where: { $0.id == id && $0.method == method }) {
             serverRequests.removeAll { $0.id == id }
             if blockingRequest?.requestID == request.pending?.requestID { blockingRequest = nil }
         }
+        if shown { withdrawnRequest = pendingRequest == nil ? withdrawal(of: envelope, reason: payload["reason"].text) : nil }
         // Even an unseen request may be present in an older in-flight snapshot.
         requestRevision += 1
         return true
@@ -1466,7 +1675,7 @@ import Observation
                     let requestsRevision = self.requestRevision
                     let clockRevision = self.clockRevision
                     let reactionRevision = self.reactionRevision
-                    let reply = try await self.request(self.resume(full: full), owner: owner)
+                    let reply = try await self.resume(full: full, owner: owner)
                     try self.applySnapshot(reply, full: full, settingsRevision: settingsRevision,
                                            requestsRevision: requestsRevision, clockRevision: clockRevision,
                                            reactionRevision: reactionRevision)
@@ -1482,6 +1691,7 @@ import Observation
     }
 
     private func disconnected(_ error: Error) {
+        rememberEnvelopeOnScreen()
         saveRecentTranscript()
         chatControls.disconnect()
         delegatedWork.disconnect()
@@ -1490,16 +1700,30 @@ import Observation
         // Reconnecting restores the host's current requests from open_requests
         // and pending_connection.
         serverRequests = []; connectionOperation = nil; answeringRequestID = nil
+        withdrawnRequest = nil
+        heldFrames = []; framesPastHold = 0
         connectionState = .disconnected
         turn = uncertainSend || uncertainStop ? .uncertain : .unknown
         turnRevision += 1
-        let failure = error as? BotFailure ?? .transport
-        switch failure {
-        case .transport: shouldRetryConnection = true
-        case .rejected(let code): shouldRetryConnection = [408, 429].contains(code) || (500...599).contains(code)
-        default: shouldRetryConnection = false
+        let refusal = error as? ResumeRefusal
+        let failure = refusal.map { BotFailure.rejected($0.code) } ?? error as? BotFailure ?? .transport
+        if let refusal {
+            // Retried on the backoff until a minute after the first refusal in a row.
+            let since = resumeRefusedSince ?? now()
+            resumeRefusedSince = since
+            shouldRetryConnection = since.duration(to: now()) < Self.resumeRefusalWindow
+            let code = refusal.code, retrying = shouldRetryConnection
+            HermesConnectionLog.logger.notice("Bot Chat: session.resume refused with \(code, privacy: .public); \(retrying ? "within" : "past", privacy: .public) the retry window")
+        } else {
+            resumeRefusedSince = nil
+            switch failure {
+            case .transport: shouldRetryConnection = true
+            case .rejected(let code): shouldRetryConnection = [408, 429].contains(code) || (500...599).contains(code)
+            default: shouldRetryConnection = false
+            }
         }
         errorMessage = shouldRetryConnection ? nil : BotConnectionAdvice.message(for: failure, address: connection.address)
+        needsSignIn = failure == .rejected(401)
         syncLiveActivity()
         scheduleReconnect()
     }
@@ -1515,6 +1739,7 @@ import Observation
             while !Task.isCancelled {
                 do { try await delay(.seconds(seconds)) } catch { return }
                 guard let self, self.isActive, self.shouldRetryConnection, !Task.isCancelled else { return }
+                self.reconnectRetries += 1
                 await self.recoverConnection()
                 guard !Task.isCancelled else { return }
                 if !self.shouldRetryConnection || self.connectionState == .connected {
@@ -1527,17 +1752,29 @@ import Observation
     }
 
     func suspend() {
+        attachments.deactivate()
+        rememberEnvelopeOnScreen()
         completionArmed = false
         saveRecentTranscript()
         historyCacheTask?.cancel(); historyCacheTask = nil
         isActive = false; shouldRetryConnection = false; isReconnecting = false
         reconnectTask?.cancel(); reconnectTask = nil
+        resumeRefusedSince = nil; reconnectRetries = 0
         resetConnection()
         Task { try? await drafts.flush() }
     }
 
+    /// Keeps the card's envelope while leaving a live connection, so the replay
+    /// on return can tell whether the host withdrew it. Leaving again before that
+    /// replay keeps the one already held.
+    private func rememberEnvelopeOnScreen() {
+        guard connectionState == .connected else { return }
+        envelopeShownWhenLeft = envelopeOnScreen
+    }
+
     private func resetConnection() {
         confirmedWorkingStart = nil
+        withdrawnRequest = nil
         chatControls.disconnect()
         delegatedWork.disconnect()
         attachmentUploadTask?.cancel(); attachmentUploadTask = nil; isUploadingAttachments = false
@@ -1548,6 +1785,7 @@ import Observation
         localOperation = false; submittingPrompt = nil
         serverRequests = []; connectionOperation = nil; answeringRequestID = nil
         reactingRowIDs = []; reactionPatches = [:]
+        heldFrames = []; framesPastHold = 0
         connectionState = .disconnected; turn = .unknown
         syncLiveActivity()
     }

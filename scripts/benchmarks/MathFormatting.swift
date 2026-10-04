@@ -46,6 +46,27 @@ struct MathFormattingBenchmark {
                 "samples_ms": samples, "checksum": checksum, "output": expected
             ])
         }
+        // Long, incrementally delivered content uses the production uncached path.
+        // Compare operation counts and checksums as well as isolated medians.
+        for (name, paragraph) in [
+            ("incremental plain 30KB", "A normal response with ordinary prose.\n\n"),
+            ("incremental math 30KB", inline + "\n\n")
+        ] {
+            let input = String(repeating: paragraph, count: 30_000 / paragraph.utf8.count + 1)
+            let prefixes = stride(from: 512, through: input.count, by: 512).map { String(input.prefix($0)) }
+            var samples: [Double] = []
+            var checksum = 0
+            for _ in 0..<5 {
+                let start = DispatchTime.now().uptimeNanoseconds
+                for prefix in prefixes {
+                    checksum &+= layoutText(prefix).utf8.count
+                    precondition(!MarkdownMathLayoutCache.hasCachedLayout(for: prefix))
+                }
+                samples.append(Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000)
+            }
+            results.append(["workload": name, "median_ms": samples.sorted()[2],
+                            "samples_ms": samples, "updates": prefixes.count, "checksum": checksum])
+        }
         let data = try JSONSerialization.data(withJSONObject: results, options: [.prettyPrinted, .sortedKeys])
         print(String(decoding: data, as: UTF8.self))
     }

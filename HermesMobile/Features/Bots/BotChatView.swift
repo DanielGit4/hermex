@@ -11,6 +11,9 @@ import SwiftUI
     /// bot's canonical chat has since moved on, so the inbox can take the user back
     /// instead of leaving a dead transcript on screen (#554).
     private let onConversationUnavailable: (() -> Void)?
+    /// Leaves the chat for the inbox's sign-in form, after the host refused the password.
+    /// The inbox owns the form because a new password needs a new chat client (#884).
+    private let onUpdateSignIn: () -> Void
     @State private var model: BotConversation
     @State private var stopAction: BotConversation.StopAction?
     @State private var recoveryID = UUID()
@@ -37,17 +40,19 @@ import SwiftUI
 
     init(server: URL, connection: BotConnection, profile: BotProfile, roster: [BotProfile],
          avatars: [String: UIImage], conversation: String? = nil,
-         onConversationUnavailable: (() -> Void)? = nil) {
+         onConversationUnavailable: (() -> Void)? = nil, onUpdateSignIn: @escaping () -> Void = {}) {
         mentionAvatars = avatars
         self.onConversationUnavailable = onConversationUnavailable
+        self.onUpdateSignIn = onUpdateSignIn
         _model = State(initialValue: BotConversation(server: server, connection: connection, profile: profile,
                                                      roster: roster, conversation: conversation, historyCache: .shared,
                                                      liveActivityFeed: .shared))
     }
 
-    init(model: BotConversation, onConversationUnavailable: (() -> Void)? = nil) {
+    init(model: BotConversation, onConversationUnavailable: (() -> Void)? = nil, onUpdateSignIn: @escaping () -> Void = {}) {
         mentionAvatars = [:]
         self.onConversationUnavailable = onConversationUnavailable
+        self.onUpdateSignIn = onUpdateSignIn
         _model = State(initialValue: model)
     }
 
@@ -113,6 +118,14 @@ import SwiftUI
                         if let reply = model.liveMessages.first(where: { $0.role == "assistant" }) {
                             BotArtifactMessageView(message: reply, model: model, isLive: true)
                         }
+                        // How the last turn ended sits under it, before any plan or request.
+                        if model.turnFailure != nil || model.turnNotice?.warning != nil {
+                            BotTurnOutcomeRow(
+                                failure: model.turnFailure, notice: model.turnNotice,
+                                offersRetry: model.offersRetry, mayRetry: model.mayRetry,
+                                onRetry: { Task { await model.retryFailedTurn() } }
+                            )
+                        }
                         if let plan = model.plan {
                             BotPlanRowView(plan: plan).id("bot-plan")
                         }
@@ -126,11 +139,13 @@ import SwiftUI
                                 resolution: resolution(for: request),
                                 onApprove: approve, onAnswer: answer, onSkip: skip,
                                 onCredential: sendCredential,
-                                canDecline: model.mayDecline, onDecline: decline,
                                 onStop: { stopAction = model.prepareStop() },
                                 onConnection: answerConnection
                             )
                             .id(BotChatView.requestAnchor)
+                        } else if let withdrawal = model.withdrawnRequest {
+                            // A withdrawn card leaves the reason in its slot until the next send or request.
+                            BotRequestWithdrawalNote(withdrawal: withdrawal)
                         }
                         if let startedAt = model.workingRowStartedAt {
                             ChatWorkingRowView(phase: .running(startedAt: startedAt))
@@ -270,11 +285,17 @@ import SwiftUI
                 .presentationDragIndicator(.visible)
         }
         .task(id: recoveryID) {
-            if scenePhase == .active { await model.recover() }
+            // A rejected password is never sent again on its own (#884).
+            if scenePhase == .active && !model.needsSignIn { await model.recover() }
         }
         .onChange(of: scenePhase) {
-            if scenePhase == .active { recoveryID = UUID(); workingBeat.rearm() }
-            else { stopAction = nil; model.suspend() }
+            // Control Center and banners (`.inactive`) keep the connection (#902); only a
+            // chat the background suspended, or one opened while inactive, recovers.
+            switch scenePhase {
+            case .background: stopAction = nil; model.suspend()
+            case .active where !model.isActive: recoveryID = UUID(); workingBeat.rearm()
+            default: break
+            }
         }
         .onChange(of: model.turn) { workingBeat.observe(model.turn, at: Date()) }
         .onDisappear { stopAction = nil; model.suspend() }
@@ -334,11 +355,6 @@ import SwiftUI
     private func sendCredential(_ value: String) {
         guard let action = model.prepareAnswer() else { return }
         Task { await model.answerCredential(action, value: value) }
-    }
-
-    private func decline() {
-        guard let action = model.prepareAnswer() else { return }
-        Task { await model.declineDesktopTask(action) }
     }
 
     private func answerConnection(_ answer: BotConnectionOperation.Answer) {
@@ -444,7 +460,8 @@ import SwiftUI
             model: model, mentionAvatars: mentionAvatars, isFocused: $composerFocused,
             onStop: { stopAction = model.prepareStop() },
             onReconnect: { recoveryID = UUID() },
-            onShowRequest: { showRequestID = UUID() }
+            onShowRequest: { showRequestID = UUID() },
+            onUpdateSignIn: onUpdateSignIn
         )
         // Lined up with the reading column; the material fade below stays full width.
         .frame(maxWidth: ChatReadingWidth.maximumWidth(horizontalPadding: 16))

@@ -2167,6 +2167,7 @@ private struct PendingNewChatView: View {
     let projectID: String?
     let draftStore: ChatDraftStore
 
+    @State private var attachmentLease: ChatDraftAttachmentLease?
     @State private var createdSession: SessionSummary?
     /// True once a composer profile pick replaced the first created session;
     /// the one-shot inputs below belong to the first chat only.
@@ -2406,6 +2407,8 @@ private struct PendingNewChatView: View {
     }
 
     private func hydrateDraft() async {
+        if attachmentLease == nil { attachmentLease = draftStore.makeAttachmentLease(key: draftKey) }
+        await draftStore.markUsed(draftKey)
         let textBeforeHydration = draftMessage
         let persistedDraft = await draftStore.draft(for: draftKey)
         guard !Task.isCancelled, draftMessage == textBeforeHydration else { return }

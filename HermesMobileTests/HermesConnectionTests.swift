@@ -35,6 +35,53 @@ import XCTest
         XCTAssertTrue(http.provisioningSession.configuration.httpCookieStorage === jar)
     }
 
+    /// Only a 401 from the login step reports a refused sign-in, the re-login a signed-in 401
+    /// starts included, naming the configured server whose record it was (#899). A rate
+    /// limit, a server error, a dropped request and a proxy's own 401 leave the sign-in to
+    /// the screens' retry rules.
+    func testOnlyALoginRefusalReportsARejectedSignIn() async throws {
+        let server = URL(string: "https://webui-or-hermes.example")!
+        let rows: [(path: String, reply: HermesHostFixture.Reply, reports: Int)] = [
+            ("/auth/password-login", .json(401, .object(["error": .string("invalid_credentials")])), 1),
+            ("/auth/password-login", .json(429, .object([:])), 0),
+            ("/auth/password-login", .json(503, .object([:])), 0),
+            ("/auth/password-login", .fail(URLError(.timedOut)), 0),
+            ("/api/status", .json(401, .string("Access denied")), 0)
+        ]
+        for row in rows {
+            HermesHostFixture.reset()
+            let connections = HermesConnections(configuration: { HermesHostFixture.configuration { request in
+                request.url?.path == row.path ? row.reply : nil
+            } })
+            var rejected: [URL] = []
+            connections.onSignInRejected = { rejected.append($0) }
+            do { try await connections.connection(for: record, server: server).signIn(); XCTFail("\(row.reply)") } catch {}
+            XCTAssertEqual(rejected, Array(repeating: server, count: row.reports), "\(row.path) \(row.reply)")
+        }
+
+        HermesHostFixture.reset()
+        var logins = 0
+        let connections = HermesConnections(configuration: { HermesHostFixture.configuration { request in
+            switch request.url?.path {
+            case "/auth/password-login":
+                logins += 1
+                return logins == 1 ? nil : .json(401, .object(["error": .string("invalid_credentials")]))
+            case "/api/plugins/hermex-push/pairing": return .json(401, .object(["error": .string("session_expired")]))
+            default: return nil
+            }
+        } })
+        var rejected: [URL] = []
+        connections.onSignInRejected = { rejected.append($0) }
+        let http = connections.connection(for: record, server: server)
+        try await http.signIn()
+        XCTAssertEqual(rejected, [])
+        do { _ = try await http.data(.pushPairing); XCTFail("The re-login was refused") } catch {
+            XCTAssertEqual(error as? BotFailure, .rejected(401))
+        }
+        XCTAssertEqual(rejected, [server])
+        XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 2)
+    }
+
     /// Each step runs on a fresh connection, and its request is held at the host while the
     /// sessions' in-flight tasks are read, so the test sees the session it went out on.
     func testOnlyProvisioningAndItsSignInGoOutOnTheLongDeadlineSession() async throws {
@@ -202,7 +249,8 @@ import XCTest
             ("account on the same install", { $0 = BotConnection(id: $0.id, name: $0.name, address: $0.address, username: "other",
                                                                  password: $0.password, installID: $0.installID) }),
             ("address on the same install", { $0 = BotConnection(id: $0.id, name: $0.name, address: URL(string: "https://tunnel.example")!,
-                                                                 username: $0.username, password: $0.password, installID: $0.installID) })
+                                                                 username: $0.username, password: $0.password, installID: $0.installID) }),
+            ("headers", { $0.headers = [self.access] })
         ]
         for (edit, apply) in edits {
             apply(&saved)
@@ -248,6 +296,64 @@ import XCTest
         XCTAssertEqual(HermesHostFixture.requests.count, sent, "Nothing more reaches the host")
     }
 
+    /// The release gate reads the public status before any password goes out. Only a
+    /// readable release older than the minimum is refused; a canary reads as its base
+    /// release, and a missing or unreadable version proceeds.
+    func testOnlyAReleaseOlderThanTheMinimumIsRefusedAndBeforeThePassword() async throws {
+        let releases: [(version: String?, refused: Bool)] = [
+            ("0.21.2", true), ("0.21.3", false), ("0.21.5", false),
+            ("0.21.4+canary.20260928T071354Z", false), (nil, false), ("dev", false)
+        ]
+        for release in releases {
+            let label = release.version ?? "missing"
+            var status: [String: BotJSON] = ["auth_required": .bool(true), "auth_providers": .array([.string("basic")])]
+            status["version"] = release.version.map(BotJSON.string)
+            HermesHostFixture.reset()
+            let http = HermesConnection(connection: record, configuration: HermesHostFixture.configuration { request in
+                request.url?.path == "/api/status" ? .json(200, .object(status)) : nil
+            })
+            do {
+                try await http.signIn()
+                XCTAssertFalse(release.refused, "\(label) must be refused")
+            } catch {
+                XCTAssertTrue(release.refused, "\(label) must sign in, not \(error)")
+                XCTAssertEqual(error as? BotFailure, .outdated(label))
+            }
+            XCTAssertEqual(HermesHostFixture.requests.map { $0.url?.path },
+                           release.refused ? ["/api/status"] : ["/api/status", "/auth/password-login", "/api/auth/me"], label)
+        }
+    }
+
+    /// A -32601 (method not found) to one screen's call is the connection's to remember, past
+    /// the socket that carried it. The handshake's own `client.capabilities` and an ordinary
+    /// rejection are not recorded.
+    func testAMissingMethodIsRememberedForEveryScreenOnTheConnection() async throws {
+        let socket = BotScriptedSocket()
+        let error: (BotJSON, Int) -> BotJSON = { request, code in
+            .object(["id": request["id"], "error": .object(["code": .number(Double(code)), "message": .string("refused")])])
+        }
+        socket.capabilitiesReply = { error($0, -32601) }
+        socket.reply = { request in
+            switch request["method"].text {
+            case "session.cwd.set": return error(request, -32601)
+            case "model.options": return error(request, 4000)
+            default: return .object(["id": request["id"], "result": .object([:])])
+            }
+        }
+        let http = HermesConnection(connection: record, configuration: HermesHostFixture.configuration { _ in nil },
+                                    gateway: .init { _ in socket })
+        let chat = BotClient(http: http), inbox = BotClient(http: http)
+        try await chat.connect()
+        try await inbox.connect()
+        for call in [HermesCall.sessionCwdSet(sessionID: "runtime", profile: "bot", cwd: "/new"),
+                     .modelOptions(sessionID: "runtime", profile: "bot")] {
+            do { _ = try await chat.call(call); XCTFail("\(call.method) is refused") } catch {}
+        }
+        XCTAssertEqual(inbox.unavailableMethods, ["session.cwd.set"])
+        chat.close(); inbox.close()
+        XCTAssertEqual(BotClient(http: http).unavailableMethods, ["session.cwd.set"], "A later socket on the connection keeps it")
+    }
+
     func testHeaderPolicyRefusesTransportNamesAndBearerAndKeepsTheCloudflareJSONForm() throws {
         XCTAssertEqual(try HermesHeaders([cloudflare, access]).values, [cloudflare, access])
         let refused: [(CustomHeader, HermesHeaders.Rejection)] = [
@@ -276,14 +382,17 @@ import XCTest
         }
     }
 
-    /// The active webui server's custom headers are loaded too, and never reach Hermes.
-    func testHeadersReachEveryRequestToTheOriginAndTheGatewayUpgradeUnderItsBuiltIns() async throws {
+    /// The saved record's headers, as `HermesConnections` and the connection form's
+    /// candidate pass it. The active webui server's custom headers are loaded too, and
+    /// never reach Hermes.
+    func testSavedHeadersReachEveryRequestToTheOriginAndTheGatewayUpgradeUnderItsBuiltIns() async throws {
         let previous = CustomHeaderStore.shared.snapshot()
         defer { CustomHeaderStore.shared.replace(with: previous) }
         CustomHeaderStore.shared.replace(with: [CustomHeader(name: "X-Webui-Token", value: "webui")])
-        let headers = try HermesHeaders([cloudflare, access, CustomHeader(name: "Content-Type", value: "text/plain")])
+        var saved = record
+        saved.headers = [cloudflare, access, CustomHeader(name: "Content-Type", value: "text/plain")]
         var upgrade: URLRequest?
-        let http = HermesConnection(connection: record, configuration: HermesHostFixture.configuration { _ in nil }, headers: headers,
+        let http = HermesConnection(connection: saved, configuration: HermesHostFixture.configuration { _ in nil },
                                     gateway: .init { request in upgrade = request; return BotScriptedSocket() })
         let client = BotClient(http: http)
         try await client.connect()
@@ -291,12 +400,18 @@ import XCTest
         let context = BotArtifactContext(connectionID: record.id, profile: "inbox-triage", sessionID: "tip", generation: 1)
         _ = try await client.artifactData(path: "report.pdf", context: context)
         _ = try await client.uploadImage(data: Data([1, 2, 3]), filename: "a.png", context: context)
-        try await BotDashboardClient(http: http).setPlugin("hermex-push", enabled: true)
+        try await client.deleteProfile("old-bot")
+        let dashboard = BotDashboardClient(http: http)
+        try await dashboard.installPlugin(identifier: "hermex-push")
+        try await dashboard.setPlugin("hermex-push", enabled: true)
+        _ = try await dashboard.loadedPluginVersion()
 
         let requests = HermesHostFixture.requests
         XCTAssertEqual(requests.map { $0.url?.path }, ["/api/status", "/auth/password-login", "/api/auth/me", "/api/auth/ws-ticket",
-                                                       "/api/fs/download", "/api/chat/image-upload",
-                                                       "/api/dashboard/agent-plugins/hermex-push/enable"])
+                                                       "/api/fs/download", "/api/chat/image-upload", "/api/profiles/old-bot",
+                                                       "/api/dashboard/agent-plugins/install",
+                                                       "/api/dashboard/agent-plugins/hermex-push/enable",
+                                                       "/api/plugins/hermex-push/pairing"])
         for request in requests {
             XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), cloudflare.value, request.url?.path ?? "")
             XCTAssertEqual(request.value(forHTTPHeaderField: "X-Access"), "token", request.url?.path ?? "")
@@ -312,18 +427,23 @@ import XCTest
     }
 
     /// The fixture carries the headers onto the redirected request, as a server's redirect
-    /// would, so only the connection's redirect guard can remove them.
+    /// would, so only the connection's redirect guard can remove them. A reply from another
+    /// host then ends the sign-in as `.blocked` before the password goes out.
     func testACrossOriginRedirectDropsTheHeadersBeforeTheRelay() async throws {
         let relay = HermexPushPlugin.defaultRelayURL.appendingPathComponent("api/status")
-        let http = HermesConnection(connection: record, configuration: HermesHostFixture.configuration { request in
+        var saved = record
+        saved.headers = [cloudflare, access]
+        let http = HermesConnection(connection: saved, configuration: HermesHostFixture.configuration { request in
             request.url?.host == "hermes.example" && request.url?.path == "/api/status" ? .redirect(relay) : nil
-        }, headers: try HermesHeaders([cloudflare, access]))
-        try await http.signIn()
+        })
+        do { try await http.signIn(); XCTFail("Expected a reply from another host to be blocked") }
+        catch { XCTAssertEqual(error as? BotFailure, .blocked) }
         let hop = try XCTUnwrap(HermesHostFixture.requests.first { $0.url?.host == relay.host })
         XCTAssertNil(hop.value(forHTTPHeaderField: "Authorization"))
         XCTAssertNil(hop.value(forHTTPHeaderField: "X-Access"))
-        let login = try XCTUnwrap(HermesHostFixture.requests.first { $0.url?.path == "/auth/password-login" })
-        XCTAssertEqual(login.value(forHTTPHeaderField: "X-Access"), "token", "Requests to the origin keep them")
+        let status = try XCTUnwrap(HermesHostFixture.requests.first { $0.url?.host == "hermes.example" })
+        XCTAssertEqual(status.value(forHTTPHeaderField: "X-Access"), "token", "Requests to the origin keep them")
+        XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 0)
     }
 
     private func assertStale(_ label: String, _ body: () async throws -> Void) async {

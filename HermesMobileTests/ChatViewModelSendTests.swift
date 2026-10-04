@@ -78,9 +78,8 @@ final class ChatViewModelSendTests: XCTestCase {
                 return speechSynthesizer
             }
         ) { request in
-            // Listen now prefers server TTS (#15); refuse it so the on-device
-            // fallback path is what creates the synthesizer.
-            XCTAssertEqual(request.url?.path, "/api/tts")
+            // Refuse settings and audio so the fallback creates the synthesizer.
+            XCTAssertTrue(["/api/settings", "/api/tts"].contains(request.url?.path ?? ""))
             return Self.ttsUnavailableResponse(for: request)
         }
         let context = try XCTUnwrap(MessageActionContext(
@@ -251,6 +250,9 @@ final class ChatViewModelSendTests: XCTestCase {
             },
             userDefaults: userDefaults
         ) { request in
+            if request.url?.path == "/api/settings" {
+                return apiTestJSONResponse(#"{"tts_engine":"edge","tts_voice":"tr-TR-EmelNeural"}"#, for: request)
+            }
             XCTAssertEqual(request.url?.path, "/api/tts")
             guard let body = apiTestBodyData(from: request),
                   let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any] else {
@@ -258,7 +260,8 @@ final class ChatViewModelSendTests: XCTestCase {
                 throw URLError(.badServerResponse)
             }
             XCTAssertEqual(json["text"] as? String, "Neural, please.")
-            XCTAssertEqual(json["voice"] as? String, ServerTTSPolicy.defaultVoice)
+            XCTAssertEqual(json["voice"] as? String, "tr-TR-EmelNeural")
+            XCTAssertEqual(json["engine"] as? String, "edge")
             let response = HTTPURLResponse(
                 url: request.url!,
                 statusCode: 200,
@@ -656,6 +659,149 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertLessThanOrEqual(ttsRequests, 1)
     }
 
+    @MainActor
+    func testListenRoutesSavedEnginesAndFallsBackForMissingOrFailedSettings() async throws {
+        let scenarios: [(String?, String, String?)] = [
+            (#"{"tts_engine":"browser","tts_voice":"tr-TR-EmelNeural"}"#, "browser", nil),
+            (#"{"tts_engine":"openai","tts_voice":"tr-TR-EmelNeural"}"#, "openai", nil),
+            (#"{"tts_engine":"elevenlabs","tts_voice":"tr-TR-EmelNeural"}"#, "elevenlabs", nil),
+            (#"{}"#, "edge", "en-US-AriaNeural"),
+            (nil, "edge", "en-US-AriaNeural"),
+            (#"{"tts_engine":[],"tts_voice":42}"#, "edge", "en-US-AriaNeural"),
+            (#"{"tts_engine":"future","tts_voice":" "}"#, "edge", "en-US-AriaNeural")
+        ]
+        for (settings, engine, voice) in scenarios {
+            let speech = SpySpeechSynthesizer()
+            let player = SpyListenAudioPlayer()
+            var paths: [String] = []
+            let viewModel = try makeViewModel(
+                speechSynthesizerFactory: { speech },
+                serverTTSAudioPlayerFactory: { _ in player }
+            ) { request in
+                paths.append(request.url!.path)
+                if request.url?.path == "/api/settings" {
+                    guard let settings else { throw URLError(.notConnectedToInternet) }
+                    return apiTestJSONResponse(settings, for: request)
+                }
+                let body = try XCTUnwrap(apiTestBodyData(from: request))
+                let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+                var expected = ["text": "Hello", "engine": engine]
+                expected["voice"] = voice
+                XCTAssertEqual(json, expected)
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data([1]))
+            }
+            let context = try listenContext("Hello", id: "routing")
+            viewModel.toggleListening(to: context)
+            await viewModel.listenPreparationTask?.value
+            XCTAssertEqual(paths, engine == "browser" ? ["/api/settings"] : ["/api/settings", "/api/tts"])
+            XCTAssertEqual(speech.spokenStrings, engine == "browser" ? ["Hello"] : [])
+            XCTAssertEqual(player.prepareToPlayCount, engine == "browser" ? 0 : 1)
+            XCTAssertNil(viewModel.messageActionErrorMessage)
+            viewModel.stopListening()
+        }
+    }
+
+    @MainActor
+    func testStopOrSecondTapWhileSettingsArePendingNeverStartsPlayback() async throws {
+        for secondTap in [false, true] {
+            let started = expectation(description: "settings started")
+            let released = expectation(description: "settings released")
+            let release = DispatchSemaphore(value: 0)
+            let speech = SpySpeechSynthesizer()
+            let audioSession = SpyListenAudioSession()
+            let viewModel = try makeViewModel(
+                speechSynthesizerFactory: { speech },
+                listenAudioSession: audioSession,
+                serverTTSAudioPlayerFactory: { _ in
+                    XCTFail("Stopped settings must not create a player")
+                    return SpyListenAudioPlayer()
+                }
+            ) { request in
+                XCTAssertEqual(request.url?.path, "/api/settings")
+                started.fulfill()
+                release.wait()
+                defer { released.fulfill() }
+                return apiTestJSONResponse(#"{"tts_engine":"browser"}"#, for: request)
+            }
+            let context = try listenContext("Stopped", id: "stopped")
+            viewModel.toggleListening(to: context)
+            let pending = viewModel.listenPreparationTask
+            await fulfillment(of: [started], timeout: 3)
+            XCTAssertEqual(audioSession.activateCount, 0)
+            if secondTap { viewModel.toggleListening(to: context) } else { viewModel.stopListening() }
+            release.signal()
+            await pending?.value
+            await fulfillment(of: [released], timeout: 3)
+            XCTAssertEqual(speech.spokenStrings, [])
+            XCTAssertEqual(audioSession.activateCount, 0)
+            XCTAssertNil(viewModel.listeningMessageID)
+        }
+    }
+
+    @MainActor
+    func testSwitchingMessageOrServerWhileSettingsArePendingDiscardsOldPreference() async throws {
+        for switchesServer in [false, true] {
+            let started = expectation(description: "old settings started")
+            let released = expectation(description: "old settings released")
+            let release = DispatchSemaphore(value: 0)
+            let oldSpeech = SpySpeechSynthesizer()
+            let newSpeech = SpySpeechSynthesizer()
+            let player = SpyListenAudioPlayer()
+            var settingsCount = 0
+            let handler: (URLRequest) throws -> (HTTPURLResponse, Data) = { request in
+                if request.url?.path == "/api/settings" {
+                    settingsCount += 1
+                    if settingsCount == 1 {
+                        XCTAssertEqual(request.url?.host, "example.test")
+                        started.fulfill()
+                        release.wait()
+                        defer { released.fulfill() }
+                        return apiTestJSONResponse(#"{"tts_engine":"browser"}"#, for: request)
+                    }
+                    XCTAssertEqual(request.url?.host, switchesServer ? "second.test" : "example.test")
+                    return apiTestJSONResponse(#"{"tts_engine":"edge","tts_voice":"tr-TR-EmelNeural"}"#, for: request)
+                }
+                XCTAssertEqual(request.url?.host, switchesServer ? "second.test" : "example.test")
+                let body = try XCTUnwrap(apiTestBodyData(from: request))
+                let json = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: String])
+                XCTAssertEqual(json, ["text": "New", "voice": "tr-TR-EmelNeural", "engine": "edge"])
+                return (HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!, Data([1]))
+            }
+            let old = try makeViewModel(speechSynthesizerFactory: { oldSpeech }, serverTTSAudioPlayerFactory: { _ in player }, handler: handler)
+            old.toggleListening(to: try listenContext("Old", id: "old"))
+            let pending = old.listenPreparationTask
+            await fulfillment(of: [started], timeout: 3)
+            let current: ChatViewModel
+            if switchesServer {
+                // ChatView.onDisappear stops Listen when the server-keyed tree is replaced.
+                old.stopListening()
+                current = try makeViewModel(speechSynthesizerFactory: { newSpeech }, serverTTSAudioPlayerFactory: { _ in player }, serverURL: URL(string: "https://second.test")!, handler: handler)
+            } else {
+                current = old
+            }
+            current.toggleListening(to: try listenContext("New", id: "new"))
+            await current.listenPreparationTask?.value
+            release.signal()
+            await pending?.value
+            await fulfillment(of: [released], timeout: 3)
+            XCTAssertEqual(settingsCount, 2)
+            XCTAssertEqual(oldSpeech.spokenStrings, [])
+            XCTAssertEqual(newSpeech.spokenStrings, [])
+            XCTAssertEqual(player.prepareToPlayCount, 1)
+            XCTAssertEqual(current.listeningMessageID, "new")
+            current.stopListening()
+        }
+    }
+
+    @MainActor
+    private func listenContext(_ text: String, id: String) throws -> MessageActionContext {
+        try XCTUnwrap(MessageActionContext(
+            message: ChatMessage(role: "assistant", content: text, timestamp: 1_770_000_024, messageId: id),
+            visibleIndex: 0,
+            messagesOffset: 0
+        ))
+    }
+
     func testServerTTSPolicyRoutesByServerTextCap() {
         XCTAssertTrue(ServerTTSPolicy.shouldUseServerTTS(for: String(repeating: "a", count: 5000)))
         XCTAssertFalse(ServerTTSPolicy.shouldUseServerTTS(for: String(repeating: "a", count: 5001)))
@@ -945,6 +1091,117 @@ final class ChatViewModelSendTests: XCTestCase {
         XCTAssertEqual(viewModel.pendingAttachments.count, 1)
         XCTAssertEqual(viewModel.pendingAttachments.first?.name, "photo.png")
         XCTAssertEqual(viewModel.sendErrorMessage, "Could not start chat")
+    }
+
+    /// After a Hermes update the server refuses every send until WebUI restarts (#955).
+    @MainActor
+    func testStaleAgentRuntimeSendFailureExplainsRestartAndRollsBack() async throws {
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/chat/start")
+            return apiTestJSONResponse("""
+            {
+              "error": "Hermes Agent was updated while Hermes WebUI was running. Restart Hermes WebUI manually before retrying this action.",
+              "type": "agent_runtime_stale",
+              "retryable": true,
+              "restart_scheduled": false
+            }
+            """, for: request, status: 409)
+        }
+
+        let didStart = await viewModel.sendMessage("Keep working")
+
+        // `false` is what keeps the draft in the composer (ChatView restores it).
+        XCTAssertFalse(didStart)
+        XCTAssertTrue(viewModel.messages.isEmpty)
+        XCTAssertEqual(
+            viewModel.sendErrorMessage,
+            "Hermes was updated on your server. Restart Hermes WebUI there, then try again."
+        )
+        XCTAssertEqual(viewModel.sendErrorRuntimeStale, .updated)
+
+        // The next error replaces it, so Copy fix prompt never outlives its banner.
+        viewModel.setSendErrorMessage("Choose a slash command or continue typing.")
+        XCTAssertNil(viewModel.sendErrorRuntimeStale)
+    }
+
+    /// Slash commands that send (`/queue` with nothing running, skill shortcuts)
+    /// hand the failed send's text back, and ChatView sets it again.
+    @MainActor
+    func testStaleAgentRuntimeSlashSendKeepsFixPrompt() async throws {
+        let viewModel = try makeViewModel { request in
+            XCTAssertEqual(request.url?.path, "/api/chat/start")
+            return apiTestJSONResponse(
+                #"{"error": "Hermes Agent was updated while Hermes WebUI was running.", "type": "agent_runtime_stale"}"#,
+                for: request,
+                status: 409
+            )
+        }
+        let copy = "Hermes was updated on your server. Restart Hermes WebUI there, then try again."
+
+        let result = await SlashCommandExecutor.execute(text: "/queue Keep working", viewModel: viewModel)
+        XCTAssertEqual(result, .unsupported(friendlyMessage: copy))
+        viewModel.setSendErrorMessage(copy)
+
+        XCTAssertEqual(viewModel.sendErrorMessage, copy)
+        XCTAssertEqual(viewModel.sendErrorRuntimeStale, .updated)
+    }
+
+    @MainActor
+    func testOtherConflictOnSendOffersNoFixPrompt() async throws {
+        let viewModel = try makeViewModel { request in
+            apiTestJSONResponse("""
+            {"error": "Session belongs to a different profile", "code": "session_profile_mismatch", "profile": "work"}
+            """, for: request, status: 409)
+        }
+
+        let didStart = await viewModel.sendMessage("Keep working")
+
+        XCTAssertFalse(didStart)
+        XCTAssertEqual(viewModel.sendErrorMessage, "Server returned HTTP 409: Session belongs to a different profile")
+        XCTAssertNil(viewModel.sendErrorRuntimeStale)
+    }
+
+    /// The stale-runtime 409 (#955) and the host-aware connection copy kept from the
+    /// fork's WebUI connection errors are separate classifications. Every failure
+    /// refuses the start, which keeps the draft; only an updated or half-finished
+    /// runtime offers Copy fix prompt, and an ordinary 409 or a dropped Tailscale
+    /// connection never does.
+    @MainActor
+    func testStaleRuntimeStatesAndConnectionFailuresKeepTheirOwnCopyAndFixPrompt() async throws {
+        enum Reply { case conflict(String), unreachable }
+        func stale(_ state: String) -> Reply {
+            .conflict(#"{"error": "Hermes Agent was updated while Hermes WebUI was running.", "type": "agent_runtime_stale", "agent_update_state": "\#(state)"}"#)
+        }
+        let rows: [(name: String, reply: Reply, message: String, stale: AgentRuntimeStale?, offersFixPrompt: Bool)] = [
+            ("updated", stale("stale"), "Hermes was updated on your server. Restart Hermes WebUI there, then try again.", .updated, true),
+            ("active", stale("active"),
+             "Hermes is still updating on your server. Wait for it to finish, restart Hermes WebUI, then try again.", .updating, false),
+            ("incomplete", stale("incomplete"),
+             "A Hermes update on your server didn't finish. Check it, restart Hermes WebUI, then try again.", .incomplete, true),
+            ("ordinary 409", .conflict(#"{"error": "A response is already running"}"#),
+             "Server returned HTTP 409: A response is already running", nil, false),
+            ("unreachable", .unreachable,
+             "Couldn't connect to mac.tail123.ts.net. Make sure Tailscale is connected on this iPhone and hermes-webui is running.", nil, false)
+        ]
+
+        for row in rows {
+            let viewModel = try makeViewModel(serverURL: URL(string: "https://mac.tail123.ts.net")) { request in
+                switch row.reply {
+                case .conflict(let body):
+                    return apiTestJSONResponse(body, for: request, status: 409)
+                case .unreachable:
+                    throw URLError(.cannotConnectToHost, userInfo: [NSURLErrorFailingURLErrorKey: request.url as Any])
+                }
+            }
+
+            let didStart = await viewModel.sendMessage("Keep working")
+
+            XCTAssertFalse(didStart, "\(row.name): a refused start keeps the draft")
+            XCTAssertTrue(viewModel.messages.isEmpty, row.name)
+            XCTAssertEqual(viewModel.sendErrorMessage, row.message, row.name)
+            XCTAssertEqual(viewModel.sendErrorRuntimeStale, row.stale, row.name)
+            XCTAssertEqual(viewModel.sendErrorRuntimeStale?.fixPrompt != nil, row.offersFixPrompt, row.name)
+        }
     }
 
     @MainActor
@@ -1616,6 +1873,64 @@ final class ChatViewModelSendTests: XCTestCase {
         let didAllowOnce = await viewModel.respondToApproval(.once)
         XCTAssertTrue(didAllowOnce)
         XCTAssertEqual(respondedChoices, ["once"])
+        XCTAssertNil(viewModel.approvalPrompt)
+    }
+
+    /// A tap meant for a card that a narrower one has replaced is checked against the
+    /// card on screen: Always allow from the old card sends nothing, the scope line
+    /// already names only Allow session, and Allow session answers the new approval.
+    @MainActor
+    func testAStaleChoiceFromAReplacedApprovalCardIsNeverSent() async throws {
+        let streamClient = SpySSEStreamingClient()
+        let approvalStreamClient = SpySSEStreamingClient()
+        var responses: [(choice: String, approvalID: String)] = []
+        let viewModel = try makeViewModel(
+            streamClient: streamClient,
+            approvalStreamClient: approvalStreamClient
+        ) { request in
+            switch request.url?.path {
+            case "/api/chat/start":
+                return apiTestJSONResponse(#"{"session_id":"session-abc","stream_id":"stream-123"}"#, for: request)
+            case "/api/approval/respond":
+                let body = try XCTUnwrap(apiTestJSONBody(from: request))
+                responses.append((body["choice"] as? String ?? "", body["approval_id"] as? String ?? ""))
+                return apiTestJSONResponse(#"{"ok":true,"choice":"session"}"#, for: request)
+            case "/api/approval/pending":
+                return apiTestJSONResponse(#"{"pending":null,"pending_count":0}"#, for: request)
+            default:
+                XCTFail("Unexpected request path: \(request.url?.path ?? "nil")")
+                throw URLError(.badURL)
+            }
+        }
+        func emit(_ pending: String) {
+            approvalStreamClient.emit(.approvalPending(ApprovalPendingResponse.streamPayload(
+                from: Data(#"{"pending": \#(pending), "pending_count": 1}"#.utf8)
+            )))
+        }
+
+        let didStart = await viewModel.sendMessage("Clean the build")
+        XCTAssertTrue(didStart)
+        emit(#"{"approval_id":"approval-1","command":"rm -rf ./build","description":"recursive delete","pattern_keys":["recursive delete"]}"#)
+        XCTAssertEqual(
+            viewModel.approvalPrompt?.scopeLine.map { String($0.characters) },
+            "Allow session covers every “recursive delete” in this session; Always allow covers it on this server from now on."
+        )
+        emit(#"{"approval_id":"approval-2","command":"rm -rf ./cache","pattern_keys":["recursive delete"],"allow_permanent":false}"#)
+        XCTAssertEqual(viewModel.approvalPrompt?.pending.approvalId, "approval-2")
+        XCTAssertEqual(
+            viewModel.approvalPrompt?.scopeLine.map { String($0.characters) },
+            "Allow session covers every action like this one in this session."
+        )
+
+        let staleAlways = await viewModel.respondToApproval(.always)
+        XCTAssertFalse(staleAlways)
+        XCTAssertTrue(responses.isEmpty, "The replaced card's Always allow is never sent")
+        XCTAssertEqual(viewModel.approvalPrompt?.pending.approvalId, "approval-2")
+
+        let didAllowSession = await viewModel.respondToApproval(.session)
+        XCTAssertTrue(didAllowSession)
+        XCTAssertEqual(responses.map(\.choice), ["session"])
+        XCTAssertEqual(responses.map(\.approvalID), ["approval-2"])
         XCTAssertNil(viewModel.approvalPrompt)
     }
 
@@ -11525,6 +11840,7 @@ final class ChatViewModelSendTests: XCTestCase {
         serverTTSAudioPlayerFactory: (@MainActor (Data) throws -> any ListenAudioPlaying)? = nil,
         draftAttachmentStore: any ChatDraftAttachmentStoring = RecordingSendDraftAttachmentStore(),
         userDefaults: UserDefaults = .standard,
+        serverURL: URL? = nil,
         handler: @escaping (URLRequest) throws -> (HTTPURLResponse, Data)
     ) throws -> ChatViewModel {
         MockURLProtocol.requestHandler = handler
@@ -11532,7 +11848,7 @@ final class ChatViewModelSendTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [MockURLProtocol.self]
         let urlSession = URLSession(configuration: configuration)
-        let server = try XCTUnwrap(URL(string: "https://example.test"))
+        let server = try XCTUnwrap(serverURL ?? URL(string: "https://example.test"))
         let client = APIClient(baseURL: server, session: urlSession)
         let summary: SessionSummary
         if let sessionSummary {
@@ -11985,6 +12301,10 @@ private actor RecordingSendDraftAttachmentStore: ChatDraftAttachmentStoring {
 
     func data(named fileName: String) async throws -> Data {
         Data()
+    }
+
+    func fileURL(named fileName: String) async throws -> URL {
+        throw CocoaError(.fileNoSuchFile)
     }
 
     func delete(named fileName: String) async {

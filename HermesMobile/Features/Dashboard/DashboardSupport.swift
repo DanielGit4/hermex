@@ -30,6 +30,10 @@ struct DashboardProblem: Equatable {
             self.init(message: String(localized: "Your Hermes host signed in a different way than expected. Check the Hermes connection in Bots."))
         case BotFailure.differentHost:
             self.init(message: BotFailure.differentHost.localizedDescription)
+        case BotFailure.outdated, BotFailure.blocked:
+            // A release below `HermesCompatibility.minimumVersion`, refused before any password,
+            // or an access proxy in front of Hermes: the shared connection's own advice.
+            self.init(message: error.localizedDescription)
         case BotFailure.notDashboard:
             self.init(message: String(localized: "This address doesn’t answer like a Hermes dashboard. Check the address in the Hermes connection in Bots."))
         case BotFailure.stale:

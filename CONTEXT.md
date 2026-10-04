@@ -24,6 +24,20 @@ _Avoid_: profile picker, profile switch
 Sessions that arrived through a messaging platform (Telegram, WhatsApp, Signal, ...). They group in one disclosure per platform, below Scheduled.
 _Avoid_: Gateway sessions, external sessions
 
+## Servers
+
+**Webui server**:
+A configured `hermes-webui` server. Hermex signs in to it with its password and cookie, and it opens on the session list.
+_Avoid_: server (alone, when the kind matters), WebUI
+
+**Hermes server**:
+A configured Hermes dashboard that Hermex reaches directly. Its sign-in is its own Hermes connection, and it opens on the Bots inbox.
+_Avoid_: Hermes connection (that is the sign-in), bot server
+
+**Connection mode**:
+How this iPhone reaches the server, chosen in the connect form: Same Wi-Fi, Private network or Cloudflare Tunnel. It changes only the form's placeholder, help and header rows, and is not saved.
+_Avoid_: network type, connection type
+
 ## Kanban
 
 **Kanban**:

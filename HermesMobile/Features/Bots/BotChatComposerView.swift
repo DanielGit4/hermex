@@ -13,6 +13,8 @@ struct BotChatComposerView: View {
     let onReconnect: () -> Void
     /// Scrolls the transcript back to the pending request card.
     let onShowRequest: () -> Void
+    /// Leaves the chat for the inbox's sign-in form, after the host refused the password.
+    var onUpdateSignIn: () -> Void = {}
 
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -70,7 +72,8 @@ struct BotChatComposerView: View {
             // receipt for work the transcript already shows. With nothing to act
             // on, the user's quick replies take the same slot, so the two never stack.
             if let pill {
-                BotComposerPillView(pill: pill, onReconnect: onReconnect, onShowRequest: onShowRequest,
+                BotComposerPillView(pill: pill, onReconnect: onReconnect, onUpdateSignIn: onUpdateSignIn,
+                                    onShowRequest: onShowRequest,
                                     onCancelUpload: { model.cancelAttachmentUpload() },
                                     onDismissError: { if let text = pill.errorText { dismissedErrors.insert(text) } })
                     .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
@@ -121,16 +124,16 @@ struct BotChatComposerView: View {
             errorText: errorTexts.first { !dismissedErrors.contains($0) },
             voiceStatus: voiceStatus,
             offersReconnect: model.connectionState == .disconnected && !model.isReconnecting && model.errorMessage != nil,
+            needsSignIn: model.needsSignIn,
             isUploading: model.isUploadingAttachments
         )
     }
 
     /// What the blocked bot is waiting on. "Handling this" is only true where
-    /// there is nothing to do: a request the phone can answer or decline has an
-    /// action on its card, and saying it is handled would hide that.
+    /// there is nothing to do: a request the phone can answer has an action on
+    /// its card, and saying it is handled would hide that.
     private var requestText: String {
         if model.pendingRequest?.isAnswerable == true { return String(localized: "Waiting for your answer") }
-        if model.mayDecline { return String(localized: "Waiting on Hermes Desktop") }
         if model.pendingRequest == nil { return String(localized: "Needs attention. Answer the request in Hermes Desktop on this same connection.") }
         return String(localized: "Hermes Desktop is handling this")
     }
@@ -204,7 +207,12 @@ struct BotChatComposerView: View {
             voiceInput.stopBeforeSubmittingDraft()
         }
         .onChange(of: scenePhase) { _, newPhase in
-            if newPhase != .active { voiceInput.stopBeforeSubmittingDraft() }
+            if newPhase != .active { voiceInput.suspend() }
+            else { voiceInput.resume() }
+        }
+        .onChange(of: AppLock.shared.isLocked) { _, locked in
+            if locked { voiceInput.suspend() }
+            else if scenePhase == .active { voiceInput.resume() }
         }
         // Ask Hermex lands the passage here, so the keyboard should already be
         // up for whatever the user wants to ask about it.
@@ -321,6 +329,12 @@ struct BotChatComposerView: View {
                     // Tapping a chip opens its full passage in issue #564; here it
                     // is inert, and the swipe-to-remove is the way back out.
                     onTapChip: { _ in }, onTapQuote: { _ in }, onRemoveQuote: { model.removeQuote($0) },
+                    // Live rows count, so a prompt still in flight is the one ↑ recalls.
+                    // The attachment refs the send appended don't come back.
+                    recallLastSentText: {
+                        ComposerRecall.lastSentText(in: model.messages + model.liveMessages,
+                                                    typedText: BotAttachmentUpload.typedText(of:))
+                    },
                     placeholder: String(localized: "Ask anything..."), acceptsAttachments: model.mayEditDraft
                 )
                 if !isExpanded {
@@ -424,15 +438,13 @@ struct BotChatComposerView: View {
         let insertion = BotVoiceDraftInsertion(draft: model.draft, selection: insertionRange)
         voiceInput.apiClient = nil
         voiceInput.providerPreference = .onDeviceOnly
-        Task {
-            await voiceInput.toggle(currentDraft: "") { transcript in
-                guard let result = insertion.applying(transcript: transcript, to: model.draft) else {
-                    voiceInput.stopBeforeSubmittingDraft()
-                    return
-                }
-                model.editDraft(result.draft)
-                selection = selection.moved(to: result.selection)
+        voiceInput.scheduleToggle(currentDraft: "") { transcript in
+            guard let result = insertion.applying(transcript: transcript, to: model.draft) else {
+                voiceInput.stopBeforeSubmittingDraft()
+                return
             }
+            model.editDraft(result.draft)
+            selection = selection.moved(to: result.selection)
         }
     }
 
@@ -568,15 +580,18 @@ enum BotComposerPill: Equatable {
     case error(String)
     case voice(ComposerVoiceStatus)
     case reconnect
+    /// Reconnect's slot after the host refused the saved password: reconnecting
+    /// would only send it again, so the button opens the sign-in form instead.
+    case updateSignIn
     case uploading
     case retrySend
 
     static func resolve(requestText: String?, requestHasCard: Bool, errorText: String?, voiceStatus: ComposerVoiceStatus?,
-                        offersReconnect: Bool, isUploading: Bool) -> BotComposerPill? {
+                        offersReconnect: Bool, needsSignIn: Bool = false, isUploading: Bool) -> BotComposerPill? {
         if let requestText { return requestHasCard ? .request(requestText) : .notice(requestText) }
         if let errorText { return .error(errorText) }
         if let voiceStatus { return .voice(voiceStatus) }
-        if offersReconnect { return .reconnect }
+        if offersReconnect { return needsSignIn ? .updateSignIn : .reconnect }
         if isUploading { return .uploading }
         return nil
     }
@@ -585,9 +600,12 @@ enum BotComposerPill: Equatable {
 
     /// Rooms share the action pill, but their host exposes no turn start time.
     /// Routine working/connecting states stay quiet; requests and recovery remain reachable.
+    /// `needsSignIn` holds Update sign-in in place even while a background leaves the
+    /// room idle, because the room never signs in again with a rejected password.
     static func room(link: BotRoomReader.Link, blocked: Bool, hasActions: Bool,
-                     mayRetry: Bool, errorText: String?) -> BotComposerPill? {
+                     mayRetry: Bool, needsSignIn: Bool = false, errorText: String?) -> BotComposerPill? {
         if let errorText { return .error(errorText) }
+        if needsSignIn { return .updateSignIn }
         if link == .stopped { return .reconnect }
         if mayRetry { return .retrySend }
         if link == .live && blocked {
@@ -598,11 +616,12 @@ enum BotComposerPill: Equatable {
     }
 }
 
-/// One centered capsule with material and no motion of its own. Request and
-/// Reconnect are buttons; an error is tappable to dismiss; Uploading carries Cancel.
+/// One centered capsule with material and no motion of its own. Request, Reconnect
+/// and Update sign-in are buttons; an error is tappable to dismiss; Uploading carries Cancel.
 struct BotComposerPillView: View {
     let pill: BotComposerPill
     let onReconnect: () -> Void
+    let onUpdateSignIn: () -> Void
     let onShowRequest: () -> Void
     let onCancelUpload: () -> Void
     let onDismissError: () -> Void
@@ -622,6 +641,8 @@ struct BotComposerPillView: View {
                 Label(status.text, systemImage: status.systemImage)
             case .reconnect:
                 Button(action: onReconnect) { Label("Reconnect", systemImage: "arrow.clockwise") }
+            case .updateSignIn:
+                Button(action: onUpdateSignIn) { Label("Update sign-in", systemImage: "key") }
             case .retrySend:
                 Button(action: onRetrySend) { Label("Retry send", systemImage: "arrow.up") }
             case .uploading:

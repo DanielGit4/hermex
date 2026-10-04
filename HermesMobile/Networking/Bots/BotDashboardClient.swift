@@ -3,8 +3,9 @@ import Foundation
 /// The Hermes host's dashboard REST surface, kept apart from `BotClient` because push
 /// provisioning needs no gateway socket: it mutates the host's plugins and environment
 /// and reads the pairing keys, over the sign-in and cookie jar the server's Bot screens
-/// share. Every call here changes the user's server, so only the explicit Enable and
-/// Disable actions build one.
+/// share. Its writes change the user's server, so only confirmed actions (Enable, Disable,
+/// the plugin update, the restart) make them; the plugin version and status reads alone run
+/// on their own.
 @MainActor final class BotDashboardClient {
     private let http: HermesConnection
 
@@ -45,15 +46,38 @@ import Foundation
     }
 
     /// Restarts the agent gateway so a newly installed plugin is loaded. This interrupts
-    /// the user's running work, so only a confirmed Enable reaches it.
+    /// the user's running work, so only a confirmed Enable or plugin update reaches it.
     func restartGateway() async throws {
         _ = try await send(.restartGateway)
+    }
+
+    /// Asks hermex-push 0.4.0 or newer to restart the dashboard process it runs in (#934). It
+    /// answers 202 and re-execs about a second later, stopping Bot turns running there, so
+    /// only a confirmed "Restart Hermes…" reaches it.
+    func restartHermes() async throws {
+        _ = try await send(.restartDashboard)
+    }
+
+    /// Whether the host answers its public status route, read without signing in.
+    func answersStatus() async -> Bool {
+        await http.answersStatus()
     }
 
     /// Reads the plugin's pairing keys. The route answers 409 until the relay URL is set
     /// and 404 until the restart has mounted it, so the caller retries both.
     func pairing() async throws -> PushPairing {
         try HermexPushPlugin.pairing(try await send(.pushPairing))
+    }
+
+    /// The hermex-push version the dashboard process has loaded, from the pairing route;
+    /// nil for a plugin too old to say. Keys are not decoded, so an old plugin's still read.
+    func loadedPluginVersion() async throws -> HermexPushPluginVersion? {
+        HermexPushPlugin.loadedVersion(try await send(.pushPairing))
+    }
+
+    /// The hermex-push version on the host's disk, from the plugins hub.
+    func installedPluginVersion() async throws -> HermexPushPluginVersion? {
+        HermexPushPlugin.installedVersion(hub: try await send(.pluginsHub))
     }
 
     /// Any non-2xx is the step's failure, carrying the status so the pairing route's 404
