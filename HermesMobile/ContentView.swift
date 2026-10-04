@@ -334,11 +334,14 @@ struct HermesServerHome: View {
     @State private var isShowingSettings = false
     @State private var settingsTarget: SettingsScrollAnchor?
     @State private var isPresentingAddServer = false
+    @State private var isShowingDashboard = false
 
     var body: some View {
         NavigationStack {
             BotsInboxView(server: server, pendingDestination: $pendingBotDestination,
-                          home: HermesServerIdentity(account: authManager.activeServer, server: server).inboxHome) {
+                          home: HermesServerIdentity(account: authManager.activeServer, server: server).inboxHome,
+                          openDashboard: BotsInboxDashboardEntry.isOffered(kind: authManager.kind(of: server), state: authManager.state,
+                                                                           server: server) ? { isShowingDashboard = true } : nil) {
                 HermesServerAvatarButton(authManager: authManager, server: server) {
                     settingsTarget = nil; isShowingSettings = true
                 } addServer: {
@@ -350,6 +353,7 @@ struct HermesServerHome: View {
             .navigationDestination(isPresented: $isShowingSettings) {
                 SettingsView(authManager: authManager, server: server, initialScrollTarget: settingsTarget)
             }
+            .navigationDestination(isPresented: $isShowingDashboard) { DashboardView(server: server) }
         }
         .sheet(isPresented: $isPresentingAddServer) {
             AddServerView(authManager: authManager)

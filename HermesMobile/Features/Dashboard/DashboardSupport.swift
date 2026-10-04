@@ -60,6 +60,21 @@ struct DashboardProblem: Equatable {
     ]
 }
 
+/// Fork: whether the Bots inbox shows its Dashboard button. Only on the home of the active,
+/// signed-in Hermes server with a saved connection; a webui server keeps its session-list
+/// entry, and an inbox pushed from the session list never shows it.
+enum BotsInboxDashboardEntry {
+    /// `HermesServerHome` asks this before it offers the action to its inbox.
+    static func isOffered(kind: ServerKind, state: AuthManager.State, server: URL) -> Bool {
+        kind == .hermes && state == .loggedIn(server: server)
+    }
+
+    /// The inbox shows the button only when its home offers the action and it has a saved connection.
+    static func isVisible(isOffered: Bool, hasConnection: Bool) -> Bool {
+        isOffered && hasConnection
+    }
+}
+
 /// One independently loaded dashboard section: each has its own spinner, failure and retry.
 enum DashboardLoadState: Equatable {
     case idle, loading, loaded
