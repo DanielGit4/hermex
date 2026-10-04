@@ -203,6 +203,10 @@ enum ActiveStreamRecoveryState: Equatable {
     case idle
     case checking
     case reconnecting
+    /// The reconnect gave up: the stream is still suspended and Hermes may
+    /// still be running it. Only a Reconnect tap, a network-path change, or a
+    /// return to the screen tries again.
+    case disconnected
 }
 
 @MainActor
@@ -4809,6 +4813,10 @@ final class ChatViewModel {
 
     func reconnectStreamIfNeeded(modelContext: ModelContext? = nil) async {
         await streamCoordinator.reconnectIfNeeded(modelContext: modelContext)
+    }
+
+    func reconnectStreamAfterNetworkPathChange(modelContext: ModelContext? = nil) async {
+        await streamCoordinator.reconnectAfterNetworkPathChange(modelContext: modelContext)
     }
 
     func refreshTranscriptIfActiveStreamCompleted(

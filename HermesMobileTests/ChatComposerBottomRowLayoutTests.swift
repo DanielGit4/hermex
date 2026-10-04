@@ -751,6 +751,200 @@ private struct ComposerRowFixture: View {
     }
 }
 
+/// The transcript's stream recovery row, hosted in a phone-sized window:
+/// Reconnect shows only once the reconnect gave up, stays reachable when the
+/// pill speaks for the row, runs one attempt at a time, and at accessibility
+/// sizes moves below the text.
+@MainActor final class StreamRecoveryStatusViewTests: XCTestCase {
+    private static let notConnected = "Not connected — Hermes may still be working"
+    private static let reconnectID = "chat.streamRecovery.reconnect"
+
+    private var restoreAutomation: (() -> Void)?
+
+    override func setUp() async throws {
+        try await super.setUp()
+        restoreAutomation = try XCTUnwrap(InProcessAccessibility.enableAutomation(),
+                                          "libAccessibility is unavailable")
+    }
+
+    override func tearDown() async throws {
+        restoreAutomation?()
+        restoreAutomation = nil
+        try await super.tearDown()
+    }
+
+    func testReconnectShowsOnlyOnceTheConnectionIsLost() async throws {
+        let window = try show(StreamRecoveryStatusView(state: .disconnected) {})
+        defer { close(window) }
+
+        let status = try await element(in: window) { $0.label == Self.notConnected }
+        let button = try await reconnectButton(in: window)
+        XCTAssertEqual(button.label, "Reconnect")
+        XCTAssertFalse(button.frame.intersects(status.frame), "status \(status.frame), button \(button.frame)")
+
+        for (state, label) in [(ActiveStreamRecoveryState.checking, "Checking stream"), (.reconnecting, "Reconnecting stream")] {
+            let window = try show(StreamRecoveryStatusView(state: state) {})
+            defer { close(window) }
+
+            _ = try await element(in: window) { $0.label == label }
+            XCTAssertNil(
+                accessibilityElements(in: window).first { $0.identifier == Self.reconnectID },
+                "\(state) offers no Reconnect"
+            )
+        }
+    }
+
+    func testReconnectStaysReachableWhileThePillSpeaksForTheRow() async throws {
+        let window = try show(StreamRecoveryStatusView(state: .disconnected, hidesStatusAccessibility: true) {})
+        defer { close(window) }
+
+        let button = try await reconnectButton(in: window)
+        XCTAssertEqual(button.label, "Reconnect")
+        XCTAssertNil(accessibilityElements(in: window).first { $0.label == Self.notConnected },
+                     "The pill already reads the state")
+    }
+
+    func testReconnectRunsOnceWhileAnAttemptIsInFlight() async throws {
+        let probe = RetryProbe()
+        let window = try show(StreamRecoveryStatusView(state: .disconnected) { await probe.run() })
+        defer {
+            probe.finish()
+            close(window)
+        }
+
+        let first = try await reconnectButton(in: window)
+        XCTAssertTrue(first.object.accessibilityActivate())
+        let started = await waitUntil { probe.calls == 1 }
+        XCTAssertTrue(started, "The first tap starts a reconnect")
+
+        let second = try await reconnectButton(in: window)
+        _ = second.object.accessibilityActivate()
+        await renderFrames()
+        XCTAssertEqual(probe.calls, 1, "A tap while the reconnect runs does not start another")
+
+        probe.finish()
+        let enabled = await waitUntil {
+            self.accessibilityElements(in: window)
+                .first { $0.identifier == Self.reconnectID }
+                .map { !$0.object.accessibilityTraits.contains(.notEnabled) } ?? false
+        }
+        XCTAssertTrue(enabled, "Reconnect is enabled again once the attempt finishes")
+        let third = try await reconnectButton(in: window)
+        XCTAssertTrue(third.object.accessibilityActivate())
+        let restarted = await waitUntil { probe.calls == 2 }
+        XCTAssertTrue(restarted, "A tap after the attempt finished starts another")
+    }
+
+    func testAccessibilitySizeMovesReconnectBelowTheText() async throws {
+        let window = try show(
+            StreamRecoveryStatusView(state: .disconnected) {}.environment(\.dynamicTypeSize, .accessibility3)
+        )
+        defer { close(window) }
+
+        let status = try await element(in: window) { $0.label == Self.notConnected }
+        let button = try await reconnectButton(in: window)
+        XCTAssertGreaterThanOrEqual(button.frame.minX, 0, "\(button.frame)")
+        XCTAssertLessThanOrEqual(button.frame.maxX, 402, "\(button.frame)")
+        XCTAssertLessThanOrEqual(status.frame.maxX, 402, "The text wraps instead of running off: \(status.frame)")
+        XCTAssertFalse(button.frame.intersects(status.frame), "status \(status.frame), button \(button.frame)")
+        XCTAssertGreaterThanOrEqual(button.frame.minY, status.frame.maxY - 0.5, "Reconnect sits below the text")
+    }
+
+    // MARK: Elements
+
+    private func reconnectButton(in window: UIWindow) async throws -> AccessibilityElement {
+        try await element(in: window) { $0.identifier == Self.reconnectID }
+    }
+
+    /// The first element matching `match`, once the hosted view has published it.
+    private func element(
+        in window: UIWindow,
+        where match: (AccessibilityElement) -> Bool
+    ) async throws -> AccessibilityElement {
+        var found: AccessibilityElement?
+        _ = await waitUntil {
+            found = self.accessibilityElements(in: window).first(where: match)
+            return found != nil
+        }
+        return try XCTUnwrap(found, "Elements: \(accessibilityElements(in: window).compactMap(\.label))")
+    }
+
+    // MARK: Hosting
+
+    private func show<V: View>(_ view: V) throws -> UIWindow {
+        let scene = try XCTUnwrap(UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first)
+        let window = UIWindow(windowScene: scene)
+        window.frame = CGRect(x: 0, y: 0, width: 402, height: 874)
+        window.overrideUserInterfaceStyle = .light
+        window.rootViewController = UIHostingController(
+            rootView: view
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                .transaction { $0.disablesAnimations = true }
+        )
+        window.makeKeyAndVisible()
+        return window
+    }
+
+    private func close(_ window: UIWindow) {
+        window.isHidden = true
+        window.rootViewController = nil
+    }
+
+    private static let identifierSelector = NSSelectorFromString("accessibilityIdentifier")
+
+    private struct AccessibilityElement {
+        let object: NSObject
+        let identifier: String?
+        let label: String?
+        let frame: CGRect
+    }
+
+    /// Every accessibility element under `root`, views and SwiftUI's non-view
+    /// nodes alike (the test window sits at the origin, so frames are window
+    /// coordinates).
+    private func accessibilityElements(in root: UIView) -> [AccessibilityElement] {
+        var result: [AccessibilityElement] = []
+        var queue: [NSObject] = [root]
+        var seen: Set<ObjectIdentifier> = []
+        while let object = queue.popLast() {
+            guard seen.insert(ObjectIdentifier(object)).inserted else { continue }
+            let identifier = object.responds(to: Self.identifierSelector)
+                ? object.value(forKey: "accessibilityIdentifier") as? String
+                : nil
+            result.append(AccessibilityElement(
+                object: object,
+                identifier: identifier,
+                label: object.accessibilityLabel,
+                frame: object.accessibilityFrame
+            ))
+            queue += (object.accessibilityElements ?? []).compactMap { $0 as? NSObject }
+            let count = object.accessibilityElementCount()
+            if count != NSNotFound, count > 0 {
+                queue += (0..<count).compactMap { object.accessibilityElement(at: $0) as? NSObject }
+            }
+            if let view = object as? UIView { queue += view.subviews }
+        }
+        return result
+    }
+
+    private func renderFrames(_ target: Int = 3) async {
+        let rendered = expectation(description: "Layout committed")
+        let driver = BotRenderFrameDriver(target: target) { rendered.fulfill() }
+        driver.start()
+        await fulfillment(of: [rendered], timeout: 10)
+        driver.stop()
+    }
+
+    /// Renders frames until `condition` holds, for state that settles over a few frames.
+    private func waitUntil(_ condition: () -> Bool) async -> Bool {
+        for _ in 0..<40 {
+            if condition() { return true }
+            await renderFrames(4)
+        }
+        return condition()
+    }
+}
+
 /// Counts Try Again runs and holds each one until the test finishes it.
 @MainActor private final class RetryProbe {
     private(set) var calls = 0

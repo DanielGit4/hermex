@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import Observation
 import OSLog
 import SwiftData
@@ -146,7 +147,16 @@ final class ChatStreamCoordinator {
     /// Cleared when the next run starts, so a stale ending never outlives it.
     private(set) var latestRunEnding: ChatRunEnding?
     private(set) var recoveryState: ActiveStreamRecoveryState = .idle
-    private(set) var isConnectionSuspended = false
+    private(set) var isConnectionSuspended = false {
+        didSet {
+            // `.disconnected` describes a suspended stream, so it ends with the
+            // suspension. Teardown paths (`start`, `finishStream`,
+            // `completeCurrentResponse`) reset it on their own as well.
+            if !isConnectionSuspended, recoveryState == .disconnected {
+                setRecoveryStateIfChanged(.idle)
+            }
+        }
+    }
     private(set) var hasCompletedCurrentResponse = false
     /// Terminal-content fence (#288 review): set when the response completes and
     /// NOT cleared by finishStream, so content queued after `done → streamEnd`
@@ -408,6 +418,13 @@ final class ChatStreamCoordinator {
             return
         }
 
+        // A retry after the reconnect gave up shows progress at once; it ends
+        // `.idle` (attached or finalized) or `.disconnected` again.
+        let startsFromDisconnected = recoveryState == .disconnected
+        if startsFromDisconnected {
+            setRecoveryStateIfChanged(.reconnecting)
+        }
+
         let reconnectTaskID = UUID()
         let reconnectGeneration = runGeneration
         let task = Task { @MainActor [weak self] in
@@ -428,6 +445,24 @@ final class ChatStreamCoordinator {
             task: task
         )
         await task.value
+
+        // A retry superseded mid-flight (a session load adopted another stream)
+        // must not leave "Reconnecting" up while nothing is reconnecting.
+        if startsFromDisconnected,
+           reconnectTask == nil,
+           recoveryState == .reconnecting,
+           isConnectionSuspended,
+           self.activeStreamID != nil {
+            setRecoveryStateIfChanged(.disconnected)
+        }
+    }
+
+    /// One retry when the device's network path changes (Wi-Fi back, a VPN
+    /// such as Tailscale up), only for a stream whose reconnect gave up. Does
+    /// nothing while a reconnect is in flight; never loops.
+    func reconnectAfterNetworkPathChange(modelContext: ModelContext? = nil) async {
+        guard recoveryState == .disconnected else { return }
+        await reconnectIfNeeded(modelContext: modelContext)
     }
 
     private func performReconnectIfNeeded(
@@ -540,6 +575,9 @@ final class ChatStreamCoordinator {
                         streamID: streamID,
                         runGeneration: runGeneration
                     ) else { return }
+                    // Budget spent or a non-transient failure: stop retrying and
+                    // say so instead of still looking like a live run.
+                    setRecoveryStateIfChanged(.disconnected)
                     delegate?.streamCoordinatorDidReceiveRecoveryError(error)
                     return
                 }
@@ -635,7 +673,11 @@ final class ChatStreamCoordinator {
               !isConnectionSuspended,
               !hasCompletedCurrentResponse
         else {
-            setRecoveryStateIfChanged(.idle)
+            // `.disconnected` belongs to the suspended stream until a
+            // reconnect or teardown resolves it.
+            if recoveryState != .disconnected {
+                setRecoveryStateIfChanged(.idle)
+            }
             return
         }
 
@@ -1235,5 +1277,70 @@ final class ChatStreamCoordinator {
 
         lastEventID = result.lastEventID ?? lastEventID
         return result.didRestoreSnapshot
+    }
+}
+
+/// Tells one chat screen when the device's network path comes back or changes,
+/// so a stream whose reconnect gave up can retry once (see
+/// `ChatStreamCoordinator.reconnectAfterNetworkPathChange`). Start it when the
+/// screen appears and stop it when the screen goes away.
+@MainActor
+final class ChatNetworkPathObserver {
+    private let monitorsNetworkPath: Bool
+    private var monitor: NWPathMonitor?
+    private var onChange: (@MainActor () -> Void)?
+    private var hasBaseline = false
+    /// Bumped by `start` and `stop`, so an update queued for an earlier monitor
+    /// is dropped.
+    private var generation = 0
+
+    /// `monitorsNetworkPath` is false only in tests, which drive `pathDidUpdate`.
+    init(monitorsNetworkPath: Bool = true) {
+        self.monitorsNetworkPath = monitorsNetworkPath
+    }
+
+    /// No-op while started. The monitor is created here rather than in `init`,
+    /// so the `@State` value a chat screen makes on every init costs nothing.
+    func start(onChange: @escaping @MainActor () -> Void) {
+        guard self.onChange == nil else { return }
+        self.onChange = onChange
+        hasBaseline = false
+        generation &+= 1
+        guard monitorsNetworkPath else { return }
+
+        let generation = generation
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self] path in
+            let isSatisfied = path.status == .satisfied
+            Task { @MainActor [weak self] in
+                guard let self, self.generation == generation else { return }
+                self.pathDidUpdate(isSatisfied: isSatisfied)
+            }
+        }
+        monitor.start(queue: DispatchQueue(label: "HermesMobile.ChatNetworkPathObserver"))
+        self.monitor = monitor
+    }
+
+    func stop() {
+        monitor?.cancel()
+        monitor = nil
+        onChange = nil
+        hasBaseline = false
+        generation &+= 1
+    }
+
+    /// The first update is the path the screen started on and never fires.
+    /// After that every satisfied update fires once: unsatisfied → satisfied,
+    /// and also satisfied → satisfied, because a VPN such as Tailscale coming
+    /// up changes the path without it ever leaving `.satisfied`. Unsatisfied
+    /// updates never fire.
+    func pathDidUpdate(isSatisfied: Bool) {
+        guard let onChange else { return }
+        guard hasBaseline else {
+            hasBaseline = true
+            return
+        }
+        guard isSatisfied else { return }
+        onChange()
     }
 }
