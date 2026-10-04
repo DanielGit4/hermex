@@ -100,6 +100,11 @@ import Foundation
         }
     }
 
+    /// For tests that follow which server each client is built for, as production does.
+    init(makeServerClient: @escaping (BotConnection, URL) -> DashboardClient) {
+        makeClient = makeServerClient
+    }
+
     /// The kept bundle for this server and connection, or a new one that replaces it. A
     /// bundle whose connection was retired (a server switch, or its credentials saved again
     /// or removed) is replaced too, since every call on it now throws `.stale`.
