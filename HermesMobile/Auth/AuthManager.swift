@@ -426,6 +426,8 @@ final class AuthManager {
             dashboardModels.drop(server: active)
             await ChatDraftStore.shared.discardBotDrafts(server: active)
             removeBotConnection(for: active)
+            // The store retires only `HermesConnections.shared`; the server stays active, so retire ours too.
+            hermesConnections.retire(server: active)
             lastErrorMessage = nil
             state = .loggedOut(server: active)
             return

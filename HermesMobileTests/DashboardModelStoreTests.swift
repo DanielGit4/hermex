@@ -203,22 +203,51 @@ import XCTest
     }
 }
 
+/// Where the Bots inbox offers its Dashboard button: only the active, signed-in Hermes
+/// server's home, and only once the inbox has a saved connection.
+@MainActor final class BotsInboxDashboardEntryTests: XCTestCase {
+    private let hermes = URL(string: "https://a.test:9119")!
+
+    func testOnlyTheActiveSignedInHermesServersHomeOffersTheDashboard() {
+        XCTAssertFalse(BotsInboxDashboardEntry.isOffered(kind: .webui, state: .loggedIn(server: hermes), server: hermes),
+                       "A webui server keeps its session-list entry")
+        XCTAssertTrue(BotsInboxDashboardEntry.isOffered(kind: .hermes, state: .loggedIn(server: hermes), server: hermes))
+        XCTAssertFalse(BotsInboxDashboardEntry.isOffered(kind: .hermes, state: .loggedOut(server: hermes), server: hermes),
+                       "A signed-out Hermes server shows its sign-in form")
+        XCTAssertFalse(BotsInboxDashboardEntry.isOffered(kind: .hermes, state: .loggedIn(server: URL(string: "https://b.test:9119")!),
+                                                         server: hermes), "Another server is active")
+        XCTAssertFalse(BotsInboxDashboardEntry.isOffered(kind: .hermes, state: .unconfigured, server: hermes))
+    }
+
+    func testTheButtonNeedsTheOfferAndASavedConnection() {
+        XCTAssertFalse(BotsInboxDashboardEntry.isVisible(isOffered: false, hasConnection: false))
+        XCTAssertFalse(BotsInboxDashboardEntry.isVisible(isOffered: false, hasConnection: true),
+                       "An inbox pushed from a webui server's session list never shows it")
+        XCTAssertFalse(BotsInboxDashboardEntry.isVisible(isOffered: true, hasConnection: false))
+        XCTAssertTrue(BotsInboxDashboardEntry.isVisible(isOffered: true, hasConnection: true))
+    }
+}
+
 /// The Dashboard's kept models across the server lifecycle of both kinds (sync brief rule 9).
 /// The webui server `a.test` keeps a Bot connection to its Hermes host at `a.test:9119`,
 /// and the Hermes server is that same host added on its own: two configured servers, one
-/// host. Leaving the webui server any way retires its shared connection and drops its
-/// Dashboard; the next visit builds a fresh bundle that signs in again with the webui
-/// server's own record, never the Hermes server's.
+/// host. Leaving either server any way retires its shared connection and drops its
+/// Dashboard; the next visit builds a fresh bundle that signs in again with that server's
+/// own record, never the other server's.
 @MainActor final class DashboardServerLifecycleTests: XCTestCase {
-    /// Read and written under `HermesHostFixture`'s lock (`script`).
-    private final class LoginGate: @unchecked Sendable { var refuses = false }
+    /// Read and written under `HermesHostFixture`'s lock (`script`): `refuses` every password
+    /// while set, and the plugin hub lists `plugin` when set.
+    private final class HostGate: @unchecked Sendable {
+        var refuses = false
+        var plugin: String?
+    }
 
     private struct World {
         let manager: AuthManager
         let dashboards: DashboardModelStore
         let connections: HermesConnections
         let keychain: InMemoryKeychainStore
-        let gate: LoginGate
+        let gate: HostGate
     }
 
     private let webui = URL(string: "https://a.test")!
@@ -395,6 +424,129 @@ import XCTest
         XCTAssertEqual(dashboard.client.http.connection.username, "side")
     }
 
+    // MARK: - The Hermes server's own Dashboard (opened from its Bots inbox)
+
+    func testTheHermesServersDashboardUsesItsOwnRecordAndTheInboxsConnection() async throws {
+        let world = try await makeWorld()
+        XCTAssertFalse(BotsInboxDashboardEntry.isOffered(kind: world.manager.kind(of: webui), state: world.manager.state,
+                                                         server: webui), "The active webui server keeps its session-list entry")
+        world.manager.switchActiveServer(to: try account(.hermes, in: world))
+        XCTAssertTrue(offersDashboard(world))
+
+        // What `DashboardView` loads: the record saved under the Hermes server's URL, never the webui server's.
+        XCTAssertEqual(try BotConnectionStore(keychain: world.keychain).load(server: hermes), hermesRecord)
+
+        // The inbox signs in first, on the connection its `BotClient(saved:server:)` gets.
+        let inbox = world.connections.connection(for: hermesRecord, server: hermes)
+        try await inbox.signIn()
+        XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 1)
+
+        let dashboard = try await visitHermes(world)
+        XCTAssertTrue(dashboard.client.http === inbox, "The Dashboard shares the inbox's HermesConnection")
+        XCTAssertEqual(dashboard.client.connection.username, "own")
+        XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 1, "and its sign-in")
+        XCTAssertEqual(HermesHostFixture.count("/api/dashboard/plugins/hub"), 1)
+        XCTAssertEqual(HermesHostFixture.count("/api/auth/ws-ticket"), 0, "The Dashboard never asks for a gateway ticket")
+        XCTAssertEqual(HermesHostFixture.count("/api/ws"), 0, "nor opens the socket")
+        XCTAssertTrue(HermesHostFixture.requests.allSatisfy { $0.url?.host == "a.test" && $0.url?.port == 9119 },
+                      "Every request goes to the Hermes server's own address, none to the webui")
+    }
+
+    func testEveryWayOutOfTheHermesServerRetiresItsDashboardAndTheNextVisitSignsInAgain() async throws {
+        let ways: [(name: String, leaveAndReturn: (World) async throws -> Void)] = [
+            ("switch to the webui server and back", { world in
+                world.manager.switchActiveServer(to: try self.account(.webui, in: world))
+                XCTAssertFalse(self.offersDashboard(world))
+                world.manager.switchActiveServer(to: try self.account(.hermes, in: world))
+            }),
+            ("sign out of the Hermes server, then sign in again", { world in
+                await world.manager.signOut()
+                XCTAssertEqual(world.manager.state, .loggedOut(server: self.hermes))
+                XCTAssertNil(try BotConnectionStore(keychain: world.keychain).load(server: self.hermes))
+                XCTAssertFalse(self.offersDashboard(world))
+                try BotConnectionStore(keychain: world.keychain).save(self.hermesRecord, server: self.hermes)
+                world.manager.hermesSignInSaved(server: self.hermes)
+            }),
+            ("remove the Hermes server, then add it again", { world in
+                await world.manager.removeServer(try self.account(.hermes, in: world))
+                XCTAssertEqual(world.manager.state, .loggedIn(server: self.webui))
+                XCTAssertFalse(self.offersDashboard(world))
+                XCTAssertTrue(world.manager.addHermesServer(self.hermesRecord))
+            })
+        ]
+
+        for way in ways {
+            HermesHostFixture.reset()
+            let world = try await makeWorld()
+            world.manager.switchActiveServer(to: try account(.hermes, in: world))
+            let before = try await visitHermes(world)
+            XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 1, way.name)
+
+            try await way.leaveAndReturn(world)
+
+            XCTAssertEqual(world.manager.state, .loggedIn(server: hermes), way.name)
+            XCTAssertTrue(offersDashboard(world), way.name)
+            XCTAssertTrue(before.client.isRetired, "\(way.name): leaving retires the Dashboard's connection")
+            await assertStale(before, way.name)
+            let after = try await visitHermes(world)
+            XCTAssertFalse(after === before, way.name)
+            XCTAssertFalse(after.client.isRetired, way.name)
+            XCTAssertTrue(after.client.http === world.connections.connection(for: hermesRecord, server: hermes), way.name)
+            XCTAssertEqual(after.client.http.connection.username, "own", way.name)
+            XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 2, "\(way.name): the next visit signs in again")
+        }
+    }
+
+    func testAWebuiServerAndAHermesServerOnOneHostNeverShareDashboardModelsOrRows() async throws {
+        let world = try await makeWorld()
+        HermesHostFixture.script { world.gate.plugin = "side-plugin" }
+        let webuiDashboard = world.dashboards.bundle(server: webui, connection: sideRecord)
+        await webuiDashboard.refreshLists().value
+        XCTAssertEqual(webuiDashboard.plugins.plugins.map(\.name), ["side-plugin"])
+
+        world.manager.switchActiveServer(to: try account(.hermes, in: world))
+        HermesHostFixture.script { world.gate.plugin = "own-plugin" }
+        let hermesRecordOnDisk = try XCTUnwrap(BotConnectionStore(keychain: world.keychain).load(server: hermes))
+        let hermesDashboard = world.dashboards.bundle(server: hermes, connection: hermesRecordOnDisk)
+        XCTAssertFalse(hermesDashboard === webuiDashboard)
+        XCTAssertFalse(hermesDashboard.plugins === webuiDashboard.plugins)
+        XCTAssertFalse(hermesDashboard.profile("default") === webuiDashboard.profile("default"))
+        XCTAssertTrue(hermesDashboard.plugins.plugins.isEmpty, "No webui rows before the Hermes server's own load")
+        await hermesDashboard.refreshLists().value
+        XCTAssertEqual(hermesDashboard.plugins.plugins.map(\.name), ["own-plugin"])
+        XCTAssertEqual(hermesDashboard.client.connection.username, "own")
+        XCTAssertEqual(webuiDashboard.plugins.plugins.map(\.name), ["side-plugin"], "The webui server's rows stay its own")
+
+        world.manager.switchActiveServer(to: try account(.webui, in: world))
+        HermesHostFixture.script { world.gate.plugin = "side-plugin" }
+        let back = world.dashboards.bundle(server: webui, connection: sideRecord)
+        XCTAssertFalse(back === webuiDashboard)
+        XCTAssertFalse(back === hermesDashboard)
+        XCTAssertTrue(back.plugins.plugins.isEmpty)
+        await back.refreshLists().value
+        XCTAssertEqual(back.plugins.plugins.map(\.name), ["side-plugin"])
+        XCTAssertEqual(back.client.connection.username, "side")
+    }
+
+    func testARefusedSignInOnTheHermesServersDashboardShowsItsSignInForm() async throws {
+        let world = try await makeWorld()
+        world.manager.switchActiveServer(to: try account(.hermes, in: world))
+        HermesHostFixture.script { world.gate.refuses = true }
+
+        let dashboard = world.dashboards.bundle(server: hermes, connection: hermesRecord)
+        await dashboard.refreshLists().value
+        guard case .failed(let problem) = dashboard.plugins.listState else { return XCTFail("Expected a failure") }
+        XCTAssertEqual(problem, DashboardProblem(BotFailure.rejected(401)))
+
+        // The home, and the Dashboard pushed on it, give way to the server's sign-in form.
+        XCTAssertEqual(world.manager.state, .loggedOut(server: hermes))
+        XCTAssertFalse(offersDashboard(world))
+        XCTAssertEqual(HermesHostFixture.count("/auth/password-login"), 1, "The refused password is never sent again")
+        XCTAssertEqual(HermesHostFixture.count("/api/dashboard/plugins/hub"), 0)
+        XCTAssertEqual(try BotConnectionStore(keychain: world.keychain).load(server: webui), sideRecord,
+                       "The webui server's record is untouched")
+    }
+
     // MARK: - Helpers
 
     /// The webui server signed in and active with its Bot connection saved, on scripted
@@ -402,20 +554,21 @@ import XCTest
     /// `addsHermesServer`, the Hermes server is configured too, and the webui server active.
     private func makeWorld(addsHermesServer: Bool = true) async throws -> World {
         let keychain = InMemoryKeychainStore()
-        let gate = LoginGate()
+        let gate = HostGate()
         let connections = HermesConnections(configuration: {
             HermesHostFixture.configuration { request in
                 switch request.url?.path {
                 case "/auth/password-login" where gate.refuses:
                     return .json(401, .object(["error": .string("invalid_credentials")]))
-                case "/api/dashboard/plugins/hub": return .json(200, .object(["plugins": .array([])]))
+                case "/api/dashboard/plugins/hub":
+                    return .json(200, .object(["plugins": .array(gate.plugin.map { [BotJSON.object(["name": .string($0)])] } ?? [])]))
                 default: return nil
                 }
             }
         })
-        let webui = self.webui
-        // Production builds on `HermesConnections.shared`; here on the registry the manager retires.
-        let dashboards = DashboardModelStore(makeClient: { DashboardClient(http: connections.connection(for: $0, server: webui)) })
+        // Production builds on `HermesConnections.shared`; here on the registry the manager retires,
+        // for whichever server the Dashboard opens on.
+        let dashboards = DashboardModelStore(makeServerClient: { DashboardClient(http: connections.connection(for: $0, server: $1)) })
         let preferences = UserDefaults.ephemeral()
         preferences.set(true, forKey: BotModeGate.isEnabledKey)
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("DashboardLifecycle-\(UUID().uuidString)")
@@ -452,6 +605,24 @@ import XCTest
         let bundle = world.dashboards.bundle(server: webui, connection: record ?? sideRecord)
         _ = try await bundle.client.pluginsHub()
         return bundle
+    }
+
+    /// Opens the Hermes server's Dashboard as `DashboardView` does, on the record saved under
+    /// that server's URL, and loads its plugins.
+    private func visitHermes(_ world: World) async throws -> DashboardModelStore.Bundle {
+        let record = try XCTUnwrap(BotConnectionStore(keychain: world.keychain).load(server: hermes))
+        let bundle = world.dashboards.bundle(server: hermes, connection: record)
+        _ = try await bundle.client.pluginsHub()
+        return bundle
+    }
+
+    /// What `HermesServerHome` asks before it gives its inbox the Dashboard button.
+    private func offersDashboard(_ world: World) -> Bool {
+        BotsInboxDashboardEntry.isOffered(kind: world.manager.kind(of: hermes), state: world.manager.state, server: hermes)
+    }
+
+    private func account(_ kind: ServerKind, in world: World) throws -> ServerAccount {
+        try XCTUnwrap(world.manager.servers.first { $0.kind == kind })
     }
 
     private func assertStale(_ bundle: DashboardModelStore.Bundle, _ label: String) async {

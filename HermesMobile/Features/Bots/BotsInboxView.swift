@@ -15,6 +15,8 @@ struct BotsInboxHome {
     let server: URL
     private let home: BotsInboxHome?
     private let homeControl: HomeControl
+    /// Fork: set only by a Hermes server's home (`BotsInboxDashboardEntry`).
+    private var openDashboard: (() -> Void)?
     /// The bot a deep link named, resolved here because this is where the live roster
     /// is. Cleared once this inbox has settled, whether or not it matched (#554).
     @Binding private var pendingDestination: BotDestination?
@@ -62,10 +64,12 @@ struct BotsInboxHome {
         server: URL,
         pendingDestination: Binding<BotDestination?>,
         home: BotsInboxHome?,
+        openDashboard: (() -> Void)? = nil,
         @ViewBuilder homeControl: () -> HomeControl
     ) {
         self.server = server
         self.home = home
+        self.openDashboard = openDashboard
         self.homeControl = homeControl()
         _pendingDestination = pendingDestination
         _inbox = State(initialValue: BotInbox(server: server))
@@ -183,6 +187,11 @@ struct BotsInboxHome {
         }
         .modifier(BotsInboxTitle(home: home))
         .toolbar {
+            if BotsInboxDashboardEntry.isVisible(isOffered: openDashboard != nil, hasConnection: inbox.connection != nil) {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button { openDashboard?() } label: { Label("Dashboard", image: "LucideUserRoundCog") }.help("Dashboard")
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button("Search bots and messages", systemImage: "magnifyingglass") { showingSearch = true }
                     .disabled(inbox.connection == nil)
