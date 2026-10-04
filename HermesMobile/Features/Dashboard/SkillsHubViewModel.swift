@@ -267,18 +267,21 @@ import Observation
         }
     }
 
-    /// Asks for Face ID or the passcode first: this permanently removes the skill from the host.
-    func uninstall(_ name: String) async {
-        guard !isWorking, !name.isEmpty else { return }
+    /// Asks for Face ID or the passcode first: this deletes the skill's folder on the host.
+    /// True only once the host's action exited 0 and a fresh installed list no longer shows
+    /// it as a hub skill, so a page about that skill can close.
+    @discardableResult
+    func uninstall(_ name: String) async -> Bool {
+        guard !isWorking, !name.isEmpty else { return false }
         authenticationProblem = nil
         switch await authenticate(String(localized: "Confirm removing “\(name)” from your Hermes host.")) {
         case .confirmed: break
-        case .cancelled: return
+        case .cancelled: return false
         case .unavailable(let message):
             authenticationProblem = message
-            return
+            return false
         }
-        await run(.uninstall(name: name), spawn: { try await $0.uninstallHubSkill(name, profile: self.profile) }) {
+        return await run(.uninstall(name: name), spawn: { try await $0.uninstallHubSkill(name, profile: self.profile) }) {
             let skills = try await self.refreshInstalled()
             return !skills.contains { $0.isFromHub && $0.name == name }
         }
@@ -299,9 +302,11 @@ import Observation
         operation = nil
     }
 
+    /// True only when the action finished as a confirmed success.
+    @discardableResult
     private func run(_ operation: Operation, spawn: (DashboardClient) async throws -> String,
-                     confirm: () async throws -> Bool) async {
-        guard !isWorking else { return }
+                     confirm: () async throws -> Bool) async -> Bool {
+        guard !isWorking else { return false }
         self.operation = OperationState(operation: operation, phase: .running)
         var started = false
         do {
@@ -317,9 +322,9 @@ import Observation
                 return finish(.failed(String(localized: "Hermes reported a failure (exit code \(exitCode)).")))
             }
             guard try await confirm() else { return finish(.failed(Self.unconfirmedMessage(operation))) }
-            finish(.succeeded(Self.successMessage(operation)))
+            return finish(.succeeded(Self.successMessage(operation)))
         } catch {
-            finish(.failed(started
+            return finish(.failed(started
                 ? String(localized: "Lost contact with your Hermes host while it was working. It may still finish; refresh to check.")
                 : DashboardProblem(error).message))
         }
@@ -336,8 +341,11 @@ import Observation
         return nil
     }
 
-    private func finish(_ phase: OperationPhase) {
+    /// Whether `phase` is a success, which `run` returns.
+    private func finish(_ phase: OperationPhase) -> Bool {
         operation?.phase = phase
+        if case .succeeded = phase { return true }
+        return false
     }
 
     private static func successMessage(_ operation: Operation) -> String {

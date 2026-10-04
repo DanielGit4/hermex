@@ -26,7 +26,7 @@ struct SkillsHubDetailView: View {
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This permanently removes the skill from the Hermes host.")
+                Text("Deletes the skill’s folder from the “\(model.profile)” profile on your Hermes host, including any edits made there. New sessions won’t load it. You can install it again from the Skills Hub.")
             }
             .alert("Couldn’t Confirm It’s You", isPresented: authenticationProblemIsPresented) {
                 Button("OK", role: .cancel) {}
@@ -119,7 +119,7 @@ struct SkillsHubDetailView: View {
         case .loaded:
             if let scan = review.scan { SkillsHubScanSection(scan: scan) }
         case .failed(let problem):
-            SkillsHubProblemView(title: String(localized: "Could Not Load Skill"), problem: problem) {
+            SkillsHubProblemView(title: String(localized: "Could Not Load the Security Scan"), problem: problem) {
                 Task { await model.retryScan(skill.identifier) }
             }
         case .idle, .loading:
@@ -164,7 +164,7 @@ struct SkillsHubDetailView: View {
                     }
                 }
             } else if case .failed(let problem) = review.previewState {
-                SkillsHubProblemView(title: String(localized: "Could Not Load Skill"), problem: problem) {
+                SkillsHubProblemView(title: String(localized: "Could Not Load the Preview"), problem: problem) {
                     Task { await model.retryPreview(skill.identifier) }
                 }
             } else {
@@ -220,13 +220,17 @@ struct SkillsHubDetailView: View {
 }
 
 /// A locally installed skill's host-owned metadata and SKILL.md. Hub skills retain the
-/// same Face ID-gated uninstall path as the list; bundled and agent-created skills are read-only.
+/// same Face ID-gated uninstall path as the list, and the page closes once the host confirms
+/// the removal; bundled and agent-created skills are read-only.
 struct InstalledSkillDetailView: View {
     let model: SkillsHubViewModel
     let skill: DashboardSkill
     let lock: HubLockEntry?
 
+    @Environment(\.dismiss) private var dismiss
     @State private var isConfirmingUninstall = false
+    /// An uninstall can poll for minutes; only a page still on screen closes when it lands.
+    @State private var isOnScreen = false
 
     private var installedContent: DashboardSkillContent? { model.installedSkillContents[skill.name] }
     private var contentState: SkillsHubViewModel.LoadState {
@@ -252,16 +256,20 @@ struct InstalledSkillDetailView: View {
         .navigationTitle(skill.name)
         .navigationBarTitleDisplayMode(.inline)
         .task { await model.loadInstalledSkillContent(skill.name) }
+        .onAppear { isOnScreen = true }
+        .onDisappear { isOnScreen = false }
         .safeAreaInset(edge: .bottom) { SkillsHubOperationBanner(model: model) }
         .confirmationDialog(
             String(localized: "Uninstall “\(skill.name)”?"),
             isPresented: $isConfirmingUninstall,
             titleVisibility: .visible
         ) {
-            Button("Uninstall", role: .destructive) { Task { await model.uninstall(skill.name) } }
+            Button("Uninstall", role: .destructive) {
+                Task { if await model.uninstall(skill.name), isOnScreen { dismiss() } }
+            }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This permanently removes the skill from the Hermes host.")
+            Text("Deletes the skill’s folder from the “\(model.profile)” profile on your Hermes host, including any edits made there. New sessions won’t load it. You can install it again from the Skills Hub.")
         }
         .alert("Couldn’t Confirm It’s You", isPresented: authenticationProblemIsPresented) {
             Button("OK", role: .cancel) {}
