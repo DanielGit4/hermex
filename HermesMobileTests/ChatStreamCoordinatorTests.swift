@@ -404,10 +404,220 @@ final class ChatStreamCoordinatorTests: APIClientTestCase {
         XCTAssertEqual(delegate.confirmedRecoveryCount, 0)
         XCTAssertTrue(coordinator.isConnectionSuspended)
         XCTAssertEqual(streamClient.startedURLs.count, 1)
+        // The screen stops claiming a live run once the retries are spent.
+        XCTAssertEqual(coordinator.recoveryState, .disconnected)
 
         let statusRequestCountAfterBudget = statusRequestCount.value
         await coordinator.reconnectIfNeeded()
         XCTAssertGreaterThan(statusRequestCount.value, statusRequestCountAfterBudget)
+        XCTAssertEqual(coordinator.recoveryState, .disconnected)
+    }
+
+    @MainActor
+    func testReconnectAfterGiveUpProbesOnceAndReplaysFromTheSavedCursor() async throws {
+        let statusRequestCount = CoordinatorLockedCounter()
+        let isServerReachable = CoordinatorLockedBox(false)
+        let statesDuringRetry = CoordinatorLockedBox<[ActiveStreamRecoveryState]>([])
+        let streamClient = CoordinatorSpySSEStreamingClient()
+        let delegate = CoordinatorDelegateSpy()
+        let coordinator = makeCoordinator(streamClient: streamClient, delegate: delegate) { request in
+            XCTAssertEqual(request.url?.path, "/api/chat/stream/status")
+            _ = statusRequestCount.increment()
+            guard isServerReachable.value else { throw URLError(.notConnectedToInternet) }
+            return apiTestJSONResponse(
+                #"{"active": true, "stream_id": "stream-123", "replay_available": true}"#,
+                for: request
+            )
+        }
+
+        coordinator.start(streamID: "stream-123")
+        streamClient.emit(.token("Partial answer."), lastEventID: "stream-123:7")
+        coordinator.suspendActiveStreamConnection()
+        await coordinator.reconnectIfNeeded()
+        XCTAssertEqual(coordinator.recoveryState, .disconnected)
+        let statusRequestsBeforeRetry = statusRequestCount.value
+
+        // What the transcript's Reconnect button calls.
+        isServerReachable.mutate { $0 = true }
+        delegate.onLoadMessages = {
+            statesDuringRetry.mutate { $0.append(coordinator.recoveryState) }
+        }
+        await coordinator.reconnectIfNeeded()
+
+        XCTAssertEqual(statusRequestCount.value - statusRequestsBeforeRetry, 1)
+        XCTAssertEqual(statesDuringRetry.value, [.reconnecting], "The retry shows progress while it runs")
+        XCTAssertEqual(streamClient.startedURLs.count, 2)
+        let resumedURL = try XCTUnwrap(streamClient.startedURLs.last)
+        let queryItems = URLComponents(url: resumedURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(queryItems.first(where: { $0.name == "stream_id" })?.value, "stream-123")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "replay" })?.value, "1")
+        XCTAssertEqual(queryItems.first(where: { $0.name == "after_seq" })?.value, "7")
+        XCTAssertEqual(coordinator.recoveryState, .idle)
+        XCTAssertFalse(coordinator.isConnectionSuspended)
+    }
+
+    @MainActor
+    func testNetworkPathChangeRetriesOnceAndOnlyAfterTheReconnectGaveUp() async throws {
+        let statusRequestCount = CoordinatorLockedCounter()
+        let isServerReachable = CoordinatorLockedBox(false)
+        let retryStatusStarted = expectation(description: "retry status request started")
+        let releaseRetryStatus = DispatchSemaphore(value: 0)
+        let streamClient = CoordinatorSpySSEStreamingClient()
+        let delegate = CoordinatorDelegateSpy()
+        let coordinator = makeCoordinator(streamClient: streamClient, delegate: delegate) { request in
+            XCTAssertEqual(request.url?.path, "/api/chat/stream/status")
+            _ = statusRequestCount.increment()
+            guard isServerReachable.value else { throw URLError(.networkConnectionLost) }
+            retryStatusStarted.fulfill()
+            _ = releaseRetryStatus.wait(timeout: .now() + 2)
+            return apiTestJSONResponse(
+                #"{"active": true, "stream_id": "stream-123", "replay_available": true}"#,
+                for: request
+            )
+        }
+
+        // A live stream, and a suspended one still owned by the return path,
+        // ignore path changes.
+        coordinator.start(streamID: "stream-123")
+        streamClient.emit(.token("Partial answer."), lastEventID: "stream-123:7")
+        await coordinator.reconnectAfterNetworkPathChange()
+        coordinator.suspendActiveStreamConnection()
+        await coordinator.reconnectAfterNetworkPathChange()
+        XCTAssertEqual(statusRequestCount.value, 0)
+
+        await coordinator.reconnectIfNeeded()
+        XCTAssertEqual(coordinator.recoveryState, .disconnected)
+        let statusRequestsBeforeRetry = statusRequestCount.value
+
+        isServerReachable.mutate { $0 = true }
+        let firstPathChange = Task { @MainActor in
+            await coordinator.reconnectAfterNetworkPathChange()
+        }
+        await fulfillment(of: [retryStatusStarted], timeout: 2)
+        XCTAssertEqual(coordinator.recoveryState, .reconnecting)
+
+        // A second path change while the retry runs does not start another.
+        await coordinator.reconnectAfterNetworkPathChange()
+        releaseRetryStatus.signal()
+        await firstPathChange.value
+
+        XCTAssertEqual(statusRequestCount.value - statusRequestsBeforeRetry, 1)
+        XCTAssertEqual(streamClient.startedURLs.count, 2)
+        let resumedURL = try XCTUnwrap(streamClient.startedURLs.last)
+        let queryItems = URLComponents(url: resumedURL, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertEqual(queryItems.first(where: { $0.name == "after_seq" })?.value, "7")
+        XCTAssertEqual(coordinator.recoveryState, .idle)
+
+        // Back on a live stream, a later path change does nothing.
+        await coordinator.reconnectAfterNetworkPathChange()
+        XCTAssertEqual(statusRequestCount.value - statusRequestsBeforeRetry, 1)
+    }
+
+    @MainActor
+    func testDisconnectedLastsOnlyWhileTheStreamStaysSuspended() async throws {
+        let statusRequestCount = CoordinatorLockedCounter()
+        let streamClient = CoordinatorSpySSEStreamingClient()
+        let delegate = CoordinatorDelegateSpy()
+        let coordinator = makeCoordinator(streamClient: streamClient, delegate: delegate) { request in
+            if request.url?.path == "/api/chat/cancel" {
+                return apiTestJSONResponse(#"{"ok": true}"#, for: request)
+            }
+            XCTAssertEqual(request.url?.path, "/api/chat/stream/status")
+            _ = statusRequestCount.increment()
+            return apiTestJSONResponse(#"{"error":"nope"}"#, for: request, status: 401)
+        }
+
+        // The 1 s stale-stream check must not erase the state, nor probe.
+        await disconnect(coordinator, streamID: "stream-stale")
+        let statusRequestsWhileDisconnected = statusRequestCount.value
+        await coordinator.recoverStaleStreamIfNeeded(now: Date().addingTimeInterval(120))
+        XCTAssertEqual(coordinator.recoveryState, .disconnected)
+        XCTAssertEqual(statusRequestCount.value, statusRequestsWhileDisconnected)
+
+        await disconnect(coordinator, streamID: "stream-end")
+        streamClient.emit(.streamEnd)
+        XCTAssertEqual(coordinator.recoveryState, .idle)
+        XCTAssertFalse(coordinator.isConnectionSuspended)
+
+        await disconnect(coordinator, streamID: "stream-replaced")
+        coordinator.start(streamID: "stream-next")
+        XCTAssertEqual(coordinator.recoveryState, .idle)
+
+        await disconnect(coordinator, streamID: "stream-cancel")
+        _ = try await coordinator.cancelActiveStream()
+        XCTAssertNil(coordinator.activeStreamID)
+        XCTAssertEqual(coordinator.recoveryState, .idle)
+    }
+
+    @MainActor
+    func testRetrySupersededByAnotherSuspendedStreamFallsBackToDisconnected() async {
+        let statusRequestCount = CoordinatorLockedCounter()
+        let isServerReachable = CoordinatorLockedBox(false)
+        let streamClient = CoordinatorSpySSEStreamingClient()
+        let delegate = CoordinatorDelegateSpy()
+        let coordinator = makeCoordinator(streamClient: streamClient, delegate: delegate) { request in
+            XCTAssertEqual(request.url?.path, "/api/chat/stream/status")
+            _ = statusRequestCount.increment()
+            guard isServerReachable.value else { throw URLError(.timedOut) }
+            return apiTestJSONResponse(#"{"active": true, "stream_id": "stream-123"}"#, for: request)
+        }
+
+        await disconnect(coordinator, streamID: "stream-123")
+        isServerReachable.mutate { $0 = true }
+        // The retry's transcript load finds the session running another stream.
+        delegate.onLoadMessages = {
+            coordinator.reconcileSessionLoad(
+                loadedActiveStreamID: "stream-other",
+                preparation: coordinator.prepareForSessionLoad(),
+                usedCacheFallback: false
+            )
+        }
+        await coordinator.reconnectIfNeeded()
+
+        XCTAssertEqual(coordinator.activeStreamID, "stream-other")
+        XCTAssertTrue(coordinator.isConnectionSuspended)
+        XCTAssertEqual(coordinator.recoveryState, .disconnected, "Nothing is reconnecting the adopted stream")
+        XCTAssertEqual(streamClient.startedURLs.count, 1)
+    }
+
+    @MainActor
+    func testNetworkPathObserverFiresOnceForEachUsablePathAfterTheFirst() {
+        let observer = ChatNetworkPathObserver(monitorsNetworkPath: false)
+        let fired = CoordinatorLockedCounter()
+        let ignored = CoordinatorLockedCounter()
+        observer.start { _ = fired.increment() }
+        observer.start { _ = ignored.increment() }
+
+        observer.pathDidUpdate(isSatisfied: true)
+        XCTAssertEqual(fired.value, 0, "The path the screen started on is the baseline")
+
+        observer.pathDidUpdate(isSatisfied: false)
+        observer.pathDidUpdate(isSatisfied: false)
+        XCTAssertEqual(fired.value, 0, "Losing the network never retries")
+
+        observer.pathDidUpdate(isSatisfied: true)
+        XCTAssertEqual(fired.value, 1, "The network coming back retries once")
+
+        observer.pathDidUpdate(isSatisfied: true)
+        XCTAssertEqual(fired.value, 2, "A VPN coming up changes a path that stays satisfied")
+        XCTAssertEqual(ignored.value, 0, "Starting a started observer is a no-op")
+
+        observer.stop()
+        observer.pathDidUpdate(isSatisfied: true)
+        observer.pathDidUpdate(isSatisfied: true)
+        XCTAssertEqual(fired.value, 2, "Nothing fires once the screen stopped watching")
+    }
+
+    @MainActor
+    func testNetworkPathObserverTakesAnUnusableFirstPathAsTheBaseline() {
+        let observer = ChatNetworkPathObserver(monitorsNetworkPath: false)
+        let fired = CoordinatorLockedCounter()
+        observer.start { _ = fired.increment() }
+
+        observer.pathDidUpdate(isSatisfied: false)
+        XCTAssertEqual(fired.value, 0)
+        observer.pathDidUpdate(isSatisfied: true)
+        XCTAssertEqual(fired.value, 1)
     }
 
     @MainActor
@@ -452,6 +662,7 @@ final class ChatStreamCoordinatorTests: APIClientTestCase {
             XCTAssertEqual(delegate.confirmedRecoveryCount, 0, name)
             XCTAssertTrue(coordinator.isConnectionSuspended, name)
             XCTAssertEqual(streamClient.startedURLs.count, 1, name)
+            XCTAssertEqual(coordinator.recoveryState, .disconnected, name)
         }
     }
 
@@ -2461,6 +2672,16 @@ final class ChatStreamCoordinatorTests: APIClientTestCase {
         )
         coordinator.attach(delegate: delegate)
         return coordinator
+    }
+
+    /// Starts `streamID`, drops its connection, and lets the reconnect give up
+    /// (the caller's handler must fail the status probe).
+    @MainActor
+    private func disconnect(_ coordinator: ChatStreamCoordinator, streamID: String) async {
+        coordinator.start(streamID: streamID)
+        coordinator.suspendActiveStreamConnection()
+        await coordinator.reconnectIfNeeded()
+        XCTAssertEqual(coordinator.recoveryState, .disconnected, streamID)
     }
 
     private func waitUntil(

@@ -309,14 +309,16 @@ final class ChatTranscriptDisplaySettingsTests: XCTestCase {
             ChatWorkingRowPolicy.startedAt(
                 activeRunStartedAt: startedAt,
                 isCancellingStream: false,
-                hasPendingClarificationPrompt: false
+                hasPendingClarificationPrompt: false,
+                isConnectionLost: false
             ),
             startedAt
         )
         XCTAssertNil(ChatWorkingRowPolicy.startedAt(
             activeRunStartedAt: nil,
             isCancellingStream: false,
-            hasPendingClarificationPrompt: false
+            hasPendingClarificationPrompt: false,
+            isConnectionLost: false
         ))
     }
 
@@ -326,13 +328,39 @@ final class ChatTranscriptDisplaySettingsTests: XCTestCase {
         XCTAssertNil(ChatWorkingRowPolicy.startedAt(
             activeRunStartedAt: startedAt,
             isCancellingStream: true,
-            hasPendingClarificationPrompt: false
+            hasPendingClarificationPrompt: false,
+            isConnectionLost: false
         ))
         XCTAssertNil(ChatWorkingRowPolicy.startedAt(
             activeRunStartedAt: startedAt,
             isCancellingStream: false,
-            hasPendingClarificationPrompt: true
+            hasPendingClarificationPrompt: true,
+            isConnectionLost: false
         ))
+    }
+
+    func testWorkingRowPausesWhileTheConnectionIsLost() {
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+
+        let runningSince = ChatWorkingRowPolicy.startedAt(
+            activeRunStartedAt: startedAt,
+            isCancellingStream: false,
+            hasPendingClarificationPrompt: false,
+            isConnectionLost: true
+        )
+        XCTAssertNil(runningSince)
+        XCTAssertNil(ChatWorkingRowPolicy.phase(runningSince: runningSince, settledRun: nil))
+
+        // Reconnected, the row counts from the run's real start again.
+        XCTAssertEqual(
+            ChatWorkingRowPolicy.startedAt(
+                activeRunStartedAt: startedAt,
+                isCancellingStream: false,
+                hasPendingClarificationPrompt: false,
+                isConnectionLost: false
+            ),
+            startedAt
+        )
     }
 
     func testWorkingRowPhaseRunsBeforeItSettlesAndHidesWithNeither() {
@@ -636,6 +664,60 @@ final class ChatActiveRunStatusPolicyTests: XCTestCase {
             isCancellingStream: false,
             isScrolledNearBottom: false
         ))
+    }
+
+    func testDisconnectedSaysNotConnectedAndNeverHermesIsWorking() {
+        for hasActiveStream in [true, false] {
+            let presentation = ChatActiveRunStatusPolicy.presentation(
+                isStartingChat: false,
+                hasActiveStream: hasActiveStream,
+                activeStreamRecoveryState: .disconnected,
+                isCancellingStream: false,
+                isScrolledNearBottom: false
+            )
+
+            XCTAssertEqual(presentation?.kind, .disconnected, "hasActiveStream \(hasActiveStream)")
+            XCTAssertNotEqual(presentation?.kind, .active, "hasActiveStream \(hasActiveStream)")
+            XCTAssertEqual(presentation?.label, "Not connected — Hermes may still be working")
+            XCTAssertEqual(presentation?.accessibilityLabel, "Not connected — Hermes may still be working")
+        }
+    }
+
+    func testDisconnectedPillHidesNearBottomAndYieldsToStoppingAndStarting() {
+        // Near the bottom the transcript row says the same and holds Reconnect.
+        XCTAssertNil(ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .disconnected,
+            isCancellingStream: false,
+            isScrolledNearBottom: true
+        ))
+        XCTAssertEqual(ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: false,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .disconnected,
+            isCancellingStream: true,
+            isScrolledNearBottom: false
+        )?.kind, .stopping)
+        XCTAssertEqual(ChatActiveRunStatusPolicy.presentation(
+            isStartingChat: true,
+            hasActiveStream: true,
+            activeStreamRecoveryState: .disconnected,
+            isCancellingStream: false,
+            isScrolledNearBottom: false
+        )?.kind, .starting)
+    }
+
+    func testVoiceOverAnnouncesOnlyEnteringDisconnected() {
+        let notConnected = "Not connected — Hermes may still be working"
+
+        XCTAssertEqual(ChatActiveRunStatusPolicy.announcement(from: .idle, to: .disconnected), notConnected)
+        XCTAssertEqual(ChatActiveRunStatusPolicy.announcement(from: .reconnecting, to: .disconnected), notConnected)
+        XCTAssertNil(ChatActiveRunStatusPolicy.announcement(from: .disconnected, to: .disconnected))
+        XCTAssertNil(ChatActiveRunStatusPolicy.announcement(from: .disconnected, to: .reconnecting))
+        XCTAssertNil(ChatActiveRunStatusPolicy.announcement(from: .disconnected, to: .idle))
+        XCTAssertNil(ChatActiveRunStatusPolicy.announcement(from: .idle, to: .checking))
+        XCTAssertNil(ChatActiveRunStatusPolicy.announcement(from: .checking, to: .reconnecting))
     }
 }
 

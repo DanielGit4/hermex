@@ -394,6 +394,7 @@ struct ChatView: View {
     @State private var responseCompletionBackgroundTask: UIBackgroundTaskIdentifier = .invalid
     @State private var activeStreamStatusRefreshTask: Task<Void, Never>?
     @State private var appearanceTask: Task<Void, Never>?
+    @State private var networkPathObserver = ChatNetworkPathObserver()
     @State private var initialAttachments: [SharedAttachmentImport]
     @State private var didUploadInitialAttachments = false
 
@@ -832,6 +833,7 @@ struct ChatView: View {
                 appearanceTask = nil
                 activeStreamStatusRefreshTask?.cancel()
                 activeStreamStatusRefreshTask = nil
+                networkPathObserver.stop()
                 viewModel.stopListening()
                 viewModel.suspendStreamForNavigation()
                 viewModel.cleanupPollingTasks()
@@ -844,6 +846,9 @@ struct ChatView: View {
                     UIApplication.shared.applicationState == .active
                         && scrollFollow.isNearBottom
                         && scrollFollow.latch.isFollowing
+                }
+                networkPathObserver.start {
+                    Task { await viewModel.reconnectStreamAfterNetworkPathChange(modelContext: modelContext) }
                 }
                 appearanceTask?.cancel()
                 appearanceTask = Task {
@@ -1505,6 +1510,9 @@ struct ChatView: View {
             onLoadOlderMessages: {
                 await loadOlderMessages()
             },
+            onReconnectStream: {
+                await reconnectStreamFromUser()
+            },
             onUpdateScrollMetrics: updateScrollMetrics,
             onFollowEvent: handleFollowEvent,
             onDisclosureToggle: handleDisclosureToggle,
@@ -1559,6 +1567,11 @@ struct ChatView: View {
         // Off the main body chain, which is at the type-checker's limit.
         .onChange(of: viewModel.latestRunOutcome) {
             handleLatestRunOutcomeChange(viewModel.latestRunOutcome)
+        }
+        .onChange(of: viewModel.activeStreamRecoveryState) { previous, next in
+            if let announcement = ChatActiveRunStatusPolicy.announcement(from: previous, to: next) {
+                AccessibilityNotification.Announcement(announcement).post()
+            }
         }
         .environment(\.composerChipCatalog, viewModel.composerChipCatalog)
         .transcriptLinks(perform: handleTranscriptLink)
@@ -1642,7 +1655,8 @@ struct ChatView: View {
             runningSince: ChatWorkingRowPolicy.startedAt(
                 activeRunStartedAt: viewModel.activeRunStartedAt,
                 isCancellingStream: viewModel.isCancellingStream,
-                hasPendingClarificationPrompt: viewModel.clarificationPrompt != nil
+                hasPendingClarificationPrompt: viewModel.clarificationPrompt != nil,
+                isConnectionLost: viewModel.activeStreamRecoveryState == .disconnected
             ),
             settledRun: viewModel.settledWorkingRun
         )
@@ -2753,6 +2767,15 @@ struct ChatView: View {
             break
         @unknown default:
             break
+        }
+    }
+
+    /// The transcript's Reconnect: one reconnect attempt, surfacing its error
+    /// the same way the foreground path does.
+    private func reconnectStreamFromUser() async {
+        await viewModel.reconnectStreamIfNeeded(modelContext: modelContext)
+        if let lastError = viewModel.lastError {
+            onAPIError(lastError)
         }
     }
 

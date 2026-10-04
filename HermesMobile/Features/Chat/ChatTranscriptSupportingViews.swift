@@ -1052,30 +1052,101 @@ struct BottomComposerMaterialFade: View {
     }
 }
 
+/// The transcript's live-stream recovery row. While `.disconnected` it offers
+/// Reconnect, which runs `onReconnect` once per tap until it finishes.
+/// `hidesStatusAccessibility` hides only the state text (the run-status pill
+/// already says it); Reconnect stays reachable.
 struct StreamRecoveryStatusView: View {
     let state: ActiveStreamRecoveryState
+    var hidesStatusAccessibility = false
+    let onReconnect: () async -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @State private var isReconnecting = false
 
     var body: some View {
+        // At accessibility sizes Reconnect moves below the text instead of squeezing it.
+        let isStacked = dynamicTypeSize.isAccessibilitySize
+        let layout = isStacked
+            ? AnyLayout(VStackLayout(alignment: .leading, spacing: 8))
+            : AnyLayout(HStackLayout(spacing: 10))
+        let shape = state == .disconnected || isStacked
+            ? AnyShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            : AnyShape(Capsule(style: .continuous))
+
+        layout {
+            status
+
+            if state == .disconnected {
+                reconnectButton
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(.regularMaterial, in: shape)
+        .overlay(
+            shape.stroke(Color(.separator).opacity(0.35), lineWidth: 0.5)
+        )
+    }
+
+    private var status: some View {
         HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.mini)
-                .accessibilityHidden(true)
+            indicator
 
             Text(label)
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .lineLimit(dynamicTypeSize.isAccessibilitySize ? nil : (state == .disconnected ? 2 : 1))
                 .minimumScaleFactor(0.88)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 6)
-        .background(.regularMaterial, in: Capsule(style: .continuous))
-        .overlay(
-            Capsule(style: .continuous)
-                .stroke(Color(.separator).opacity(0.35), lineWidth: 0.5)
-        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
+        .accessibilityHidden(hidesStatusAccessibility)
+    }
+
+    @ViewBuilder
+    private var indicator: some View {
+        if state == .disconnected {
+            StreamDisconnectedIcon()
+        } else if reduceMotion {
+            Circle()
+                .fill(.secondary)
+                .frame(width: 7, height: 7)
+                .accessibilityHidden(true)
+        } else {
+            ProgressView()
+                .controlSize(.mini)
+                .accessibilityHidden(true)
+        }
+    }
+
+    private var reconnectButton: some View {
+        Button {
+            guard !isReconnecting else { return }
+            isReconnecting = true
+            // Unstructured: the reconnect replaces this row, and the attempt it
+            // started must still finish.
+            Task {
+                await onReconnect()
+                isReconnecting = false
+            }
+        } label: {
+            Text("Reconnect")
+                .opacity(isReconnecting && !reduceMotion ? 0 : 1)
+                .overlay {
+                    if isReconnecting && !reduceMotion {
+                        ProgressView()
+                            .controlSize(.small)
+                    }
+                }
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .disabled(isReconnecting)
+        .accessibilityLabel(Text("Reconnect"))
+        .accessibilityIdentifier("chat.streamRecovery.reconnect")
     }
 
     private var label: String {
@@ -1086,7 +1157,20 @@ struct StreamRecoveryStatusView: View {
             return String(localized: "Checking stream")
         case .reconnecting:
             return String(localized: "Reconnecting stream")
+        case .disconnected:
+            return ChatActiveRunStatusKind.disconnected.label
         }
+    }
+}
+
+/// The static "not connected" glyph of the run-status pill and the recovery
+/// row: nothing is running while disconnected, so it never spins.
+struct StreamDisconnectedIcon: View {
+    var body: some View {
+        Image(systemName: "wifi.exclamationmark")
+            .imageScale(.small)
+            .foregroundStyle(.orange)
+            .accessibilityHidden(true)
     }
 }
 

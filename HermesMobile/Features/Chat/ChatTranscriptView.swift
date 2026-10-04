@@ -69,6 +69,8 @@ struct ChatTranscriptView: View {
     let shouldRenderMessageRow: (ChatMessage) -> Bool
     let onLoadMessages: () async -> Void
     let onLoadOlderMessages: () async -> Bool
+    /// The recovery row's Reconnect, shown once the stream's reconnect gave up.
+    let onReconnectStream: () async -> Void
     let onUpdateScrollMetrics: (ChatScrollMetrics) -> Void
     let onFollowEvent: (ChatScrollPolicy.FollowEvent) -> Void
     let onDisclosureToggle: () -> Void
@@ -467,10 +469,13 @@ struct ChatTranscriptView: View {
             }
 
             if activeStreamRecoveryState != .idle {
-                StreamRecoveryStatusView(state: activeStreamRecoveryState)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityHidden(hidesRunStatusAccessibility)
-                    .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
+                StreamRecoveryStatusView(
+                    state: activeStreamRecoveryState,
+                    hidesStatusAccessibility: hidesRunStatusAccessibility,
+                    onReconnect: onReconnectStream
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .transition(ChatMotion.bottomOverlayTransition(reduceMotion: reduceMotion))
             }
         }
     }

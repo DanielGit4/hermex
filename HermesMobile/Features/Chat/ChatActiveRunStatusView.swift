@@ -29,7 +29,9 @@ struct ChatActiveRunStatusView: View {
 
     @ViewBuilder
     private var progressIndicator: some View {
-        if reduceMotion {
+        if presentation.kind == .disconnected {
+            StreamDisconnectedIcon()
+        } else if reduceMotion {
             Circle()
                 .fill(.secondary)
                 .frame(width: 7, height: 7)
@@ -50,6 +52,10 @@ struct ChatActiveRunStatusView: View {
 
         ChatActiveRunStatusView(
             presentation: ChatActiveRunStatusPresentation(kind: .reconnecting)
+        )
+
+        ChatActiveRunStatusView(
+            presentation: ChatActiveRunStatusPresentation(kind: .disconnected)
         )
     }
     .padding()

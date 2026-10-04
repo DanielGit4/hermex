@@ -402,6 +402,7 @@ enum ChatActiveRunStatusKind: Equatable {
     case active
     case checking
     case reconnecting
+    case disconnected
     case stopping
 
     var label: String {
@@ -414,6 +415,8 @@ enum ChatActiveRunStatusKind: Equatable {
             return String(localized: "Checking stream")
         case .reconnecting:
             return String(localized: "Reconnecting stream")
+        case .disconnected:
+            return String(localized: "Not connected — Hermes may still be working")
         case .stopping:
             return String(localized: "Stopping response")
         }
@@ -429,6 +432,8 @@ enum ChatActiveRunStatusKind: Equatable {
             return String(localized: "Hermes is checking the response stream")
         case .reconnecting:
             return String(localized: "Hermes is reconnecting the response stream")
+        case .disconnected:
+            return String(localized: "Not connected — Hermes may still be working")
         case .stopping:
             return String(localized: "Hermes is stopping the response")
         }
@@ -470,6 +475,8 @@ enum ChatActiveRunStatusPolicy {
             return ChatActiveRunStatusPresentation(kind: .checking)
         case .reconnecting:
             return ChatActiveRunStatusPresentation(kind: .reconnecting)
+        case .disconnected:
+            return ChatActiveRunStatusPresentation(kind: .disconnected)
         case .idle:
             break
         }
@@ -477,18 +484,34 @@ enum ChatActiveRunStatusPolicy {
         guard hasActiveStream else { return nil }
         return ChatActiveRunStatusPresentation(kind: .active)
     }
+
+    /// What VoiceOver announces when the recovery state changes: only entering
+    /// `.disconnected`, because the screen stops changing on its own after that.
+    static func announcement(
+        from previous: ActiveStreamRecoveryState,
+        to next: ActiveStreamRecoveryState
+    ) -> String? {
+        guard next == .disconnected, previous != .disconnected else { return nil }
+        return ChatActiveRunStatusKind.disconnected.accessibilityLabel
+    }
 }
 
 enum ChatWorkingRowPolicy {
     /// Start date for the transcript's "Working for" tail row, or nil when the
-    /// row stays hidden: no active run, the run is being stopped, or the agent
-    /// is waiting on a clarification answer rather than working.
+    /// row stays hidden: no active run, the run is being stopped, the agent is
+    /// waiting on a clarification answer rather than working, or the live
+    /// connection was lost and the app cannot tell whether it is still working.
     static func startedAt(
         activeRunStartedAt: Date?,
         isCancellingStream: Bool,
-        hasPendingClarificationPrompt: Bool
+        hasPendingClarificationPrompt: Bool,
+        isConnectionLost: Bool
     ) -> Date? {
-        guard let activeRunStartedAt, !isCancellingStream, !hasPendingClarificationPrompt else {
+        guard let activeRunStartedAt,
+              !isCancellingStream,
+              !hasPendingClarificationPrompt,
+              !isConnectionLost
+        else {
             return nil
         }
         return activeRunStartedAt
