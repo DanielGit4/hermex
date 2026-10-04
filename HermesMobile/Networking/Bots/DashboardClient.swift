@@ -44,8 +44,8 @@ import Foundation
         try await send("GET", Self.url(url, query: query), body: nil)
     }
 
-    /// `long` waits up to `longRequestTimeout`; `readsRefusal` turns a 400 that says why
-    /// into `DashboardFailure.refused`.
+    /// `long` waits up to `longRequestTimeout`; `readsRefusal` turns a 400 or 409 that says
+    /// why into `DashboardFailure.refused`.
     func post(_ url: URL, body: BotJSON = .object([:]), long: Bool = false, readsRefusal: Bool = false) async throws -> BotJSON {
         try await send("POST", url, body: body, long: long, readsRefusal: readsRefusal)
     }
@@ -117,9 +117,9 @@ import Foundation
         let (data, response) = try await (long ? longSession : session).data(for: request)
         guard let response = response as? HTTPURLResponse else { throw BotFailure.transport }
         guard (200..<300).contains(response.statusCode) else {
-            // FastAPI's `HTTPException(400, detail)` carries the host's reason; a 422's `detail`
-            // is a validation list, which stays a plain status.
-            if readsRefusal, response.statusCode == 400,
+            // FastAPI's `HTTPException(400 or 409, detail)` carries the host's reason; a 422's
+            // `detail` is a validation list, which stays a plain status.
+            if readsRefusal, [400, 409].contains(response.statusCode),
                let detail = (try? JSONDecoder().decode(BotJSON.self, from: data))?["detail"],
                DashboardFailure.refusalMessage(detail) != nil {
                 throw DashboardFailure.refused(detail)
@@ -147,8 +147,8 @@ import Foundation
 enum DashboardFailure: Error, Equatable {
     /// The host answered 2xx with a body this build cannot use.
     case unreadableResponse
-    /// The host refused the request with a 400 and said why. `detail` is its `detail` as
-    /// sent: the reason's text, or an object from a newer host with the text in `error`.
+    /// The host refused the request with a 400 or 409 and said why. `detail` is its `detail`
+    /// as sent: the reason's text, or an object from a newer host with the text in `error`.
     case refused(BotJSON)
 
     /// The host's own words for a refusal, shown as sent.
@@ -244,6 +244,18 @@ extension DashboardClient {
             throw DashboardFailure.unreadableResponse
         }
         return rows.compactMap(MCPServer.init)
+    }
+
+    /// Adds a server by hand (`MCPServerDraft.body`) and returns the host's summary of it, env
+    /// already redacted. Any answer that isn't that server's summary is unreadable. A 400 or 409
+    /// that says why is `DashboardFailure.refused`.
+    func addMCPServer(_ body: BotJSON, profile: String) async throws -> MCPServer {
+        let url = Self.url(BotEndpoint.mcpServers.url(base: address), query: [Self.profileItem(profile)])
+        guard let server = MCPServer(try await post(url, body: body, readsRefusal: true)),
+              server.name == body["name"].text else {
+            throw DashboardFailure.unreadableResponse
+        }
+        return server
     }
 
     /// Connects to the server on the host and lists its tools. A failed probe is a result,

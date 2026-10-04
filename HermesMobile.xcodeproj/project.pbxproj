@@ -517,6 +517,9 @@
 		DA5C00000000000000000B09 /* MCPDecodingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F09 /* MCPDecodingTests.swift */; };
 		DA5C00000000000000000B0A /* MCPServersViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F0A /* MCPServersViewModelTests.swift */; };
 		DA5C00000000000000000B0B /* MCPCatalogViewModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F0B /* MCPCatalogViewModelTests.swift */; };
+		DA5C00000000000000000B0C /* MCPAddServerViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F0C /* MCPAddServerViewModel.swift */; };
+		DA5C00000000000000000B0D /* MCPAddServerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F0D /* MCPAddServerView.swift */; };
+		DA5C00000000000000000B0E /* MCPAddServerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5C00000000000000000F0E /* MCPAddServerTests.swift */; };
 		DA5D00000000000000000B01 /* PluginModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F01 /* PluginModels.swift */; };
 		DA5D00000000000000000B02 /* PluginsViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F02 /* PluginsViewModel.swift */; };
 		DA5D00000000000000000B03 /* PluginCatalogViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA5D00000000000000000F03 /* PluginCatalogViewModel.swift */; };
@@ -1153,6 +1156,9 @@
 		DA5C00000000000000000F09 /* MCPDecodingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPDecodingTests.swift; sourceTree = "<group>"; };
 		DA5C00000000000000000F0A /* MCPServersViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPServersViewModelTests.swift; sourceTree = "<group>"; };
 		DA5C00000000000000000F0B /* MCPCatalogViewModelTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPCatalogViewModelTests.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F0C /* MCPAddServerViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPAddServerViewModel.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F0D /* MCPAddServerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPAddServerView.swift; sourceTree = "<group>"; };
+		DA5C00000000000000000F0E /* MCPAddServerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MCPAddServerTests.swift; sourceTree = "<group>"; };
 		DA5D00000000000000000F01 /* PluginModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginModels.swift; sourceTree = "<group>"; };
 		DA5D00000000000000000F02 /* PluginsViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginsViewModel.swift; sourceTree = "<group>"; };
 		DA5D00000000000000000F03 /* PluginCatalogViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PluginCatalogViewModel.swift; sourceTree = "<group>"; };
@@ -1372,6 +1378,7 @@
 				DA5C00000000000000000F09 /* MCPDecodingTests.swift */,
 				DA5C00000000000000000F0A /* MCPServersViewModelTests.swift */,
 				DA5C00000000000000000F0B /* MCPCatalogViewModelTests.swift */,
+				DA5C00000000000000000F0E /* MCPAddServerTests.swift */,
 				DA5D00000000000000000F09 /* PluginsDashboardClientTests.swift */,
 				DA5D00000000000000000F0A /* PluginsDecodingTests.swift */,
 				DA5D00000000000000000F0B /* PluginsViewModelTests.swift */,
@@ -2091,6 +2098,8 @@
 				DA5C00000000000000000F05 /* MCPServerDetailView.swift */,
 				DA5C00000000000000000F06 /* MCPCatalogView.swift */,
 				DA5C00000000000000000F07 /* MCPCatalogDetailView.swift */,
+				DA5C00000000000000000F0C /* MCPAddServerViewModel.swift */,
+				DA5C00000000000000000F0D /* MCPAddServerView.swift */,
 				DA5D00000000000000000F01 /* PluginModels.swift */,
 				DA5D00000000000000000F02 /* PluginsViewModel.swift */,
 				DA5D00000000000000000F03 /* PluginCatalogViewModel.swift */,
@@ -2704,6 +2713,8 @@
 				DA5C00000000000000000B05 /* MCPServerDetailView.swift in Sources */,
 				DA5C00000000000000000B06 /* MCPCatalogView.swift in Sources */,
 				DA5C00000000000000000B07 /* MCPCatalogDetailView.swift in Sources */,
+				DA5C00000000000000000B0C /* MCPAddServerViewModel.swift in Sources */,
+				DA5C00000000000000000B0D /* MCPAddServerView.swift in Sources */,
 				DA5D00000000000000000B01 /* PluginModels.swift in Sources */,
 				DA5D00000000000000000B02 /* PluginsViewModel.swift in Sources */,
 				DA5D00000000000000000B03 /* PluginCatalogViewModel.swift in Sources */,
@@ -2774,6 +2785,7 @@
 				DA5C00000000000000000B09 /* MCPDecodingTests.swift in Sources */,
 				DA5C00000000000000000B0A /* MCPServersViewModelTests.swift in Sources */,
 				DA5C00000000000000000B0B /* MCPCatalogViewModelTests.swift in Sources */,
+				DA5C00000000000000000B0E /* MCPAddServerTests.swift in Sources */,
 				DA5D00000000000000000B09 /* PluginsDashboardClientTests.swift in Sources */,
 				DA5D00000000000000000B0A /* PluginsDecodingTests.swift in Sources */,
 				DA5D00000000000000000B0B /* PluginsViewModelTests.swift in Sources */,

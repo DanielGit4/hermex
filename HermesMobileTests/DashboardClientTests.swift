@@ -172,6 +172,36 @@ import XCTest
                        .object([:]), "The profile is in the query, never in the body")
     }
 
+    func testA400Or409SaysWhyOnlyWhenTheCallReadsRefusals() async throws {
+        var reply = DashboardHTTPFixture.Reply.json(409, .object(["detail": .string("Server 'x' already exists")]))
+        DashboardHTTPFixture.handler = { request in request.url?.path == "/api/example" ? reply : nil }
+        let client = DashboardHTTPFixture.client()
+        let url = DashboardHTTPFixture.host.appendingPathComponent("api/example")
+
+        for status in [409, 400] {
+            reply = .json(status, .object(["detail": .string("Server 'x' already exists")]))
+            do {
+                _ = try await client.post(url, readsRefusal: true)
+                XCTFail("Expected a refusal")
+            } catch {
+                XCTAssertEqual(error as? DashboardFailure, .refused(.string("Server 'x' already exists")), "\(status)")
+            }
+            do {
+                _ = try await client.post(url)
+                XCTFail("Expected a refusal")
+            } catch {
+                XCTAssertEqual(error as? BotFailure, .rejected(status), "A call that doesn't opt in keeps the status")
+            }
+        }
+        reply = .json(422, .object(["detail": .array([.object(["msg": .string("field required")])])]))
+        do {
+            _ = try await client.post(url, readsRefusal: true)
+            XCTFail("Expected a validation error")
+        } catch {
+            XCTAssertEqual(error as? BotFailure, .rejected(422), "A validation list stays a plain status")
+        }
+    }
+
     func testANon2xxCarriesItsStatus() async throws {
         DashboardHTTPFixture.handler = { request in
             request.url?.path == "/api/skills/hub/preview" ? .json(404, .object(["detail": .string("Skill not found")])) : nil

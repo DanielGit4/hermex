@@ -48,6 +48,132 @@ struct MCPServer: Identifiable, Hashable {
     }
 }
 
+/// The add-server form (`POST /api/mcp/servers`), checked against the host's own rules
+/// (`_normalize_mcp_server_create`) before review. The bearer token and env values are
+/// secrets: only `body` carries them, and `clearSecrets()` empties them once it has.
+struct MCPServerDraft: Equatable {
+    enum Mode: Hashable { case url, command }
+    enum Auth: Hashable { case none, bearer, oauth }
+
+    /// One argument, sent exactly as typed: nothing is split on spaces.
+    struct Argument: Identifiable, Equatable {
+        let id = UUID()
+        var value = ""
+    }
+
+    struct EnvEntry: Identifiable, Equatable {
+        let id = UUID()
+        var name = ""
+        var value = ""
+    }
+
+    /// The first thing blocking review, in form order.
+    enum Problem: Equatable {
+        case nameRequired
+        /// Servers are addressed by path component, so this one couldn't be tested,
+        /// toggled or deleted from the phone.
+        case nameHasSlash
+        case urlInvalid
+        case tokenRequired
+        case commandRequired
+        case envNames
+
+        var message: String {
+            switch self {
+            case .nameRequired: return String(localized: "Enter a name for the server.")
+            case .nameHasSlash: return String(localized: "Hermex can’t test or remove a server whose name contains “/”. Choose another name.")
+            case .urlInvalid: return String(localized: "Enter a URL that starts with http:// or https://.")
+            case .tokenRequired: return String(localized: "Enter the bearer token.")
+            case .commandRequired: return String(localized: "Enter the command that starts the server.")
+            case .envNames: return String(localized: "Give each environment variable its own name of letters, digits and underscores, not starting with a digit.")
+            }
+        }
+    }
+
+    var mode = Mode.url
+    var name = ""
+    var url = ""
+    var auth = Auth.none
+    var bearerToken = ""
+    var command = ""
+    var args: [Argument] = []
+    var env: [EnvEntry] = []
+
+    var trimmedName: String { Self.trimmed(name) }
+
+    var problem: Problem? {
+        if trimmedName.isEmpty { return .nameRequired }
+        if trimmedName.contains("/") { return .nameHasSlash }
+        switch mode {
+        case .url:
+            guard let url = URL(string: Self.trimmed(url)), ["http", "https"].contains(url.scheme?.lowercased()),
+                  url.host?.isEmpty == false else { return .urlInvalid }
+            if auth == .bearer, Self.tokenIsMissing(bearerToken) { return .tokenRequired }
+        case .command:
+            if Self.trimmed(command).isEmpty { return .commandRequired }
+            let names = sentEnv.map(\.name)
+            if Set(names).count != names.count
+                || names.contains(where: { $0.range(of: "^[A-Za-z_][A-Za-z0-9_]*$", options: .regularExpression) == nil }) {
+                return .envNames
+            }
+        }
+        return nil
+    }
+
+    /// What asks for Face ID or the passcode before sending: a bearer token, or any env row.
+    var hasSecrets: Bool {
+        switch mode {
+        case .url: return auth == .bearer && !Self.trimmed(bearerToken).isEmpty
+        case .command: return !sentEnv.isEmpty
+        }
+    }
+
+    /// The request body: only the selected mode's fields, never a `profile` (the query names it).
+    var body: BotJSON {
+        var fields: [String: BotJSON] = ["name": .string(trimmedName)]
+        switch mode {
+        case .url:
+            fields["url"] = .string(Self.trimmed(url))
+            switch auth {
+            case .none:
+                fields["auth"] = .string("none")
+            case .bearer:
+                fields["auth"] = .string("header")
+                fields["bearer_token"] = .string(Self.trimmed(bearerToken))
+            case .oauth:
+                fields["auth"] = .string("oauth")
+            }
+        case .command:
+            fields["command"] = .string(Self.trimmed(command))
+            fields["args"] = .array(args.filter { !Self.trimmed($0.value).isEmpty }.map { BotJSON.string($0.value) })
+            fields["env"] = .object(Dictionary(sentEnv.map { ($0.name, BotJSON.string($0.value)) }) { _, last in last })
+        }
+        return .object(fields)
+    }
+
+    /// Empties the token and every env value; env names stay.
+    mutating func clearSecrets() {
+        bearerToken = ""
+        for index in env.indices { env[index].value = "" }
+    }
+
+    /// Env rows with any text, trimmed; fully blank rows are dropped.
+    private var sentEnv: [(name: String, value: String)] {
+        env.map { (Self.trimmed($0.name), Self.trimmed($0.value)) }.filter { !$0.0.isEmpty || !$0.1.isEmpty }
+    }
+
+    /// The host strips one leading `Bearer ` and refuses an empty token or the bare word.
+    private static func tokenIsMissing(_ token: String) -> Bool {
+        var value = trimmed(token)
+        if value.prefix(7).lowercased() == "bearer " { value = trimmed(String(value.dropFirst(7))) }
+        return value.isEmpty || value.lowercased() == "bearer"
+    }
+
+    private static func trimmed(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
 /// A server's raw `tools` config, which decides the tools new sessions register. The host
 /// writes `{include: [...]}` or `{exclude: [...]}` (names or globs, include winning), and
 /// older configs hold a plain list. Nothing here ever fails a row.
