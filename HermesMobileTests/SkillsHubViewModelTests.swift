@@ -328,18 +328,21 @@ import XCTest
         })
         await model.loadInstalled()
 
-        await model.uninstall("git-helper")
+        let cancelled = await model.uninstall("git-helper")
+        XCTAssertFalse(cancelled)
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/uninstall"), [], "Cancelling changes nothing")
         XCTAssertNil(model.operation)
         XCTAssertNil(model.authenticationProblem)
 
         outcome = .unavailable("Set a passcode")
-        await model.uninstall("git-helper")
+        let unavailable = await model.uninstall("git-helper")
+        XCTAssertFalse(unavailable)
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/uninstall"), [])
         XCTAssertEqual(model.authenticationProblem, "Set a passcode")
 
         outcome = .confirmed
-        await model.uninstall("git-helper")
+        let confirmed = await model.uninstall("git-helper")
+        XCTAssertTrue(confirmed, "Only a confirmed removal lets the skill's page close")
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/uninstall"),
                        ["POST \(host)/api/skills/hub/uninstall?profile=default"])
         XCTAssertEqual(DashboardHTTPFixture.body(of: "POST \(host)/api/skills/hub/uninstall?profile=default")["name"].text,
@@ -360,9 +363,38 @@ import XCTest
         let (model, _) = makeModel()
         await model.loadInstalled()
 
-        await model.uninstall("git-helper")
+        let removed = await model.uninstall("git-helper")
 
+        XCTAssertFalse(removed, "Exit 0 alone isn't a removal; the page stays open")
         XCTAssertEqual(model.operation?.phase, .failed(String(localized: "Hermes finished, but “git-helper” is still installed.")))
+    }
+
+    func testAFailedUninstallKeepsTheSkill() async {
+        DashboardHTTPFixture.actionExitCode = 2
+        let (model, _) = makeModel()
+        await model.loadInstalled()
+
+        let removed = await model.uninstall("git-helper")
+
+        XCTAssertFalse(removed)
+        XCTAssertEqual(model.operation?.phase, .failed(String(localized: "Hermes reported a failure (exit code 2).")))
+        XCTAssertTrue(model.installedSections.contains { $0.skills.contains { $0.name == "git-helper" } })
+    }
+
+    func testAnUninstallTheHostWouldNotStartIsAFailure() async {
+        DashboardHTTPFixture.handler = { request in
+            request.url?.path == "/api/skills/hub/uninstall"
+                ? .json(500, .object(["detail": .string("Failed to uninstall skill")])) : nil
+        }
+        let (model, _) = makeModel()
+        await model.loadInstalled()
+
+        let removed = await model.uninstall("git-helper")
+
+        XCTAssertFalse(removed)
+        guard case .failed(let message)? = model.operation?.phase else { return XCTFail("Expected a failure") }
+        XCTAssertTrue(message.contains("500"), message)
+        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/actions/"), [])
     }
 
     // MARK: - Update
@@ -400,6 +432,23 @@ import XCTest
         XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/update"), [],
                        "A second action is refused while the first runs")
         XCTAssertEqual(model.operation?.operation, .uninstall(name: "git-helper"))
+    }
+
+    func testASecondUninstallWhileOneRunsIsRefused() async {
+        DashboardHTTPFixture.pollsBeforeExit = 1
+        let (model, probe) = makeModel()
+        await model.loadInstalled()
+        var refused: [Bool] = []
+        // Confirming a second uninstall from another page while the first is still polling.
+        probe.onSleep = { refused.append(await model.uninstall("git-helper")) }
+
+        let first = await model.uninstall("git-helper")
+
+        XCTAssertEqual(refused, [false])
+        XCTAssertTrue(first, "The running uninstall still lands")
+        XCTAssertEqual(DashboardHTTPFixture.calls(matching: "/api/skills/hub/uninstall").count, 1)
+        let empty = await model.uninstall("")
+        XCTAssertFalse(empty)
     }
 
     // MARK: - Helpers
