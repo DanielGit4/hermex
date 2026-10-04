@@ -331,13 +331,23 @@ import XCTest
         let reader = BotRoomReader(key: BotRoomKey(server: server, connectionID: connection.id, roomID: room.id),
             connection: connection, room: room, cache: cache, makeWire: { _ in roomWire })
         await reader.open(); reader.close()
+        // The row's "room · sender" title is built from these two values. Assert them
+        // directly: OCR on the hosted CI simulator misreads that line ("chier-of-statt").
+        let hits = try await cache.search("Message 20", scope: .init(server: server, connectionID: connection.id),
+                                          profileIDs: nil, roomIDs: Set(inbox.rooms.map(\.id)))
+        let hit = try XCTUnwrap(hits.first)
+        XCTAssertEqual(inbox.roomForSearch(hit)?.name, "Comms")
+        XCTAssertEqual(hit.message.sender, "chief-of-staff")
         let window = try show(BotSearchView(inbox: inbox, cache: cache, query: "Message 20") { _ in }
             .environment(\.scenePhase, .active))
         defer { close(window) }
-        // The view debounces its query before reading the cache, so wait on the hit itself.
-        let after = try await screenshot(window, name: "528-after-opening-room", awaiting: ["Comms", "chief-of-staff"])
-        XCTAssertTrue(after.contains("Comms"), after)
-        XCTAssertTrue(after.contains("chief-of-staff"), after)
+        // The view debounces its query before reading the cache, so wait for the row itself:
+        // its trailing "Message" kind label draws below the section header only with a room hit.
+        let header = "Messages saved on this iPhone"
+        let after = try await screenshot(window, name: "528-after-opening-room") {
+            $0.components(separatedBy: header).dropFirst().joined().contains("Message")
+        }
+        XCTAssertTrue(after.components(separatedBy: header).dropFirst().joined().contains("Message"), after)
         XCTAssertFalse(after.contains("No saved messages found"), after)
     }
 
@@ -1650,11 +1660,17 @@ import XCTest
     /// pace, so this waits on the content under test instead of a pass count.
     private func screenshot(_ window: UIWindow, name: String,
                             awaiting expected: [String]) async throws -> String {
+        try await screenshot(window, name: name) { text in expected.allSatisfy(text.contains) }
+    }
+
+    /// OCR reads of `window`, settling between passes until `done` accepts one
+    /// or the bounded passes run out; returns the last read.
+    private func screenshot(_ window: UIWindow, name: String, until done: (String) -> Bool) async throws -> String {
         var text = ""
         for _ in 0..<8 {
             await settle(window)
             text = try screenshot(window, name: name)
-            if expected.allSatisfy(text.contains) { break }
+            if done(text) { break }
         }
         return text
     }
